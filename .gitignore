@@ -1,0 +1,47 @@
+# ---- Rust ----
+/target/
+**/target/
+**/*.rs.bk
+*.pdb
+# NOTE: Cargo.lock IS committed for this workspace (it ships a binary, the viewer).
+#       Do not add Cargo.lock here.
+
+# ---- Python (pyref/ offline oracle pipeline) ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ---- Ephemeris / SPICE kernels & large data (fetched, never committed) ----
+# DE440/DE441, sb441-n16.bsp, leap-second & frame kernels, etc.
+*.bsp
+*.bpc
+*.pck
+*.tpc
+*.tpc.txt
+*.tls
+*.tf
+*.ti
+*.pca
+/data/
+/kernels/
+# NOTE: generated validation fixtures (pyref/ output, *.json) ARE committed —
+#       they are the reference column the Rust test suite asserts against.
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.idea/
+.vscode/
+*.code-workspace

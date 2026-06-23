@@ -1,0 +1,10 @@
+Asteroid Deflection Simulator
+Copyright 2026 Boyko Neov
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This project builds its own astrodynamics. At runtime it links only
+permissively/MPL-licensed Rust crates (hifitime, ANISE — MPL-2.0;
+nalgebra — Apache-2.0/MIT). Copyleft reference tools (REBOUND, ASSIST,
+GRSS, nyx) are used exclusively offline to generate validation fixtures
+and are never linked into or distributed with this software.

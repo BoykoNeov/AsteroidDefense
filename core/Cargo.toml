@@ -13,3 +13,6 @@ repository.workspace = true
 anise = { version = "0.10.3", default-features = false }
 hifitime = "4.3.0"
 nalgebra = "0.35.0"
+
+[dev-dependencies]
+proptest = "1.11.0"

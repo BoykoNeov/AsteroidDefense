@@ -26,11 +26,36 @@ shipped binary; consuming those permissive/MPL crates stays compatible under
 BNCL. GPL/AGPL oracles (REBOUND, ASSIST, GRSS, nyx) stay offline in
 `pyref/` — never in any Cargo.toml.
 
-**Current phase (as of 2026-07-01):** §10 task 2 (the task-0.5 de-risk spike)
-**DONE — both pillars PASS, Option A confirmed, fallback trigger NOT fired.**
-(Task 1 before it: Cargo workspace scaffolded — `core/` lib = `asteroid_core`,
-renamed to dodge the std `core` shadow; `viewer/` egui bin; `validation/` lib;
-`pyref/` non-member Python dir; core dep tree still zero egui/eframe/wgpu.)
+**Current phase (as of 2026-07-01):** §10 task 3 **DONE** — the core physics
+types + element↔state map. §10 task 2 (task-0.5 de-risk spike) before it:
+**both pillars PASS, Option A confirmed, fallback trigger NOT fired.** Task 1:
+Cargo workspace scaffolded — `core/` lib = `asteroid_core`, renamed to dodge the
+std `core` shadow; `viewer/` egui bin; `validation/` lib; `pyref/` non-member
+Python dir; core dep tree still zero egui/eframe/wgpu.
+
+**Task 3 (§10.3) delivered** in `core/src/`: `epoch.rs` (`Epoch` newtype over
+`hifitime::Epoch`, pins dynamics to **TDB**, seconds-past-J2000 handle for the
+integrator), `state.rs` (`StateVector` = position+velocity `nalgebra::Vector3`,
+**SI m / m·s⁻¹**, barycentric ICRF), `elements.rs` (`OrbitalElements` classical
+Keplerian, **elliptical only** 0≤e<1; `to_state(μ)`/`from_state(μ)` pure geometry,
+no Kepler solve — that's task 4; `ElementsError::{NonElliptical,Degenerate}`).
+**Units decision:** core canonical = **SI (m, m/s)**; the km→m conversion lives
+at the ANISE loader boundary (confirmed `anise::math::Vector3` *is*
+`nalgebra::Vector3<f64>` — anise 0.10.3 pulls the same nalgebra 0.35, so the
+boundary is a clean scalar multiply). **Singularity conventions in `from_state`**
+(ω undefined at e→0, Ω at i→0/π): circular→ω=0, ν=arg-of-latitude;
+equatorial→Ω=0, ω=longitude-of-periapsis (sign-flipped when retrograde h_z<0);
+both→ν=true-longitude. **Tested** via `proptest` 1.11.0 (dev-dep, 2048 cases) in
+`core/tests/element_state_roundtrip.rs`: the property is a **STATE** round-trip
+(`S1=to_state(E); S2=to_state(from_state(S1)); S1≈S2`, **relative** tol 1e-7) —
+NOT an element round-trip, because ω/Ω are gauge (undefined) exactly at the
+seeded singularities; a/e/i (gauge-free) are checked directly. Strategies
+**union explicit degenerate literals** (e∈{0,1e-15,…}, i∈{0,π,…}) with random
+ranges + deterministic `#[test]`s for the combined corners (a random draw won't
+hit e=0∧i=0 simultaneously). Bug found+fixed during dev: retrograde-equatorial
+(i=π) needed the in-plane angle sign flipped; seed saved in
+`*.proptest-regressions` (committed). Advisor steered the state-vs-element
+framing + relative-tol + i→π seeding.
 
 Pillar B (pure Rust, the shipped path): `core/src/ephemeris.rs` is now a **real
 ANISE loader** (`Ephemeris` over `Almanac`, SSB-relative km positions), no longer
@@ -56,6 +81,9 @@ allowed "DE440 or DE441"). Results + the written fallback-to-Option-B trigger
 live in `pyref/SPIKE.md`. Kernels/data (~750 MB) live under
 `M:\claud_projects\temp\AsteroidDefense\kernels`, git-ignored.
 
-**Next concrete step = §10 task 3:** `Epoch`/`StateVector`/`OrbitalElements` +
-element↔state conversions with proptest targeting the e→0, i→0 singularities.
-See [[git-workflow]] for the commit/push cadence.
+**Next concrete step = §10 task 4:** the analytic Kepler propagator behind a
+`Propagator` trait (solve Kepler's equation for M↔E↔ν; this is where the
+mean/eccentric-anomaly machinery deferred from task 3 lands). Then §10.5 wires
+the free-invariant property tests (energy/L/LRL/reversibility) with per-propagator
+expectations — analytic → machine precision. See [[git-workflow]] for the
+commit/push cadence.

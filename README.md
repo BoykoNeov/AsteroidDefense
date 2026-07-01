@@ -141,6 +141,8 @@ known hard problems, and the task-by-task plan.
 
 ## License
 
-Licensed under the **Apache License, Version 2.0** — see [`LICENSE`](LICENSE) and
-[`NOTICE`](NOTICE). Unless you state otherwise, any contribution you submit is
-licensed under the same terms.
+Licensed under the **Boyko Non-Commercial License v1.0 (BNCL-1.0)** — see
+[`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+
+Free to use, modify, and distribute for **non-commercial purposes**. Commercial
+use requires separate written permission from the copyright holder.

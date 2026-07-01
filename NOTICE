@@ -1,7 +1,16 @@
 Asteroid Deflection Simulator
-Copyright 2026 Boyko Neov
+Copyright (c) 2026 Boyko Neov
 
-Licensed under the Apache License, Version 2.0 (see LICENSE).
+This software was originally created by Boyko Neov.
+
+This product is licensed under the Boyko Non-Commercial License
+Version 1.0 (BNCL-1.0). Redistributions of this software and
+derivative works must retain this NOTICE file and the LICENSE file.
+
+Commercial use is prohibited unless separately licensed by
+the copyright holder.
+
+---
 
 This project builds its own astrodynamics. At runtime it links only
 permissively/MPL-licensed Rust crates (hifitime, ANISE — MPL-2.0;

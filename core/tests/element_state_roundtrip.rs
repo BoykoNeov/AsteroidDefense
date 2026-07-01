@@ -146,6 +146,51 @@ fn from_state_rejects_degenerate() {
     );
 }
 
+// --- Known-answer anchors: pin the absolute μ-coupling, units, and scale -----
+// The state round-trip above is self-referential in μ — the same value flows
+// into to_state and from_state, so a shared units slip (m³/s² vs km³/s²) or a
+// wrong μ-coupling would cancel and stay green. These absolute checks anchor it.
+
+#[test]
+fn circular_equatorial_has_textbook_state() {
+    // e=0, i=0, Ω=0, ω=0, ν=0 → r = (a, 0, 0),  v = (0, √(μ/a), 0).
+    let a = 1.5e11;
+    let v_circ = (MU_SUN / a).sqrt();
+    let s = OrbitalElements::new(a, 0.0, 0.0, 0.0, 0.0, 0.0).to_state(MU_SUN);
+    assert!(
+        (s.position.x - a).abs() / a < 1e-12,
+        "pos = {:?}",
+        s.position
+    );
+    assert!(s.position.y.abs() / a < 1e-12 && s.position.z.abs() / a < 1e-12);
+    assert!(
+        (s.velocity.y - v_circ).abs() / v_circ < 1e-12,
+        "vel = {:?}",
+        s.velocity
+    );
+    assert!(s.velocity.x.abs() / v_circ < 1e-12 && s.velocity.z.abs() / v_circ < 1e-12);
+}
+
+#[test]
+fn polar_orbit_anchors_rx_sign() {
+    // i=π/2, Ω=0, ω=0, ν=0 (circular): Rx(π/2) sends the in-plane +y velocity to
+    // +z, so v = (0, 0, +√(μ/a)). Pins the Rx sign in absolute terms.
+    let a = 1.5e11;
+    let v_circ = (MU_SUN / a).sqrt();
+    let s = OrbitalElements::new(a, 0.0, PI / 2.0, 0.0, 0.0, 0.0).to_state(MU_SUN);
+    assert!(
+        (s.position.x - a).abs() / a < 1e-12,
+        "pos = {:?}",
+        s.position
+    );
+    assert!(
+        (s.velocity.z - v_circ).abs() / v_circ < 1e-12,
+        "vel = {:?}",
+        s.velocity
+    );
+    assert!(s.velocity.x.abs() / v_circ < 1e-12 && s.velocity.y.abs() / v_circ < 1e-12);
+}
+
 // --- Property tests: unioned degenerate literals + random ranges -------------
 
 /// Eccentricity: explicit near-circular literals unioned with a broad range.

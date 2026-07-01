@@ -7,6 +7,9 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-anise = "0.10.3"
+# default-features off drops anise's `metaload` (network auto-download via ureq)
+# and `analysis` extras — the core loads DE kernels from a local path only, the
+# §10 offline invariant. Re-add features here if a later task needs them.
+anise = { version = "0.10.3", default-features = false }
 hifitime = "4.3.0"
 nalgebra = "0.35.0"

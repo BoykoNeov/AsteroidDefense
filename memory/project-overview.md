@@ -26,16 +26,36 @@ shipped binary; consuming those permissive/MPL crates stays compatible under
 BNCL. GPL/AGPL oracles (REBOUND, ASSIST, GRSS, nyx) stay offline in
 `pyref/` — never in any Cargo.toml.
 
-**Current phase (as of 2026-07-01):** §10 task 1 DONE — Cargo workspace
-scaffolded (`core/` lib = `asteroid_core`, package renamed to dodge the std
-`core` shadowing trap; `viewer/` egui bin; `validation/` lib; `pyref/` stays a
-non-member Python dir). `resolver = "2"`, edition 2021, `cargo build` green,
-`core`'s dep tree has zero egui/eframe/wgpu (the §10 no-UI-in-core invariant,
-enforced from day one). ANISE loader is an intentional path-taking **stub** in
-`core/src/ephemeris.rs` — real DE-position/geocenter wiring is task 2. Deps:
-anise 0.10.3, hifitime 4.3.0, nalgebra 0.35.0 (anise pulled network features
-by default — trim to `default-features=false` when task 2 reveals the loader's
-real needs). **Next concrete step = §10 task 2**, the task-0.5 de-risk spike:
-confirm ASSIST+DE441 builds offline and the ANISE DE-position reader returns a
-real reconstructed geocenter (not the EMB), with the written
-fallback-to-Option-B trigger. See [[git-workflow]] for the commit/push cadence.
+**Current phase (as of 2026-07-01):** §10 task 2 (the task-0.5 de-risk spike)
+**DONE — both pillars PASS, Option A confirmed, fallback trigger NOT fired.**
+(Task 1 before it: Cargo workspace scaffolded — `core/` lib = `asteroid_core`,
+renamed to dodge the std `core` shadow; `viewer/` egui bin; `validation/` lib;
+`pyref/` non-member Python dir; core dep tree still zero egui/eframe/wgpu.)
+
+Pillar B (pure Rust, the shipped path): `core/src/ephemeris.rs` is now a **real
+ANISE loader** (`Ephemeris` over `Almanac`, SSB-relative km positions), no longer
+a stub. Proven via `cargo run -p asteroid_core --example spike_geocenter` +
+gated test `geocenter_is_reconstructed_not_emb` (runs iff `ASTEROID_DE_KERNEL`
+is set, else skips green). At 4 epochs the reconstructed **geocenter (399) ≠ EMB
+(3)** by 4351–4908 km (tracks the real Earth–Moon distance; offset =
+d/(EMRAT+1)), and an EMB independently rebuilt from Earth+Moon via EMRAT matches
+ANISE's EMB to **0.000000 km** — proof it's the true geocenter, not a relabelled
+EMB (the §5 ~4671 km footgun is provably avoided). `anise` trimmed to
+`default-features = false` → drops `ureq`/network (the §10 offline invariant),
+tree verified clean. Deps: anise 0.10.3, hifitime 4.3.0, nalgebra 0.35.0.
+
+Pillar A (offline GPL oracle, `pyref/`): ASSIST 1.2.3 + rebound 4.6.0 build and
+integrate a test particle in the DE field, round-trip reversible to 4.7e-4 m.
+**Operational facts discovered:** (1) `assist` ships **no wheel** — compiles
+from source, needs `gcc` + REBOUND headers; native Windows can't build it and
+this box's WSL Ubuntu lacks pip/venv + passwordless sudo, so the oracle host is
+**Docker `python:3.12-slim` + gcc** (see `pyref/Dockerfile`). (2) ASSIST's
+shipped ephemeris = **DE440 planetary (`linux_p1550p2650.440`) + DE441-derived
+`sb441-n16.bsp`** (the full DE441 planetary is ~2.6 GB, identical reader; task 1
+allowed "DE440 or DE441"). Results + the written fallback-to-Option-B trigger
+live in `pyref/SPIKE.md`. Kernels/data (~750 MB) live under
+`M:\claud_projects\temp\AsteroidDefense\kernels`, git-ignored.
+
+**Next concrete step = §10 task 3:** `Epoch`/`StateVector`/`OrbitalElements` +
+element↔state conversions with proptest targeting the e→0, i→0 singularities.
+See [[git-workflow]] for the commit/push cadence.

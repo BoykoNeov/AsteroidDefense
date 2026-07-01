@@ -2,74 +2,235 @@
 //!
 //! The Tier-1 MVP integrates the asteroid as a *test particle* in the DE440/441
 //! ephemeris field, so the core needs perturber **positions** (not just GM
-//! constants) from day one. This module is where a local SPICE/DE kernel is
-//! loaded via ANISE.
+//! constants) from day one. This module loads a local SPICE/DE kernel via ANISE
+//! and hands back SSB-relative positions in the barycentric ICRF frame.
 //!
-//! **Scaffold status (HANDOFF §10 task 1):** this is an intentional stub. The
-//! task-0.5 de-risk spike (§10 task 2) is what proves the real ANISE
-//! DE-position reader returns a sane reconstructed **geocenter** (not the EMB)
-//! for a known epoch. Do not encode an assumed ANISE API shape here before that
-//! spike runs — kernels are loaded from a local path only (offline, no
-//! network auto-download), so the loader takes an explicit path.
+//! **The DE440/441 geocenter footgun (HANDOFF §5).** A JPL DE kernel natively
+//! stores the Earth–Moon *barycenter* (EMB, NAIF id 3) as an SSB-relative
+//! segment, plus separate EMB→Earth (399) and EMB→Moon (301) segments. Using
+//! the EMB as "Earth's position" displaces Earth by ~4671 km — an
+//! Earth-radius-scale error that corrupts the b-plane. ANISE reconstructs the
+//! true geocenter by walking SSB→EMB→Earth; [`Ephemeris::geocenter_ssb_km`]
+//! returns that reconstructed geocenter, **not** the EMB. The task-0.5 de-risk
+//! spike ([`verify_geocenter_reconstruction`]) proves this empirically.
+
+use anise::constants::frames::{
+    EARTH_J2000, EARTH_MOON_BARYCENTER_J2000, MOON_J2000, SSB_J2000, SUN_J2000,
+};
+use anise::math::Vector3;
+use anise::prelude::{Almanac, Epoch, Frame};
 
 use std::path::{Path, PathBuf};
 
-/// Errors that can arise while loading an ephemeris kernel.
+/// DE440/DE441 Earth-to-Moon mass ratio (EMRAT), i.e. `M_earth / M_moon`.
+///
+/// Used only by the de-risk spike to *independently* reconstruct the EMB from
+/// the separate Earth and Moon geocenters and confirm ANISE's Earth segment is
+/// the genuine geocenter. Value from the DE440/441 header constants.
+pub const DE440_EMRAT: f64 = 81.300_568_221_497_215_4;
+
+/// Errors that can arise while loading or querying an ephemeris kernel.
 #[derive(Debug)]
 pub enum EphemerisError {
     /// The requested kernel path does not exist on disk.
     NotFound(PathBuf),
-    /// The loader is not implemented yet (filled in by the task-0.5 spike).
-    NotImplemented,
+    /// ANISE failed to load or parse the kernel.
+    Load(String),
+    /// ANISE failed to translate between two frames at the requested epoch.
+    Translate(String),
 }
 
 impl std::fmt::Display for EphemerisError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EphemerisError::NotFound(p) => write!(f, "ephemeris kernel not found: {}", p.display()),
-            EphemerisError::NotImplemented => {
-                write!(f, "ephemeris loader not implemented (see HANDOFF §10 task 0.5)")
+            EphemerisError::NotFound(p) => {
+                write!(f, "ephemeris kernel not found: {}", p.display())
             }
+            EphemerisError::Load(e) => write!(f, "ephemeris load failed: {e}"),
+            EphemerisError::Translate(e) => write!(f, "ephemeris translate failed: {e}"),
         }
     }
 }
 
 impl std::error::Error for EphemerisError {}
 
-/// Handle to a loaded ephemeris. Wraps the ANISE almanac once the task-0.5
-/// spike wires it in; for now it only remembers which kernel it was asked for.
-#[derive(Debug)]
+/// Handle to a loaded ephemeris, wrapping an ANISE [`Almanac`].
+///
+/// All accessors return positions in **kilometres**, expressed in the
+/// SSB-centered ICRF (J2000) frame — the barycentric integration frame the core
+/// works in (HANDOFF §5). Callers convert to SI metres at the core boundary.
 pub struct Ephemeris {
+    almanac: Almanac,
     kernel_path: PathBuf,
 }
 
 impl Ephemeris {
-    /// Load a DE kernel from a local path. Validates the path exists so callers
-    /// fail loudly and offline; the actual ANISE almanac load + geocenter
-    /// reconstruction is wired in by the task-0.5 de-risk spike.
+    /// Load a DE kernel (e.g. `de440s.bsp`) from a local path. Offline only —
+    /// ANISE reads the bytes from disk; nothing is auto-downloaded. Validates
+    /// the path exists first so callers fail loudly rather than inside ANISE.
     pub fn load(kernel_path: impl AsRef<Path>) -> Result<Self, EphemerisError> {
         let kernel_path = kernel_path.as_ref().to_path_buf();
         if !kernel_path.exists() {
             return Err(EphemerisError::NotFound(kernel_path));
         }
-        // TODO(task-0.5): construct the ANISE almanac from `kernel_path`,
-        // confirm it reconstructs a geocenter (not the EMB) for a known epoch.
-        Err(EphemerisError::NotImplemented)
+        let path_str = kernel_path.to_string_lossy();
+        let almanac = Almanac::new(&path_str).map_err(|e| EphemerisError::Load(e.to_string()))?;
+        Ok(Self {
+            almanac,
+            kernel_path,
+        })
     }
 
     /// Path of the kernel this handle was created for.
     pub fn kernel_path(&self) -> &Path {
         &self.kernel_path
     }
+
+    /// Position of `target` relative to `observer` at `epoch`, in km, ICRF.
+    ///
+    /// Geometric (no aberration correction) — the integration wants true
+    /// geometric positions, not light-time/stellar-aberration-corrected ones.
+    pub fn position_km(
+        &self,
+        target: Frame,
+        observer: Frame,
+        epoch: Epoch,
+    ) -> Result<Vector3, EphemerisError> {
+        let state = self
+            .almanac
+            .translate(target, observer, epoch, None)
+            .map_err(|e| EphemerisError::Translate(e.to_string()))?;
+        Ok(state.radius_km)
+    }
+
+    /// SSB→**geocenter** (reconstructed Earth, NAIF 399), km. NOT the EMB.
+    pub fn geocenter_ssb_km(&self, epoch: Epoch) -> Result<Vector3, EphemerisError> {
+        self.position_km(EARTH_J2000, SSB_J2000, epoch)
+    }
+
+    /// SSB→Earth–Moon barycenter (NAIF 3), km. Provided so callers can compare
+    /// against the geocenter; do NOT use this as Earth's position (footgun).
+    pub fn emb_ssb_km(&self, epoch: Epoch) -> Result<Vector3, EphemerisError> {
+        self.position_km(EARTH_MOON_BARYCENTER_J2000, SSB_J2000, epoch)
+    }
+
+    /// SSB→Moon (NAIF 301), km. The Moon is carried as a separate perturber
+    /// through the encounter (HANDOFF §5), never lumped into the EMB.
+    pub fn moon_ssb_km(&self, epoch: Epoch) -> Result<Vector3, EphemerisError> {
+        self.position_km(MOON_J2000, SSB_J2000, epoch)
+    }
+
+    /// SSB→Sun (NAIF 10), km.
+    pub fn sun_ssb_km(&self, epoch: Epoch) -> Result<Vector3, EphemerisError> {
+        self.position_km(SUN_J2000, SSB_J2000, epoch)
+    }
+}
+
+/// Outcome of the task-0.5 geocenter-reconstruction spike at one epoch.
+#[derive(Debug, Clone)]
+pub struct GeocenterCheck {
+    /// The epoch the check was run at.
+    pub epoch: Epoch,
+    /// Reconstructed geocenter (Earth 399) relative to SSB, km.
+    pub geocenter_ssb_km: Vector3,
+    /// EMB (3) relative to SSB, km.
+    pub emb_ssb_km: Vector3,
+    /// Moon (301) relative to SSB, km.
+    pub moon_ssb_km: Vector3,
+    /// Distance between the reconstructed geocenter and the EMB, km. Expected
+    /// ~4671 km; a value near 0 means ANISE handed back the EMB (footgun hit).
+    pub geocenter_emb_offset_km: f64,
+    /// Earth–Moon distance, km (sanity: ~356k–406k km).
+    pub earth_moon_distance_km: f64,
+    /// Residual between ANISE's EMB and an EMB independently reconstructed from
+    /// the Earth and Moon geocenters via [`DE440_EMRAT`], km. Near 0 (< 1 km)
+    /// proves ANISE's Earth segment is the true geocenter, self-consistent with
+    /// the EMB and Moon — not a relabelled EMB.
+    pub emrat_residual_km: f64,
+}
+
+impl GeocenterCheck {
+    /// Whether this check passes the spike's acceptance criteria:
+    /// geocenter distinct from the EMB by a plausible ~4671 km, a physical
+    /// Earth–Moon distance, and EMRAT self-consistency to sub-km.
+    pub fn passes(&self) -> bool {
+        // Earth–Moon distance band brackets the true perigee/apogee range
+        // (~356 500–406 700 km) with a small margin so a change of test epoch
+        // can't clip it; the offset band is that distance / (EMRAT+1).
+        (4200.0..=5000.0).contains(&self.geocenter_emb_offset_km)
+            && (355_000.0..=407_500.0).contains(&self.earth_moon_distance_km)
+            && self.emrat_residual_km < 1.0
+    }
+}
+
+/// Task-0.5 de-risk spike (pillar b): confirm the ANISE DE-position reader
+/// returns a **reconstructed geocenter**, not the EMB, at a known epoch.
+///
+/// Computes the geocenter, EMB, and Moon positions from `eph`, then checks:
+/// 1. geocenter ≠ EMB, offset ~4671 km (the footgun-avoidance signal);
+/// 2. Earth–Moon distance is physical;
+/// 3. an EMB *independently* reconstructed from Earth+Moon via [`DE440_EMRAT`]
+///    matches ANISE's EMB to sub-km — proving self-consistency.
+pub fn verify_geocenter_reconstruction(
+    eph: &Ephemeris,
+    epoch: Epoch,
+) -> Result<GeocenterCheck, EphemerisError> {
+    let geocenter = eph.geocenter_ssb_km(epoch)?;
+    let emb = eph.emb_ssb_km(epoch)?;
+    let moon = eph.moon_ssb_km(epoch)?;
+
+    // Independently reconstruct the EMB: EMB = (EMRAT*r_earth + r_moon)/(EMRAT+1).
+    let emb_from_bodies = (geocenter * DE440_EMRAT + moon) / (DE440_EMRAT + 1.0);
+
+    Ok(GeocenterCheck {
+        epoch,
+        geocenter_ssb_km: geocenter,
+        emb_ssb_km: emb,
+        moon_ssb_km: moon,
+        geocenter_emb_offset_km: (geocenter - emb).norm(),
+        earth_moon_distance_km: (moon - geocenter).norm(),
+        emrat_residual_km: (emb - emb_from_bodies).norm(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anise::time::TimeScale;
 
     #[test]
     fn missing_kernel_reports_not_found() {
-        let err = Ephemeris::load("does/not/exist/de440.bsp").unwrap_err();
-        assert!(matches!(err, EphemerisError::NotFound(_)));
+        // Not `.unwrap_err()`: the Ok variant (Ephemeris) wraps a non-Debug
+        // ANISE Almanac, so match on the error directly instead.
+        match Ephemeris::load("does/not/exist/de440.bsp") {
+            Err(EphemerisError::NotFound(_)) => {}
+            Err(e) => panic!("expected NotFound, got {e}"),
+            Ok(_) => panic!("expected NotFound error, got Ok"),
+        }
+    }
+
+    /// Task-0.5 spike, gated on a real DE kernel. Set `ASTEROID_DE_KERNEL` to a
+    /// local `de440s.bsp` (or DE440/441) to run it; the test skips (passes)
+    /// when the env var is unset so the suite stays green offline in CI.
+    #[test]
+    fn geocenter_is_reconstructed_not_emb() {
+        let Ok(kernel) = std::env::var("ASTEROID_DE_KERNEL") else {
+            eprintln!("ASTEROID_DE_KERNEL unset — skipping geocenter spike test");
+            return;
+        };
+        let eph = Ephemeris::load(&kernel).expect("load kernel");
+        // A known epoch well inside the de440s span (1849–2150).
+        let epoch = Epoch::from_gregorian(2020, 1, 1, 0, 0, 0, 0, TimeScale::TDB);
+        let check = verify_geocenter_reconstruction(&eph, epoch).expect("geocenter check");
+
+        assert!(
+            check.geocenter_emb_offset_km > 1.0,
+            "geocenter equals the EMB (offset {:.3} km) — footgun hit",
+            check.geocenter_emb_offset_km
+        );
+        assert!(
+            check.passes(),
+            "geocenter check failed acceptance: {check:#?}"
+        );
     }
 }

@@ -1,0 +1,5 @@
+# Offline reference-oracle deps (pyref/ only — GPL/AGPL, never linked/shipped).
+# Install into a Linux/WSL venv; native Windows is unsupported by rebound/assist.
+numpy
+rebound
+assist

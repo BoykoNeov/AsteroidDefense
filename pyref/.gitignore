@@ -1,0 +1,10 @@
+# Never commit oracle binaries, ephemeris kernels, venvs, or caches.
+.venv/
+venv/
+__pycache__/
+*.pyc
+# Ephemeris / small-body data files (large, regenerable by download)
+*.bsp
+*.440
+*.441
+data/

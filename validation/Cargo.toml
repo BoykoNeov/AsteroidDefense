@@ -13,3 +13,6 @@ serde_json = "1.0.150"
 
 [dev-dependencies]
 proptest = "1.11.0"
+# Vector3 algebra (cross/dot/norm) for the free-invariant helpers in
+# tests/free_invariants.rs. Pinned to the same version the core uses.
+nalgebra = "0.35.0"

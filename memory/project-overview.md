@@ -26,7 +26,12 @@ shipped binary; consuming those permissive/MPL crates stays compatible under
 BNCL. GPL/AGPL oracles (REBOUND, ASSIST, GRSS, nyx) stay offline in
 `pyref/` — never in any Cargo.toml.
 
-**Current phase (as of 2026-07-01):** §10 task 5 **DONE** — the free-invariant
+**Current phase (as of 2026-07-02):** §10 task 7 **batch 2a DONE** (dop853
+adaptive integrator — see below) on top of **batch 1 DONE** (RK4-first slice).
+§10 task 6 **DONE** before it: the hapsira two-body JSON
+reference fixture + rung-2 oracle test (`validation/tests/kepler_reference.rs`,
+`validation/fixtures/kepler_two_body.json`, `pyref/generate_kepler_fixture.py`).
+§10 task 5 before that: the free-invariant
 `proptest` harness (see below). §10 task 4 before it: the analytic Kepler
 propagator behind the `Propagator` trait. §10 task 3 before that:
 the core physics types + element↔state map. §10 task 2 (task-0.5 de-risk spike):
@@ -133,29 +138,89 @@ NOT built — no such propagator exists yet. Advisor steered non-vacuity, the
 e→0 absolute-tolerance for LRL, the split conservation/reversibility tolerances,
 and keeping the primitives as test helpers (not core API).
 
-**Task 6 (§10.6) delivered** — first `pyref/` reference fixture + rung-2 oracle
-test. `pyref/generate_kepler_fixture.py` (Docker `python:3.12-slim`, deps in
-`requirements-hapsira.txt` = hapsira 0.18.0 + astropy<7 (matrix_product removed
-in 7.0) + numpy 1.26.4) propagates 2 generic inclined orbits (e=0.4, e=0.7) via
-hapsira's analytic two-body, writing `validation/fixtures/kepler_two_body.json`
-(16 samples: 0, ⅛, ¼, ½, ¾, 1, **12.7** (μ-pin discriminator), −¼ period). The
-fixture **is committed** (`.gitignore` keeps `*.json`, drops `.pca`/`.bsp`).
-`validation/tests/kepler_reference.rs` loads it (`include_str!`) and checks
-`KeplerPropagator`: **seed (dt=0) 1e-13, propagated 1e-12** tols (observed 3e-16
-/ 2.8e-13 — machine precision, since both sides are analytic). **μ pinned to
-ANISE's Sun GM** = `1.32712440041939370e20` m³/s² (NOT hapsira's IAU-nominal
-`Sun.k`, ~3e-10 rel different; NOT core tests' `MU_SUN`): baked into the
-generator (custom hapsira `Body(k=…)`, self-asserted via period), re-derived in
-Rust via new `Ephemeris::{with_constants,gm_km3_s2,sun_gm_m3_s2}` +
-`KM3_S2_TO_M3_S2`, cross-checked by gated test `sun_gm_matches_fixture`
-(`ASTEROID_PLANETARY_CONSTANTS` → `pck11.pca` from
-`public-data.nyxspace.com/anise/v0.10/`; skips green offline like the DE-kernel
-test). Provenance step: `core/examples/probe_sun_gm.rs`. Frame pin = shared
-3-1-3 element→Cartesian (dt=0 sample isolates it); time pin = elapsed seconds
-(no absolute epoch). Advisor steered: dt=0-first, generator self-assert of μ,
-probe-don't-hardcode, separate hapsira deps, measure-then-tighten tols.
+**Task 7 (§10.7) — batch 1 (RK4-first) delivered.** Task 7 is the biggest task
+and is being done in batches; batch 1 stands up the composable force model +
+swappable integrator + RK4, deferring **dop853, the ANISE-field Tier-1 model,
+and ASSIST validation to later batches** (advisor-confirmed scoping). New in
+`core/src/`: **`forces/mod.rs`** — `ForceModel` trait (`acceleration(&self,
+Epoch, &StateVector) -> Result<Vector3, ForceError>`; fallible for ANISE later,
+takes full state for 1PN/SRP/Yarkovsky later, returns *acceleration* since the
+test-particle mass cancels) + `CompositeForce` (Σ of `Box<dyn ForceModel>`
+terms; tiers = which terms are enabled, toggle = Vec membership; empty = free
+particle; short-circuits fail-loud on first term error). `ForceError::{Singularity,
+Ephemeris}`. **`forces/point_mass.rs`** — `PointMassGravity` over an arbitrary
+`Vec<Perturber>` (`Σ μ_j (r_j−r)/|r_j−r|³`); perturber positions come through a
+**dedicated frame-explicit `PerturberEphemeris` trait** (barycentric-ICRF SI),
+**NOT** `Propagator` (whose contract is attractor-relative — conflating them is
+the §5 frame footgun; advisor adjustment). `FixedPerturber` (constant, for tests
++ a fixed attractor) now; ANISE `Ephemeris` adapter later. `(μ, eph).into()`
+ergonomic ctor. `|r_j−r|==0`/non-finite → fail-loud `Singularity` (real close
+approaches stay finite by design). **`integrator.rs`** — object-safe `Integrator`
+trait (`step(force, epoch, state, dt)`, dt may be negative) + classical fixed-step
+**`Rk4`** (four stages at t, t+h/2, t+h/2, t+h — epoch threading is load-bearing
+for moving perturbers) + `propagate_fixed` helper. `IntegratorError::Force`
+wraps `ForceError`.
 
-**Next concrete step = §10 task 7:** the composable `ForceModel` (Σ toggleable
-terms; `point_mass.rs` over a perturber list) + integrators behind `Integrator`
-(RK4 first for the invariant tests, then dop853), barycentric ICRF, validated
-against ASSIST. See [[git-workflow]] for the commit/push cadence.
+**The crux (advisor-steered): RK4 "exercises the invariant tests" via a NEW
+assertion shape, NOT a loosened `assert_conserves`.** `free_invariants.rs`'s
+1e-11 bounded-conservation is the analytic-map half; RK4 correctly *fails* that,
+so instead `validation/tests/integrator_convergence.rs` realizes the numerical
+half: (1) **fourth-order convergence** — self-calibrating, integrate a fixed arc
+at N vs 2N steps, error vs the analytic `KeplerPropagator` truth drops ~16×
+(order = log2(e_N/e_2N) ∈ [3.7,4.3]); no magic tol, the *ratio* is the
+assertion; (2) **epoch-threading probe** — a two-body field is *autonomous* so it
+can't catch a "all stages at t" bug; a non-autonomous sinusoidal forcing (closed
+form) pins it via 4th-order convergence; (3) **honest drift** — RK4 energy drifts
+non-vacuously (>1e-10 at coarse step) yet shrinks >8× under step halving (proves
+it's a genuine integrator, not secretly conservative). **Oracle validity:** the
+analytic Kepler truth is valid *only because the attractor sits at the frame
+origin* (attractor-relative ≡ barycentric there). Core in-module tests also pin
+RK4: constant-accel exactness + a linear-in-t exactness (cheap epoch-threading
+pin, RK4 exact for ≤cubic-in-t). Updated `free_invariants.rs` module doc to
+cross-reference the new file (the two are two halves of one seam — advisor caught
+the now-stale "not built yet" comment). **Conscious deferral:** RK4's
+*velocity-dependent* force path is unexercised (all test forces are position- or
+time-only); pin it with a linear-drag closed form when the first velocity-coupled
+term (1PN/SRP) lands.
+
+**Task 7 — batch 2a (dop853) delivered.** Advisor-confirmed splitting batch 2
+into **2a dop853 / 2b ANISE-field adapter / 2c ASSIST validation** (2c depends on
+both, is where the force-model match subtlety lives, so it's last). New in
+`core/src/integrator.rs`: **`Dop853`** — Dormand-Prince 8(5,3), the MVP encounter
+integrator. Honours the **unchanged** object-safe `Integrator` trait by
+sub-stepping **adaptively inside** the requested `dt` (= the "fixed snapshot
+cadence, adaptive step between" architecture, §2); `step` is **pure/`&self`** (no
+cross-call state, each call re-estimates its own initial step via Hairer's
+algorithm → deterministic). **Coefficients transcribed from scipy's
+`_ivp/dop853_coefficients.py` (v1.17.1)** into a private `dop853_tableau` mod
+(only the 12 step stages; the 4 dense-output stages + `D` matrix deferred to
+§10.9); **Hairer's combined 5(3) error norm** (`|h|·err5²/√((err5²+0.01·err3²)·n)`,
+faithful to scipy's squared-numerator form — advisor verified). FSAL: 12 force
+evals/accepted step (recompute derivative at the new point = next step's k0),
+skipped on rejection. Config fields rtol/atol (default 1e-9), optional max_step,
+max_substeps backstop (default 1e6) → new `IntegratorError::{StepSizeUnderflow,
+MaxStepsExceeded}` (fail-loud, never spin). Backward `dt<0` + exact-endpoint
+landing handled. **Verification pivoted off RK4's convergence-order test** (8th
+order floors at round-off before an h⁸ slope is readable): `validation/tests/
+dop853_adaptive.rs` = (1) **Kepler-oracle match** over 3.3 periods @ rtol 1e-12,
+worst rel err **1.5e-11**; (2) **controller-contract** rtol sweep {1e-6,1e-9,1e-12}
+→ achieved err ≈6-16×rtol, monotone in both error and force-eval count
+(217→395→780); (3) **max_step cap** forces more work (395→2474 evals), stays
+accurate. Core in-module tests: tableau consistency (ΣA row=C, ΣB=1, ΣE=0 —
+guards transcription), poly-exactness (const + linear-in-t, the latter's velocity
+bound relaxed to 1e-6 for **hifitime's ns epoch quantization** — a stage at an
+irrational `C[s]·h` snaps to nearest ns ≈0.5ns, and an absolute-time-reading field
+turns that into ~1e-8 vel error; NOT an integrator bug, and the epoch threading
+is still pinned since a real bug gives O(tens)), reversibility, dt=0 identity,
+max-substeps fail-loud, object-safety. **No CI exists** (checked `.github/`), so
+the pre-existing rustfmt dirtiness in `probe_sun_gm.rs`/`kepler_reference.rs`
+(older rustfmt) is un-gated; left untouched to avoid churn — new code fmt-clean.
+
+**Next concrete step = §10 task 7 batch 2b:** the **ANISE-backed
+`PerturberEphemeris` adapter** (share one `Almanac` via `Arc`; observer = **SSB**
+not Sun; km→m + km³/s²→m³/s² at the boundary; μ **pulled through ANISE**, never
+hardcoded) + the Tier-1 field (Sun + 8 planets + Moon). Then **batch 2c**: ASSIST
+validation (`pyref/`) — ALL of GR / 16 asteroids / non-gravs **off** on ASSIST's
+side to match Tier-1 Newtonian point-mass exactly; default rtol 1e-9 may need
+tightening to hit ASSIST's meter bar (**re-consult advisor before 2c**). See
+[[git-workflow]] for the commit/push cadence.

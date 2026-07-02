@@ -7,8 +7,9 @@
 //! [`OrbitalElements`](elements::OrbitalElements) with the element↔state map
 //! (§10.3) — the analytic Kepler [`Propagator`](propagator::Propagator) (§10.4),
 //! and the composable [`ForceModel`](forces::ForceModel) + swappable
-//! [`Integrator`](integrator::Integrator) (§10.7, RK4 first). The b-plane /
-//! encounter logic and the dop853 encounter integrator land in later tasks.
+//! [`Integrator`](integrator::Integrator) (§10.7): fixed-step [`Rk4`](integrator::Rk4)
+//! and the adaptive [`Dop853`](integrator::Dop853) MVP encounter integrator. The
+//! b-plane / encounter logic and dop853 *dense output* land in later tasks.
 
 pub mod elements;
 pub mod ephemeris;
@@ -21,7 +22,7 @@ pub mod state;
 pub use elements::{ElementsError, OrbitalElements};
 pub use epoch::Epoch;
 pub use forces::{CompositeForce, ForceError, ForceModel};
-pub use integrator::{propagate_fixed, Integrator, IntegratorError, Rk4};
+pub use integrator::{propagate_fixed, Dop853, Integrator, IntegratorError, Rk4};
 pub use propagator::{KeplerPropagator, Propagator, PropagatorError};
 pub use state::StateVector;
 

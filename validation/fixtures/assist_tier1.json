@@ -1,0 +1,158 @@
+{
+  "_comment": "Tier-1 ASSIST reference trajectory for asteroid_core (HANDOFF \u00a710.7 batch 2c). Test particle in the DE440 field, 11-body point-mass gravity only (Sun+8 planets+Moon+Pluto), GR/harmonics/asteroids/non-gravs off. Regenerate with pyref/generate_assist_fixture.py; do not hand-edit.",
+  "generator": "pyref/generate_assist_fixture.py",
+  "provenance": {
+    "oracle": "ASSIST (test particle in DE440 field, IAS15)",
+    "rebound_version": "4.6.0",
+    "assist_version": "1.2.3",
+    "python_version": "3.12.13",
+    "numpy_version": "2.5.0",
+    "forces_active": [
+      "PLANETS",
+      "SUN"
+    ],
+    "planets_kernel": "linux_p1550p2650.440",
+    "asteroids_kernel": "sb441-n16.bsp",
+    "au_m": 149597870700.0,
+    "assist_au_m": 149597870700.0,
+    "jd_ref_tdb": 2451545.0,
+    "ic_jd_tdb": 2458849.5,
+    "gm_source": "DE440 header GMs ASSIST integrates with == NAIF gm_de440.tpc",
+    "gm_reference": "Park et al. 2021 (DE440/DE441); gm_de440.tpc",
+    "gm_url": "https://naif.jpl.nasa.gov/pub/naif/generic_kernels/pck/gm_de440.tpc",
+    "note": "Mercury/Venus are barycenter GMs (BODY1/BODY2), equal to the body center's. Compared on the Rust side against ANISE's pck11.pca values."
+  },
+  "frame_note": "States are barycentric (SSB) equatorial ICRF/J2000, SI (m, m/s) \u2014 identical to ANISE SSB_J2000. Epochs are TDB seconds past J2000 (hifitime J2000 = JD 2451545.0 TDB); no time-scale conversion.",
+  "target": "asteroid (3666) Holman",
+  "bodies": [
+    "Sun",
+    "Mercury",
+    "Venus",
+    "Earth",
+    "Moon",
+    "Mars",
+    "Jupiter",
+    "Saturn",
+    "Uranus",
+    "Neptune",
+    "Pluto"
+  ],
+  "de440_gm_km3_s2": {
+    "Sun": 132712440041.27942,
+    "Mercury": 22031.868551400003,
+    "Venus": 324858.592,
+    "Earth": 398600.43550702266,
+    "Moon": 4902.80011845755,
+    "Mars": 42828.3758157561,
+    "Jupiter": 126712764.09999998,
+    "Saturn": 37940584.8418,
+    "Uranus": 5794556.3999999985,
+    "Neptune": 6836527.100580399,
+    "Pluto": 975.5
+  },
+  "epoch0_tdb_seconds_past_j2000": 631108800.0,
+  "initial_state": {
+    "position_m": [
+      499488642931.8235,
+      -137278759331.60435,
+      -75376243669.5486
+    ],
+    "velocity_m_s": [
+      4857.884962114141,
+      13073.206744205558,
+      5159.790213638238
+    ]
+  },
+  "samples": [
+    {
+      "days": 0.0,
+      "dt_s": 0.0,
+      "tdb_seconds_past_j2000": 631108800.0,
+      "position_m": [
+        499488642931.8235,
+        -137278759331.60435,
+        -75376243669.5486
+      ],
+      "velocity_m_s": [
+        4857.884962114141,
+        13073.206744205558,
+        5159.790213638238
+      ]
+    },
+    {
+      "days": 30.0,
+      "dt_s": 2592000.0,
+      "tdb_seconds_past_j2000": 633700800.0,
+      "position_m": [
+        510524393555.47894,
+        -103001878581.20657,
+        -61782189217.85482
+      ],
+      "velocity_m_s": [
+        3654.0745666761145,
+        13361.141758936279,
+        5323.906146616486
+      ]
+    },
+    {
+      "days": 90.0,
+      "dt_s": 7776000.0,
+      "tdb_seconds_past_j2000": 638884800.0,
+      "position_m": [
+        523126060576.21,
+        -32748936670.642998,
+        -33534495220.982132
+      ],
+      "velocity_m_s": [
+        1199.294072596685,
+        13686.930070534032,
+        5551.671093211174
+      ]
+    },
+    {
+      "days": 180.0,
+      "dt_s": 15552000.0,
+      "tdb_seconds_past_j2000": 646660800.0,
+      "position_m": [
+        517955257195.5693,
+        73623448660.65407,
+        10170078474.742092
+      ],
+      "velocity_m_s": [
+        -2530.587747611455,
+        13545.444960367011,
+        5637.417192859701
+      ]
+    },
+    {
+      "days": 365.0,
+      "dt_s": 31536000.0,
+      "tdb_seconds_past_j2000": 662644800.0,
+      "position_m": [
+        417800316984.68115,
+        272796289312.46423,
+        95486343080.93774
+      ],
+      "velocity_m_s": [
+        -9854.542174038388,
+        10822.609467780654,
+        4805.7668888824155
+      ]
+    },
+    {
+      "days": 730.0,
+      "dt_s": 63072000.0,
+      "tdb_seconds_past_j2000": 694180800.0,
+      "position_m": [
+        -48189966584.86528,
+        410888406394.679,
+        169903309402.38174
+      ],
+      "velocity_m_s": [
+        -17138.46820627087,
+        -3918.4033218502514,
+        -942.9635769882634
+      ]
+    }
+  ]
+}

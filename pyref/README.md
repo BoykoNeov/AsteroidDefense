@@ -34,6 +34,16 @@ invocation. The shipped Rust core is unaffected (it never touches this dir).
 - `spike_assist_de441.py` — task-0.5 de-risk spike (pillar a): build ASSIST +
   the DE441-consistent ephemeris and integrate a test particle.
 - `SPIKE.md` — task-0.5 spike results + the fallback-to-Option-B trigger.
+- `generate_assist_fixture.py` — §10.7 batch-2c fixture generator: integrates a
+  test particle (asteroid Holman) with ASSIST configured to the exact Tier-1
+  force model (11-body point mass — Sun + 8 planets + Moon + Pluto — with GR /
+  harmonics / asteroid perturbers / non-gravs off) and writes
+  `../validation/fixtures/assist_tier1.json`, the trajectory oracle for
+  `validation/tests/assist_reference.rs`. Force model, frame, SI units (AU pinned
+  equal to ASSIST's own AU), and TDB epochs are pinned identically to the Rust
+  side; the DE440 GM set ASSIST uses is recorded per body for the ANISE−DE440
+  GM-delta diagnostic. Same Docker invocation as the spike (needs the ASSIST
+  kernel pair from `spike_assist_de441.py`).
 - `requirements-hapsira.txt` — pinned **hapsira** deps, kept separate from the
   ASSIST deps so a two-body fixture regen does not need the ASSIST toolchain.
 - `generate_kepler_fixture.py` — §10.6 fixture generator: propagates a known

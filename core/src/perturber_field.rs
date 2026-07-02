@@ -63,8 +63,19 @@ pub const KM_TO_M: f64 = 1.0e3;
 ///   significant satellites, so center and barycenter coincide.
 /// - **Mars … Neptune** use their system **barycenters** (NAIF 4–8): a DE kernel
 ///   carries the giants only as barycenters, and lumping each planet's moons into
-///   the barycenter mass is the standard N-body treatment (and ASSIST's — to be
-///   confirmed against ASSIST in the 2c validation batch).
+///   the barycenter mass is the standard N-body treatment — **confirmed ASSIST's**
+///   in the batch-2c validation (`validation/tests/assist_reference.rs`), where a
+///   test particle in this field reproduces ASSIST's track to ~4.5e-11 relative
+///   over two years.
+///
+/// **One deliberate difference from ASSIST, quantified in 2c:** ASSIST's
+/// point-mass term also carries **Pluto** (its 11th body). This shipping field
+/// omits it, per §5's locked "Sun + 8 planets + Moon". The measured cost is
+/// ~55 m over two years for a main-belt test particle (growing with lead time);
+/// Pluto joins at Tier 2 alongside the 16 asteroid perturbers (which also need a
+/// DE441-consistent GM source — `pck11.pca` carries no Pluto GM). The 2c test adds
+/// Pluto to its *comparison* field so both sides integrate ASSIST's identical
+/// 11-body system, isolating the machinery's correctness from that omission.
 pub const TIER1_PERTURBER_FRAMES: [Frame; 10] = [
     SUN_J2000,
     MERCURY_J2000,

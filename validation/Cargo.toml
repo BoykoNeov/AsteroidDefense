@@ -16,3 +16,7 @@ proptest.workspace = true
 # Vector3 algebra (cross/dot/norm) for the free-invariant helpers in
 # tests/free_invariants.rs. Workspace-pinned so it matches the core's version.
 nalgebra.workspace = true
+# anise::constants::frames — the ASSIST reference test (tests/assist_reference.rs)
+# builds the 11-body comparison field, which needs the Pluto barycenter Frame.
+# default-features off to match core (keeps `ureq`/network out of the tree).
+anise = { version = "0.10.3", default-features = false }

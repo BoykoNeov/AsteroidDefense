@@ -33,8 +33,12 @@ two integrators behind the `Integrator` trait (fixed-step RK4 and the adaptive
 **dop853** MVP encounter integrator). The **Tier-1 perturber field now assembles
 from the real JPL DE440/441 kernels** — Sun + 8 planets + Moon, positions and GM
 pulled through ANISE, geocenter (not EMB) and barycentric-frame footguns handled.
-Next up: dop853 dense output + the fixed-cadence clock, the b-plane hit test, and
-ASSIST trajectory validation; then the viewer and the Δv-vs-lead-time curve.
+That field is now **validated against ASSIST** (the §6 trajectory oracle): a test
+particle propagated with dop853 reproduces ASSIST's two-year track to ~4.5e-11
+relative (~20 m), with the residual tracking the ANISE−DE440 GM-source delta as
+expected — the rung-3 oracle check the whole ephemeris-test-particle architecture
+rests on. Next up: dop853 dense output + the fixed-cadence clock, the b-plane hit
+test; then the viewer and the Δv-vs-lead-time curve.
 
 If you're reading the code: **`HANDOFF.md` is the source of truth** for *why*
 things are the way they are. This README is the summary.
@@ -135,7 +139,8 @@ workspace/
 ├── viewer/      # ✅ scaffold only — MVP pure-Rust renderer (egui) comes at task 10
 ├── godot/       # 🔜 Phase 2: gdext binding, 3D rendering (not yet created)
 ├── validation/  # ✅ Rust test harness — links core only, loads fixtures
-└── pyref/       # 🔜 Python scripts that generate validation fixtures (offline)
+│                #    (✅ hapsira two-body + ✅ ASSIST Tier-1 trajectory oracle)
+└── pyref/       # ✅ Python scripts that generate validation fixtures (offline)
 ```
 
 ## Roadmap

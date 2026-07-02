@@ -29,11 +29,14 @@
 //! [`InvariantTolerances`] parameterizes the assertion so future propagators plug
 //! in with their *own* expectation (HANDOFF §6 "validate per propagator"):
 //! - **analytic Kepler** (here) → bounded drift at **machine precision**;
-//! - **RK4 / DoPri** (§10.7) → energy *drifts*; the right assertion is on the
-//!   error-*growth rate*, **not** bounded conservation — a different assertion
-//!   shape, not just a looser tolerance, so it is deliberately **not** built yet
-//!   (no such propagator exists to exercise it);
-//! - **symplectic** (Tier-2) → energy *bounded/oscillating*, not constant.
+//! - **RK4** (§10.7) → energy *drifts*; the right assertion is on the
+//!   error-*growth rate* / convergence order, **not** bounded conservation — a
+//!   different assertion shape, not just a looser tolerance. This is the other
+//!   half of the same seam and now lives in `integrator_convergence.rs`
+//!   (fourth-order convergence against the analytic Kepler truth + honest,
+//!   step-shrinking drift), which is why it is **not** reused via this harness;
+//! - **dop853 / symplectic** (later) → adaptive error control / energy
+//!   *bounded-oscillating*, not constant — deferred with their propagators.
 
 use asteroid_core::{Epoch, KeplerPropagator, OrbitalElements, Propagator, StateVector};
 use nalgebra::Vector3;

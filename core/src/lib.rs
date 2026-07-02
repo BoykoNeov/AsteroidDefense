@@ -16,6 +16,7 @@ pub mod ephemeris;
 pub mod epoch;
 pub mod forces;
 pub mod integrator;
+pub mod perturber_field;
 pub mod propagator;
 pub mod state;
 
@@ -23,6 +24,7 @@ pub use elements::{ElementsError, OrbitalElements};
 pub use epoch::Epoch;
 pub use forces::{CompositeForce, ForceError, ForceModel};
 pub use integrator::{propagate_fixed, Dop853, Integrator, IntegratorError, Rk4};
+pub use perturber_field::{tier1_perturber_field, EphemerisPerturber, TIER1_PERTURBER_FRAMES};
 pub use propagator::{KeplerPropagator, Propagator, PropagatorError};
 pub use state::StateVector;
 

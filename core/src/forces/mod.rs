@@ -22,12 +22,14 @@
 //! beats propagating a silent `NaN` through the integrator (matches the crate's
 //! fail-loud convention).
 //!
-//! # This task (§10.7, RK4-first batch)
-//! Only [`point_mass::PointMassGravity`] exists so far, driven by fixed
-//! perturbers ([`point_mass::FixedPerturber`]) so the integrator and its
-//! free-invariant tests can be exercised without a kernel. The ANISE-backed
-//! perturber adapter, the relativity/oblateness/Yarkovsky/SRP terms, and the
-//! Tier-1 encounter validation against ASSIST land in later batches.
+//! # Progress (§10.7)
+//! [`point_mass::PointMassGravity`] is the only *term* so far. It runs on fixed
+//! perturbers ([`point_mass::FixedPerturber`], kernel-free — for the integrator's
+//! free-invariant tests) **and** on the real DE440/441 field via the ANISE
+//! adapter in [`crate::perturber_field`] ([`crate::EphemerisPerturber`] +
+//! [`crate::tier1_perturber_field`], the Sun + 8 planets + Moon MVP set). The
+//! relativity/oblateness/Yarkovsky/SRP terms and the Tier-1 encounter validation
+//! against ASSIST land in later batches.
 
 pub mod point_mass;
 
@@ -54,8 +56,8 @@ pub enum ForceError {
         separation: f64,
     },
     /// An ephemeris lookup for a perturber position failed. Carries the
-    /// underlying message; used by the ANISE-backed perturber adapter (later
-    /// batch), never by [`point_mass::FixedPerturber`].
+    /// underlying message; produced by the ANISE-backed perturber adapter
+    /// ([`crate::EphemerisPerturber`]), never by [`point_mass::FixedPerturber`].
     Ephemeris(String),
 }
 

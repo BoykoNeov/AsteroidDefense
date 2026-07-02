@@ -15,8 +15,11 @@
 //! perturbers at Tier 2 — adding bodies is a data change, never a code change
 //! (§5). Perturber positions come through the [`PerturberEphemeris`] trait, so
 //! the term is decoupled from *where* the positions originate: [`FixedPerturber`]
-//! (constant, for tests and a fixed attractor) now; an ANISE [`Ephemeris`]
-//! adapter later.
+//! (constant, for tests and a fixed attractor) or the ANISE-backed
+//! [`EphemerisPerturber`] adapter over a real [`Ephemeris`]
+//! ([`crate::perturber_field`]).
+//!
+//! [`EphemerisPerturber`]: crate::perturber_field::EphemerisPerturber
 //!
 //! # Frame
 //! [`PerturberEphemeris::position_at`] returns a position in the **barycentric

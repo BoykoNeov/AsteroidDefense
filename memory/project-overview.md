@@ -26,8 +26,9 @@ shipped binary; consuming those permissive/MPL crates stays compatible under
 BNCL. GPL/AGPL oracles (REBOUND, ASSIST, GRSS, nyx) stay offline in
 `pyref/` — never in any Cargo.toml.
 
-**Current phase (as of 2026-07-02):** §10 task 7 **batch 2a DONE** (dop853
-adaptive integrator — see below) on top of **batch 1 DONE** (RK4-first slice).
+**Current phase (as of 2026-07-02):** §10 task 7 **batch 2b DONE** (ANISE-field
+adapter + Tier-1 perturber field — see below) on top of **batch 2a DONE** (dop853
+adaptive integrator) and **batch 1 DONE** (RK4-first slice).
 §10 task 6 **DONE** before it: the hapsira two-body JSON
 reference fixture + rung-2 oracle test (`validation/tests/kepler_reference.rs`,
 `validation/fixtures/kepler_two_body.json`, `pyref/generate_kepler_fixture.py`).
@@ -216,11 +217,42 @@ max-substeps fail-loud, object-safety. **No CI exists** (checked `.github/`), so
 the pre-existing rustfmt dirtiness in `probe_sun_gm.rs`/`kepler_reference.rs`
 (older rustfmt) is un-gated; left untouched to avoid churn — new code fmt-clean.
 
-**Next concrete step = §10 task 7 batch 2b:** the **ANISE-backed
-`PerturberEphemeris` adapter** (share one `Almanac` via `Arc`; observer = **SSB**
-not Sun; km→m + km³/s²→m³/s² at the boundary; μ **pulled through ANISE**, never
-hardcoded) + the Tier-1 field (Sun + 8 planets + Moon). Then **batch 2c**: ASSIST
-validation (`pyref/`) — ALL of GR / 16 asteroids / non-gravs **off** on ASSIST's
-side to match Tier-1 Newtonian point-mass exactly; default rtol 1e-9 may need
-tightening to hit ASSIST's meter bar (**re-consult advisor before 2c**). See
-[[git-workflow]] for the commit/push cadence.
+**Task 7 — batch 2b (ANISE-field adapter + Tier-1 field) delivered.** New module
+`core/src/perturber_field.rs` (advisor-scoped: the adapter **plus** the field
+builder that consumes it; stop before ASSIST). **`EphemerisPerturber`** impls
+`PerturberEphemeris` over a shared **`Arc<Ephemeris>`** + an `anise` `Frame`;
+`position_at` = `position_km(frame, SSB_J2000, epoch.as_hifitime()) * KM_TO_M`,
+mapping `EphemerisError → ForceError::Ephemeris`. New **`KM_TO_M = 1e3`** const,
+deliberately **separate** from the existing `KM3_S2_TO_M3_S2 = 1e9` GM factor so a
+position can't be scaled by the GM factor (a unit test pins `1e3³ == 1e9`). Kept
+`point_mass.rs` **ANISE-free** (adapter in its own module) so its unit tests stay
+kernel-independent. **`TIER1_PERTURBER_FRAMES`** = the 10 MVP bodies; frame
+choices encode §5: Earth = **geocenter 399** + **Moon 301 separate** (never EMB
+3), Mercury/Venus = body centers (199/299), Mars…Neptune = **barycenters** (NAIF
+4–8, since de440s carries the giants only as barycenters + their moons lump into
+the barycenter mass — ASSIST-convention TBC at 2c). **`tier1_perturber_field(&Arc)`**
+pairs position-frame **and** GM lookup from the *same* `Frame` per body (makes the
+μ↔position mass-mismatch bug unrepresentable), fails loud if any GM doesn't
+resolve. Version check done: anise 0.10.3 → hifitime 4.3.0 (single copy in lock),
+so `Epoch::as_hifitime()` feeds ANISE directly; `anise::math::Vector3` **is**
+`nalgebra::Vector3<f64>` → km→m is a plain scalar mul. **Empirically verified vs
+the real kernels** (`de440s.bsp` + `pck11.pca` under `temp/.../kernels`): new
+`examples/probe_perturbers.rs` prints all 10 bodies resolving **both** position
+and GM — Earth GM = 3.986004e5 km³/s² (Earth-only geocenter, **not** the ~4.035e5
+EMB value → footgun provably avoided), giant **barycenter** GMs all resolve. Gated
+test `tier1_field_builds_from_a_real_kernel` (needs `ASTEROID_DE_KERNEL` +
+`ASTEROID_PLANETARY_CONSTANTS`, else skips green) drives it end-to-end: Sun-SSB in
+the wobble band, 10 perturbers Sun-heaviest, and — the strong unit check — a test
+particle at 1 AU feels **~5.9e-3 m/s² sunward** (exercises km→m, km³→m³, the 1/r²
+sum). All 38 core tests + full workspace green; clippy clean; my files fmt-clean
+and add zero new doc warnings (pre-existing lib.rs/propagator.rs warnings left
+untouched, no CI). Docs refreshed: forces/mod.rs + point_mass.rs stale
+"adapter later" forward-refs updated; README Status + layout markers.
+
+**Next concrete step = §10 task 7 batch 2c:** ASSIST validation (`pyref/`) — ALL
+of GR / 16 asteroids / non-gravs **off** on ASSIST's side to match Tier-1
+Newtonian point-mass exactly; **confirm the barycenter-vs-center frame set matches
+ASSIST's convention**; default dop853 rtol 1e-9 may need tightening to hit
+ASSIST's meter bar (**re-consult advisor before 2c**). Parallel/near-term also
+open: dop853 dense output + fixed-cadence clock (§10.9), b-plane hit test (§10.8).
+See [[git-workflow]] for the commit/push cadence.

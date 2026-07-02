@@ -21,15 +21,20 @@ professional planetary-defense work uses.
 
 ## Status
 
-**Early — foundations landing.** The full architecture, physics, validation
-strategy, and task sequence are locked in [`HANDOFF.md`](HANDOFF.md) (the
-authoritative spec). The de-risk spike passed (ANISE ephemeris + oracle toolchain
-build and the DE440 geocenter reconstructs correctly), and the Rust workspace is
-up: epoch/state/orbital-elements with the element↔state map, an analytic Kepler
-propagator behind the `Propagator` trait, and a free-invariant proptest harness
-are implemented and tested (HANDOFF §10, tasks 1–5). Next up is the pyref
-reference-fixture pipeline (task 6) that feeds the validation ladder. The MVP
-Tier-1 encounter, viewer, and the Δv-vs-lead-time curve are still ahead.
+**Early — the physics core is taking shape.** The full architecture, physics,
+validation strategy, and task sequence are locked in [`HANDOFF.md`](HANDOFF.md)
+(the authoritative spec). The de-risk spike passed (ANISE ephemeris + oracle
+toolchain build and the DE440 geocenter reconstructs correctly), and the Rust
+workspace is well underway (HANDOFF §10, tasks 1–7 in progress): epoch/state/
+orbital-elements with the element↔state map, an analytic Kepler propagator, a
+free-invariant proptest harness, and a hapsira two-body reference fixture in the
+validation ladder. The composable `ForceModel` is up with point-mass gravity and
+two integrators behind the `Integrator` trait (fixed-step RK4 and the adaptive
+**dop853** MVP encounter integrator). The **Tier-1 perturber field now assembles
+from the real JPL DE440/441 kernels** — Sun + 8 planets + Moon, positions and GM
+pulled through ANISE, geocenter (not EMB) and barycentric-frame footguns handled.
+Next up: dop853 dense output + the fixed-cadence clock, the b-plane hit test, and
+ASSIST trajectory validation; then the viewer and the Δv-vs-lead-time curve.
 
 If you're reading the code: **`HANDOFF.md` is the source of truth** for *why*
 things are the way they are. This README is the summary.
@@ -123,8 +128,10 @@ A ✅ marks what exists in the tree today; the rest is the planned target shape.
 workspace/
 ├── core/        # ✅ pure simulation engine — no renderer dependency
 │   │            #    (epoch, state, orbital elements, Kepler propagator, ephemeris)
-│   ├── forces/  # 🔜 composable, individually-toggleable acceleration terms
-│   └── ...      # 🔜 integrator, geometry, lambert, clock, ...
+│   ├── forces/  # ✅ composable acceleration terms (point-mass gravity) +
+│   │            #    ✅ perturber_field: ANISE DE440/441 Tier-1 field adapter
+│   ├── integrator.rs # ✅ Integrator trait: RK4 + adaptive dop853
+│   └── ...      # 🔜 geometry (b-plane), lambert, clock, deflection, ...
 ├── viewer/      # ✅ scaffold only — MVP pure-Rust renderer (egui) comes at task 10
 ├── godot/       # 🔜 Phase 2: gdext binding, 3D rendering (not yet created)
 ├── validation/  # ✅ Rust test harness — links core only, loads fixtures

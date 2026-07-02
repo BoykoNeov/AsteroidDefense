@@ -12,7 +12,7 @@ repository.workspace = true
 # §10 offline invariant. Re-add features here if a later task needs them.
 anise = { version = "0.10.3", default-features = false }
 hifitime = "4.3.0"
-nalgebra = "0.35.0"
+nalgebra.workspace = true
 
 [dev-dependencies]
-proptest = "1.11.0"
+proptest.workspace = true

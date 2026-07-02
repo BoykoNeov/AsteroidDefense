@@ -21,11 +21,15 @@ professional planetary-defense work uses.
 
 ## Status
 
-**Early — design-complete, pre-implementation.** The full architecture, physics,
-validation strategy, and task sequence are locked in [`HANDOFF.md`](HANDOFF.md)
-(the authoritative spec). Code scaffolding has not started yet; the next concrete
-step is a de-risk spike (validate that the ephemeris/oracle toolchain builds)
-before the Rust workspace is stood up.
+**Early — foundations landing.** The full architecture, physics, validation
+strategy, and task sequence are locked in [`HANDOFF.md`](HANDOFF.md) (the
+authoritative spec). The de-risk spike passed (ANISE ephemeris + oracle toolchain
+build and the DE440 geocenter reconstructs correctly), and the Rust workspace is
+up: epoch/state/orbital-elements with the element↔state map, an analytic Kepler
+propagator behind the `Propagator` trait, and a free-invariant proptest harness
+are implemented and tested (HANDOFF §10, tasks 1–5). Next up is the pyref
+reference-fixture pipeline (task 6) that feeds the validation ladder. The MVP
+Tier-1 encounter, viewer, and the Δv-vs-lead-time curve are still ahead.
 
 If you're reading the code: **`HANDOFF.md` is the source of truth** for *why*
 things are the way they are. This README is the summary.
@@ -113,15 +117,18 @@ validated *in isolation* (e.g. the GR term alone must reproduce Mercury's
 
 ## Planned layout
 
+A ✅ marks what exists in the tree today; the rest is the planned target shape.
+
 ```
 workspace/
-├── core/        # pure simulation engine — no renderer dependency
-│   ├── forces/  # composable, individually-toggleable acceleration terms
-│   └── ...      # state, propagator, integrator, geometry, lambert, clock, ...
-├── viewer/      # MVP pure-Rust renderer (egui spine: egui_plot + painter)
-├── godot/       # Phase 2: gdext binding, 3D rendering
-├── validation/  # Rust test harness — links core only, loads fixtures
-└── pyref/       # Python scripts that generate validation fixtures (offline)
+├── core/        # ✅ pure simulation engine — no renderer dependency
+│   │            #    (epoch, state, orbital elements, Kepler propagator, ephemeris)
+│   ├── forces/  # 🔜 composable, individually-toggleable acceleration terms
+│   └── ...      # 🔜 integrator, geometry, lambert, clock, ...
+├── viewer/      # ✅ scaffold only — MVP pure-Rust renderer (egui) comes at task 10
+├── godot/       # 🔜 Phase 2: gdext binding, 3D rendering (not yet created)
+├── validation/  # ✅ Rust test harness — links core only, loads fixtures
+└── pyref/       # 🔜 Python scripts that generate validation fixtures (offline)
 ```
 
 ## Roadmap

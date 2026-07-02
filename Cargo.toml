@@ -14,3 +14,7 @@ repository = "https://github.com/BoykoNeov/AsteroidDefense"
 [workspace.dependencies]
 # Shared, version-pinned once here; member crates opt in via `.workspace = true`.
 # Versions are filled by `cargo add` (verified against the registry), not by hand.
+# Only deps used by more than one member live here — anise/hifitime are core-only,
+# serde validation-only, the egui stack viewer-only, so those stay in-crate.
+nalgebra = "0.35.0" # core dep; validation dev-dep
+proptest = "1.11.0" # core + validation dev-deps

@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 asteroid_core = { version = "0.1.0", path = "../core" }
-eframe = "0.35.0"
-egui = "0.35.0"
-egui_plot = "0.36.0"
+# The egui rendering stack (eframe/egui/egui_plot, and the wgpu/GPU deps it drags
+# in) is deferred to task 10, when the viewer actually renders. Adding it now
+# taxes every intermediate task's build for a scaffold that only prints. Re-add
+# with `cargo add eframe egui egui_plot` when task 10 wires the real UI.

@@ -86,7 +86,15 @@ pub struct OrbitalElements {
 }
 
 impl OrbitalElements {
-    /// Build the element set (angles are wrapped/clamped to canonical ranges).
+    /// Build the element set. `raan`, `arg_periapsis`, and `true_anomaly` are
+    /// periodic, so they are losslessly *wrapped* to `[0, 2π)`. `inclination` is
+    /// **not** periodic — an out-of-range `i` denotes a genuinely different orbit,
+    /// not an equivalent one, so a lossy clamp would silently corrupt it. In debug
+    /// builds an `i ∉ [0, π]` trips a `debug_assert` (the crate's fail-loud style);
+    /// release builds still clamp as a last-ditch guard rather than feed a bogus
+    /// `i` into the trig. Internal callers ([`OrbitalElements::from_state`],
+    /// [`crate::propagator::KeplerPropagator::elements_at`]) always supply
+    /// `i ∈ [0, π]`, so the assert only fires on out-of-contract external input.
     pub fn new(
         semi_major_axis: f64,
         eccentricity: f64,
@@ -95,6 +103,10 @@ impl OrbitalElements {
         arg_periapsis: f64,
         true_anomaly: f64,
     ) -> Self {
+        debug_assert!(
+            (0.0..=std::f64::consts::PI).contains(&inclination),
+            "inclination {inclination} out of range [0, π]: silently clamping it would build a different orbit"
+        );
         Self {
             semi_major_axis,
             eccentricity,

@@ -27,6 +27,12 @@ use std::path::{Path, PathBuf};
 /// Used only by the de-risk spike to *independently* reconstruct the EMB from
 /// the separate Earth and Moon geocenters and confirm ANISE's Earth segment is
 /// the genuine geocenter. Value from the DE440/441 header constants.
+///
+/// The literal carries more digits than an `f64` can distinguish (the last two
+/// round away), but they are the *verbatim* published header constant, kept for
+/// provenance — clippy confirms the truncation would be bit-identical, so the
+/// stored value is unchanged either way.
+#[allow(clippy::excessive_precision)]
 pub const DE440_EMRAT: f64 = 81.300_568_221_497_215_4;
 
 /// Errors that can arise while loading or querying an ephemeris kernel.

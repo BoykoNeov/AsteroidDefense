@@ -240,6 +240,12 @@ pub fn true_from_eccentric(eccentric_anomaly: f64, eccentricity: f64) -> f64 {
 /// `1 − e·cos E ≥ 1 − e > 0` never vanishes, so the step is always well-defined.
 /// Returns the root in `[−π, π)`, or [`PropagatorError::NonConvergence`] if the
 /// residual stays above [`KEPLER_TOL`] after [`KEPLER_MAX_ITERS`].
+///
+/// **Near-parabolic caveat.** This plain seed converges poorly for very high
+/// eccentricity (`e ≳ 0.99`) near periapsis passage — the classic pathological
+/// region. It fails loudly with [`PropagatorError::NonConvergence`] rather than
+/// returning a bad root; when Phase-2 brings real high-`e` NEOs, the fix is a
+/// better initial guess (e.g. Danby's cubic seed), not a larger iteration cap.
 pub fn solve_kepler(mean_anomaly: f64, eccentricity: f64) -> Result<f64, PropagatorError> {
     let m = wrap_pi(mean_anomaly);
     let mut ecc_anomaly = m + eccentricity * m.sin();

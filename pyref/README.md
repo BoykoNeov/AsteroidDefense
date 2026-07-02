@@ -30,7 +30,23 @@ invocation. The shipped Rust core is unaffected (it never touches this dir).
 
 ## Contents
 
-- `requirements.txt` — pinned oracle deps.
+- `requirements.txt` — pinned **REBOUND/ASSIST** oracle deps (Linux-only C build).
 - `spike_assist_de441.py` — task-0.5 de-risk spike (pillar a): build ASSIST +
   the DE441-consistent ephemeris and integrate a test particle.
 - `SPIKE.md` — task-0.5 spike results + the fallback-to-Option-B trigger.
+- `requirements-hapsira.txt` — pinned **hapsira** deps, kept separate from the
+  ASSIST deps so a two-body fixture regen does not need the ASSIST toolchain.
+- `generate_kepler_fixture.py` — §10.6 fixture generator: propagates a known
+  orbit with hapsira and writes `../validation/fixtures/kepler_two_body.json`
+  (the reference column for `KeplerPropagator`). μ is pinned to ANISE's Sun GM
+  (see `core/examples/probe_sun_gm.rs`); frame convention and elapsed-seconds
+  time are pinned identically on both sides. See the module docstring for the
+  Docker invocation.
+
+## Fixtures (the committed output)
+
+Generated JSON lives in `../validation/fixtures/` and **is** committed (the
+`.gitignore` excludes kernels and `.pca`/`.bsp` data, but keeps `*.json`
+fixtures). Data is not a derivative work of the GPL/AGPL oracles, so committing
+the numbers is fine (see the license firewall above). Each fixture records its
+own provenance (oracle version, μ source) in a `provenance` block.

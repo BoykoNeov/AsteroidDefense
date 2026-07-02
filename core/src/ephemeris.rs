@@ -20,6 +20,11 @@ use anise::constants::frames::{
 use anise::math::Vector3;
 use anise::prelude::{Almanac, Epoch, Frame};
 
+/// SI conversion: 1 km³/s² in m³/s². ANISE carries gravitational parameters in
+/// km³/s²; the core physics runs in SI, so GM crosses the boundary through this
+/// factor (`(1e3 m)³ / s² = 1e9 m³/s²`).
+pub const KM3_S2_TO_M3_S2: f64 = 1.0e9;
+
 use std::path::{Path, PathBuf};
 
 /// DE440/DE441 Earth-to-Moon mass ratio (EMRAT), i.e. `M_earth / M_moon`.
@@ -44,6 +49,9 @@ pub enum EphemerisError {
     Load(String),
     /// ANISE failed to translate between two frames at the requested epoch.
     Translate(String),
+    /// ANISE could not resolve a gravitational parameter for the requested frame
+    /// (no planetary-constants set loaded, or it does not populate this body's GM).
+    Constants(String),
 }
 
 impl std::fmt::Display for EphemerisError {
@@ -54,6 +62,7 @@ impl std::fmt::Display for EphemerisError {
             }
             EphemerisError::Load(e) => write!(f, "ephemeris load failed: {e}"),
             EphemerisError::Translate(e) => write!(f, "ephemeris translate failed: {e}"),
+            EphemerisError::Constants(e) => write!(f, "gravitational parameter lookup failed: {e}"),
         }
     }
 }
@@ -90,6 +99,56 @@ impl Ephemeris {
     /// Path of the kernel this handle was created for.
     pub fn kernel_path(&self) -> &Path {
         &self.kernel_path
+    }
+
+    /// Load an additional file — a planetary-constants set (`.pca`) carrying GM /
+    /// shape data — into this handle's almanac, so [`gm_km3_s2`](Self::gm_km3_s2)
+    /// lookups resolve. Builder: `Ephemeris::load(bsp)?.with_constants(pca)?`.
+    ///
+    /// A DE `.bsp` supplies perturber *positions* but no gravitational
+    /// parameters; those come from a separate constants set (HANDOFF §6, "pull GM
+    /// through ANISE"). Offline only — validates the path exists first, matching
+    /// [`load`](Self::load).
+    pub fn with_constants(self, constants_path: impl AsRef<Path>) -> Result<Self, EphemerisError> {
+        let constants_path = constants_path.as_ref();
+        if !constants_path.exists() {
+            return Err(EphemerisError::NotFound(constants_path.to_path_buf()));
+        }
+        let path_str = constants_path.to_string_lossy();
+        let Ephemeris {
+            almanac,
+            kernel_path,
+        } = self;
+        let almanac = almanac
+            .load(&path_str)
+            .map_err(|e| EphemerisError::Load(e.to_string()))?;
+        Ok(Ephemeris {
+            almanac,
+            kernel_path,
+        })
+    }
+
+    /// Gravitational parameter μ of `frame`, in **km³/s²**, as carried by a loaded
+    /// planetary-constants set. Errors with [`EphemerisError::Constants`] if no
+    /// constants populate this frame's GM (e.g. only a `.bsp` was loaded).
+    ///
+    /// The core physics runs in SI; multiply by [`KM3_S2_TO_M3_S2`] at the
+    /// boundary, or use [`sun_gm_m3_s2`](Self::sun_gm_m3_s2).
+    pub fn gm_km3_s2(&self, frame: Frame) -> Result<f64, EphemerisError> {
+        let resolved = self
+            .almanac
+            .frame_info(frame)
+            .map_err(|e| EphemerisError::Constants(e.to_string()))?;
+        resolved
+            .mu_km3_s2()
+            .map_err(|e| EphemerisError::Constants(e.to_string()))
+    }
+
+    /// Sun gravitational parameter μ in **SI** (m³/s²) — the heliocentric μ the
+    /// two-body/analytic-Kepler layer and the validation fixtures pin against,
+    /// pulled through ANISE rather than hard-coded (HANDOFF §6).
+    pub fn sun_gm_m3_s2(&self) -> Result<f64, EphemerisError> {
+        Ok(self.gm_km3_s2(SUN_J2000)? * KM3_S2_TO_M3_S2)
     }
 
     /// Position of `target` relative to `observer` at `epoch`, in km, ICRF.

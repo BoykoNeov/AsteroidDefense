@@ -1,0 +1,13 @@
+# Fixture-generation deps for `generate_kepler_fixture.py` (the hapsira pipeline).
+#
+# Deliberately SEPARATE from requirements.txt (the REBOUND/ASSIST oracle deps),
+# which drag a Linux-only C build. Regenerating a two-body Kepler fixture must
+# not require the ASSIST toolchain, so its deps live here on their own.
+#
+# hapsira is pure-Python (astropy + numba); unlike ASSIST it installs from wheels
+# and does not need gcc. astropy is pinned <7 because hapsira 0.18 imports
+# `matrix_product`, which astropy removed in 7.0. Pins are the exact versions the
+# committed fixture was generated with (recorded again in the fixture metadata).
+hapsira==0.18.0
+astropy==6.1.7
+numpy==1.26.4

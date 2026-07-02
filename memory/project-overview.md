@@ -133,8 +133,29 @@ NOT built — no such propagator exists yet. Advisor steered non-vacuity, the
 e→0 absolute-tolerance for LRL, the split conservation/reversibility tolerances,
 and keeping the primitives as test helpers (not core API).
 
-**Next concrete step = §10 task 6:** stand up the first `pyref/` fixture —
-propagate a known orbit via **hapsira**, commit the reference states as **JSON**,
-and add the matching Rust test in `validation/` that loads it. Pin μ/frame/time-
-scale identically on both sides; pull GM through ANISE on the Rust side (§6 "the
-gotcha that wastes a full day"). See [[git-workflow]] for the commit/push cadence.
+**Task 6 (§10.6) delivered** — first `pyref/` reference fixture + rung-2 oracle
+test. `pyref/generate_kepler_fixture.py` (Docker `python:3.12-slim`, deps in
+`requirements-hapsira.txt` = hapsira 0.18.0 + astropy<7 (matrix_product removed
+in 7.0) + numpy 1.26.4) propagates 2 generic inclined orbits (e=0.4, e=0.7) via
+hapsira's analytic two-body, writing `validation/fixtures/kepler_two_body.json`
+(16 samples: 0, ⅛, ¼, ½, ¾, 1, **12.7** (μ-pin discriminator), −¼ period). The
+fixture **is committed** (`.gitignore` keeps `*.json`, drops `.pca`/`.bsp`).
+`validation/tests/kepler_reference.rs` loads it (`include_str!`) and checks
+`KeplerPropagator`: **seed (dt=0) 1e-13, propagated 1e-12** tols (observed 3e-16
+/ 2.8e-13 — machine precision, since both sides are analytic). **μ pinned to
+ANISE's Sun GM** = `1.32712440041939370e20` m³/s² (NOT hapsira's IAU-nominal
+`Sun.k`, ~3e-10 rel different; NOT core tests' `MU_SUN`): baked into the
+generator (custom hapsira `Body(k=…)`, self-asserted via period), re-derived in
+Rust via new `Ephemeris::{with_constants,gm_km3_s2,sun_gm_m3_s2}` +
+`KM3_S2_TO_M3_S2`, cross-checked by gated test `sun_gm_matches_fixture`
+(`ASTEROID_PLANETARY_CONSTANTS` → `pck11.pca` from
+`public-data.nyxspace.com/anise/v0.10/`; skips green offline like the DE-kernel
+test). Provenance step: `core/examples/probe_sun_gm.rs`. Frame pin = shared
+3-1-3 element→Cartesian (dt=0 sample isolates it); time pin = elapsed seconds
+(no absolute epoch). Advisor steered: dt=0-first, generator self-assert of μ,
+probe-don't-hardcode, separate hapsira deps, measure-then-tighten tols.
+
+**Next concrete step = §10 task 7:** the composable `ForceModel` (Σ toggleable
+terms; `point_mass.rs` over a perturber list) + integrators behind `Integrator`
+(RK4 first for the invariant tests, then dop853), barycentric ICRF, validated
+against ASSIST. See [[git-workflow]] for the commit/push cadence.

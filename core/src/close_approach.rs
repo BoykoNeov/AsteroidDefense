@@ -426,6 +426,63 @@ mod tests {
         assert!(ca.relative.position.x.abs() < 1e-2 * b);
     }
 
+    /// Moving-Earth check — the one every Earth-at-rest test is blind to: does the
+    /// detector actually subtract Earth's **velocity**? A Galilean boost by a
+    /// constant `u` **perpendicular to the closing velocity** (asteroid seed
+    /// boosted by `u`, Earth drifting at `u` through the origin) leaves the
+    /// *relative* motion — hence the CA epoch and miss — identical to the
+    /// rest-frame straight-line pass. That equality holds **only** if `v_earth` is
+    /// removed with the right sign: a dropped or flipped `v_earth` shifts the CA
+    /// epoch by `b·u_y/v²` (here ~2e5 s, a gross failure). The `u ⟂ v` choice is
+    /// essential — a collinear boost leaves the range-rate root at `x_rel = 0`
+    /// regardless of `v_earth`, so it would not discriminate the bug. (Verified
+    /// with teeth: flipping the `v_earth` subtraction's sign fails this test.)
+    #[test]
+    fn moving_earth_velocity_is_subtracted() {
+        let b = 5.0e8;
+        let v = 8_000.0;
+        let x0 = -3.0e9;
+        let t0 = 1_000.0_f64;
+        let dt_ca = -x0 / v;
+        let u_y = 30_000.0; // Earth-scale drift, ⟂ to the closing (+x) velocity
+
+        let dop = Dop853::new();
+        let field = ZeroForce;
+        let epoch0 = Epoch::from_tdb_seconds_past_j2000(t0);
+        // Asteroid boosted by u = (0, u_y, 0): seed position += u·t0, velocity += u.
+        let seed = StateVector::from_components(x0, b + u_y * t0, 0.0, v, u_y, 0.0);
+        let clock = Clock::propagate(&dop, &field, epoch0, seed, 30_000.0, 25).unwrap();
+
+        // Earth drifts at u through the origin: position u·t, velocity u.
+        let earth = |epoch: Epoch| -> Result<StateVector, ForceError> {
+            let t = epoch.tdb_seconds_past_j2000();
+            Ok(StateVector::new(
+                Vector3::new(0.0, u_y * t, 0.0),
+                Vector3::new(0.0, u_y, 0.0),
+            ))
+        };
+
+        let ca = closest_approach(&clock, &earth, ScanOptions::default())
+            .unwrap()
+            .expect("one range minimum");
+
+        // Relative motion equals the rest frame → same CA epoch and miss.
+        let epoch_err = (ca.epoch.tdb_seconds_past_j2000() - (t0 + dt_ca)).abs();
+        assert!(epoch_err < 1e-2, "moving-Earth CA epoch off by {epoch_err:.3e} s");
+        assert!(
+            (ca.distance - b).abs() / b < 1e-6,
+            "moving-Earth miss {} vs rest-frame {b}",
+            ca.distance
+        );
+        // The most direct pin: the recovered relative velocity is the rest-frame
+        // closing velocity (v,0,0) — Earth's drift `u` was genuinely removed.
+        assert!(
+            (ca.relative.velocity - Vector3::new(v, 0.0, 0.0)).norm() < 1e-6,
+            "v_rel {:?} still carries Earth's drift u_y={u_y}",
+            ca.relative.velocity
+        );
+    }
+
     /// A receding-then-approaching motion has a range *maximum*, not a minimum —
     /// a `+ → −` crossing the detector must ignore. Start moving away (`x0 > 0`,
     /// `v > 0`): `f = r·v > 0` throughout the forward span, so no minimum exists.

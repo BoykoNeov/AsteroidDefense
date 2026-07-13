@@ -390,11 +390,16 @@ near-parabolic keeps ~12 digits; it's *slow* passes that are worst, not fast),
 and CA is where Earth most dominates → cleanest hyperbola. Reconciled in the
 `b_plane` doc so the two modules aren't quietly at odds. Dense-velocity ≠ exact
 d/dt(dense-pos) noted as harmless (interpolation-order; b-plane invariants are
-sampling-invariant). **Tests (kernel-free, 6 new):** straight-line pass recovers
-exact CA epoch + miss `b`; receding motion → no CA (the `+→−`-ignored check);
-`max_distance` filter drops a distant pass → `closest_approach` None; **end-to-end
-two-body Earth hyperbola through the clock → detector → `b_plane` recovers seeded
-`v_inf`/perigee** (the loop-closing test); invalid-options rejection. Kernel-gated
+sampling-invariant). **Tests (kernel-free, 7 new):** straight-line pass recovers
+exact CA epoch + miss `b`; **moving-Earth Galilean-boost test** (Earth drifts ⟂ to
+the closing velocity → same CA as rest frame ONLY if `v_earth` is subtracted right;
+**mutation-verified** — flipping the subtraction's sign fails it — this is the only
+test that exercises the Earth-*velocity* differencing, the named half of the
+increment; advisor caught that all others used a zero-velocity Earth); receding
+motion → no CA (the `+→−`-ignored check); `max_distance` filter drops a distant
+pass → `closest_approach` None; **end-to-end two-body Earth hyperbola through the
+clock → detector → `b_plane` recovers seeded `v_inf`/perigee** (the loop-closing
+test); invalid-options rejection. Kernel-gated
 `geocenter_velocity_is_earth_orbital_speed` (~29.8 km/s band) pins the velocity
 surfacing against a real kernel (skips green offline — no local kernel this
 session). 64 core lib tests green, full workspace green, clippy clean.

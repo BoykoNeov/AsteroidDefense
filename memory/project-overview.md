@@ -26,9 +26,10 @@ shipped binary; consuming those permissive/MPL crates stays compatible under
 BNCL. GPL/AGPL oracles (REBOUND, ASSIST, GRSS, nyx) stay offline in
 `pyref/` — never in any Cargo.toml.
 
-**Current phase (as of 2026-07-02):** §10 task 7 **batch 2b DONE** (ANISE-field
-adapter + Tier-1 perturber field — see below) on top of **batch 2a DONE** (dop853
-adaptive integrator) and **batch 1 DONE** (RK4-first slice).
+**Current phase (as of 2026-07-02):** §10 task 7 **batch 2c DONE** (ASSIST
+trajectory validation — see below), completing task 7's validation ladder, on top
+of **batch 2b DONE** (ANISE-field adapter + Tier-1 perturber field), **batch 2a
+DONE** (dop853 adaptive integrator), and **batch 1 DONE** (RK4-first slice).
 §10 task 6 **DONE** before it: the hapsira two-body JSON
 reference fixture + rung-2 oracle test (`validation/tests/kepler_reference.rs`,
 `validation/fixtures/kepler_two_body.json`, `pyref/generate_kepler_fixture.py`).
@@ -249,10 +250,161 @@ and add zero new doc warnings (pre-existing lib.rs/propagator.rs warnings left
 untouched, no CI). Docs refreshed: forces/mod.rs + point_mass.rs stale
 "adapter later" forward-refs updated; README Status + layout markers.
 
-**Next concrete step = §10 task 7 batch 2c:** ASSIST validation (`pyref/`) — ALL
-of GR / 16 asteroids / non-gravs **off** on ASSIST's side to match Tier-1
-Newtonian point-mass exactly; **confirm the barycenter-vs-center frame set matches
-ASSIST's convention**; default dop853 rtol 1e-9 may need tightening to hit
-ASSIST's meter bar (**re-consult advisor before 2c**). Parallel/near-term also
-open: dop853 dense output + fixed-cadence clock (§10.9), b-plane hit test (§10.8).
-See [[git-workflow]] for the commit/push cadence.
+**Task 7 — batch 2c (ASSIST trajectory validation) delivered.** Rung 3 of the §6
+oracle ladder. `pyref/generate_assist_fixture.py` integrates asteroid (3666)
+Holman with ASSIST set to **point-mass gravity only** (`ex.forces =
+["SUN","PLANETS"]` → GR/harmonics/16-asteroids/non-gravs OFF), dumps SI states to
+committed `validation/fixtures/assist_tier1.json`; `validation/tests/
+assist_reference.rs` propagates the same IC with dop853 (rtol/atol **1e-12**) in
+the matching field and compares. **Ran end-to-end (Docker oracle + gated Rust
+test, all kernels cached locally):** worst **pos_rel 4.5e-11 / vel_rel 3.3e-11**
+over 730 d, residual **growing monotonically with arc** = the GM-delta secular
+drift the advisor predicted (not a structural bug). Tolerances set to 2e-10 (~4×
+observed). Gated on `ASTEROID_DE_KERNEL`+`ASTEROID_PLANETARY_CONSTANTS`, skips
+green offline.
+
+**Force-model match nailed (the 2c crux, advisor-steered):** ASSIST's
+point-mass term sums **11 bodies incl. PLUTO** (verified in `src/forces.c`
+`order[]`), so the shipping 10-body `tier1_perturber_field` does NOT match ASSIST
+exactly. The test builds an **11-body comparison field** (Tier-1 + Pluto NAIF 9)
+so both sides integrate ASSIST's identical system — absorbing Pluto into tolerance
+would hide the μ-slip/rotation bugs the test exists to catch. **Two real findings:**
+(1) **pck11.pca carries NO Pluto GM (BODY9_GM absent)** — the comparison uses the
+oracle's own DE440 Pluto GM (975.5 km³/s²); position resolves fine from de440s.bsp.
+(2) **pck11 ≠ DE440-header GMs** — worst **Mercury 4.0e-6**, Uranus 1.3e-6, then
+1e-8–1e-9 (Sun 5e-12); measured per-body by `anise_gm_matches_de440` (from
+`gm_de440.tpc`), the residual's real floor. Dynamically Jupiter/Uranus dominate.
+
+**OPEN DECISION surfaced to user (away → proceeded with recommended default,
+re-askable):** §5 locks shipping set at 10; ASSIST (our §6 config) has 11.
+**Measured Pluto-omission cost = ~55 m over 2 yr** for Holman (grows with lead
+time, `pluto_omission_effect_over_arc` test). **Chose Option A: keep 10-body
+shipping field, defer Pluto to Tier 2** (with the 16 asteroid perturbers + a
+DE441-consistent GM source, since pck11 lacks Pluto GM). **Did NOT edit §5's
+locked decision** — that's the user's call. Documented the quantified caveat in
+`perturber_field.rs`. If user later wants Pluto in shipping (Option B): add
+PLUTO_BARYCENTER_J2000 to `TIER1_PERTURBER_FRAMES`, resolve the pck11 Pluto-GM
+gap, update the two `.len()==10` unit tests + §5.
+
+**Infra note:** validation gained an `anise` dev-dep (default-features off, matches
+core) for the Pluto Frame constant. Docker path-conv gotcha: Git Bash mangled
+`-e VAR=/data`; fix = `MSYS_NO_PATHCONV=1` prefix.
+
+**Task 8 (§10.8) — b-plane hit test DONE.** New `core/src/geometry.rs`
+(`BPlaneEncounter`, `GeometryError`, `EARTH_{EQUATORIAL,MEAN}_RADIUS_M`, all
+re-exported from lib). Pure, kernel-free, frame-agnostic: `from_relative_state(
+r_rel, v_rel, μ⊕, R⊕)` reduces an **Earth-geocentre-relative** encounter state to
+the osculating two-body-about-Earth hyperbola — `v_inf=√(2ε)`, impact parameter
+`b=h/v_inf`, perigee `p/(1+e)`, eccentricity, incoming-asymptote dir
+`Ŝ=(P̂+√(e²−1)Q̂)/e`, and b-vector `B=b(Ŝ×ĥ)`. **Hit test** = gravitationally-focused
+capture radius `b_capture=R⊕√(1+(v_esc/v_inf)²)`, `is_hit ⇔ b≤b_capture`
+(equivalent to `r_perigee≤R⊕`, tested). `focusing_factor`/`escape_speed` helpers.
+Rejects bound/parabolic (`NotHyperbolic`), radial `r∥v` / zero-r (`Degenerate`),
+bad μ/R⊕ (`NonPositiveParameter`). **12 in-module tests** (advisor-steered): the
+discriminating one is the **perigee round-trip** (known v_inf,r_p → recovered
+geometry), plus **sampling-point invariance** (same hyperbola at an off-perigee
+ν=−0.7 rad → identical v_inf/b/perigee/e **and Ŝ** — this is the ONLY test that
+exercises the `−v_rel·(r·v)` eccentricity-vector branch and validates Ŝ's
+*direction*; all perigee tests have r·v=0 and |B|=b holds by construction
+regardless of Ŝ, so without this Ŝ was unvalidated), hit⇔perigee equivalence
+sweep, grazing b=b_capture, μ→0 straight-line limit, v_inf=v_esc→factor √2, NEO
+focusing band 1.2–2.4. **Deliberate scope cuts** (advisor-confirmed): (a) does
+NOT search for closest approach — that needs dense trajectory sampling = the
+clock's job (§10.9); (b) b-vector **sign convention + Öpik/Kizner ξ,ζ
+decomposition deferred to Tier 3** `uncertainty.rs` (needs an external ref dir;
+keyholes are what reason in b-plane coords) — new HANDOFF open-questions entry.
+**Step-9 prerequisite flagged in the module doc:** forming `v_rel` needs Earth's
+*velocity*; `Ephemeris` exposes only `position_km` today but ANISE's `translate`
+already returns `velocity_km_s` (discarded) — small add for the clock.
+
+**Task 9 (§10.9) — dop853 dense output + fixed-cadence clock DONE.** Two pieces,
+both advisor-steered. **(1) Dense output** in `core/src/integrator.rs`: added the
+dense-output tables (`C_EXTRA`, `A_EXTRA` 3 rows, `D` 4×16) transcribed from the
+same scipy v1.17.1 `dop853_coefficients.py` as the step tableau; refactored the
+adaptive accept/reject loop into a shared `integrate(...)` taking an `on_accept`
+callback so **plain `step` (no-op) and new `step_dense` (records segments) share
+one loop** — can't drift on accept/reject or endpoint-clamping. `attempt_step` now
+returns its 12 stage arrays (aliased `StageDerivs`). `step_dense` → `(final_state,
+Vec<DenseSegment>)`; each **`DenseSegment`** (pub, re-exported) holds `t0,h,y0` +
+7 interpolation coeffs `(fr,fv)` and evals the 7th-order continuous extension via
+SciPy's reversed-Horner (alternating `·x` / `·(1−x)`). Costs **3 extra force evals
+per accepted step** (the 3 extra stages K[13-15]; K[12] is the FSAL already
+computed) — paid only on the dense path. **(2) `core/src/clock.rs`**: `Clock`
+(+ `ClockError`) — `Clock::propagate(&Dop853, force, epoch0, state0, cadence, N)`
+drives `step_dense` **cadence-by-cadence** (= §2 "fixed snapshot cadence, adaptive
+step between"), storing **exact integrated snapshots** at each boundary + all dense
+segments (sorted by `lo` for binary search). `snapshot(k)` = exact indexed state;
+`state_at(epoch)` = **sub-snapshot query from dense output, NOT linear interp**
+(fails loud `OutOfRange` outside span, never extrapolates). Signed cadence → a
+**backward clock** for the rewind view. `segments()` exposes the continuous
+`position(t)` the future close-approach detector root-finds on.
+
+**The test crux the advisor flagged:** the `D` matrix is **invisible** to both the
+tableau-consistency identities (they don't involve D) **and** endpoint continuity
+(F[3..6] are zeroed by `·x`/`·(1−x)` at x∈{0,1}, so both step endpoints match
+regardless of D). D is only exercised at **interior** points →
+`dense_output_reproduces_polynomial_interior_pins_d` evals a degree-≤7 polynomial
+trajectory (`a=c·tᵖ`, p=1,3) at interior x and compares to closed form (**relative**
+1e-8, since the abs error floor is hifitime ns epoch-quantization scaling with tᵖ).
+**Mutation-verified**: a realistic 1-digit typo in one D entry fails ONLY the
+interior test while endpoints + reintegration pass — proving the interior test is
+the actual D-pin. Other tests: endpoint-exactness (+ `step_dense`==`step`
+bit-identical final state), non-poly reintegration cross-check (~tol not ε, §2
+determinism), backward-span endpoints; clock: snapshots==direct stepping,
+`state_at` at boundaries==snapshots, **dense ≫ linear-interp** on a curved 30°-arc
+(≥1e4× tighter — the pedagogical thesis), out-of-range fails loud, backward clock.
+58 core tests green, workspace green, clippy clean, my files fmt-clean.
+**Earth-velocity surfacing NOT done** (deferred with the close-approach detector).
+
+**Close-approach detector + Earth-velocity glue DONE** (§10.9 follow-on, the true
+next increment after the clock; advisor-steered). **Two pieces.** (1) **Earth
+velocity surfaced** in `ephemeris.rs`: new `state_km_s(target,observer,epoch) ->
+(radius_km, velocity_km_s)` reads the `velocity_km_s` ANISE's `translate` already
+returns (was discarded — field name confirmed against anise 0.10.3 source);
+`position_km` now delegates to it; added `geocenter_state_ssb_km`. In
+`perturber_field.rs`, `EphemerisPerturber::state_at(epoch) -> StateVector` (SI,
+km→m + km/s→m/s) + an impl of the new `GeocentricState` trait, so an
+`EphemerisPerturber::new(eph, EARTH_J2000)` **is** the detector's Earth source.
+(2) **`core/src/close_approach.rs`** (new, ANISE-free, re-exported from lib):
+root-finds the **range-rate** `f(t)=r_rel·v_rel = d/dt(½|r_rel|²)` on the clock's
+dense output (asteroid) differenced against the `GeocentricState` provider (Earth).
+A **`−→+` crossing brackets a range minimum** (CA); `+→−` (a max) is ignored.
+Scan grid = the integrator's own sub-step boundaries (`clock.segments()`)
+subdivided to `ScanOptions::max_sample_dt`; each bracket **bisected** to the CA
+epoch. Returns `Vec<CloseApproach>{epoch, asteroid_ssb, earth_ssb, relative,
+distance}` in epoch order; `closest_approach(...)` = the min-distance one.
+**`CloseApproach::b_plane(μ,R⊕)`** feeds `geometry.rs` — the encounter pipeline is
+now closed (clock → detect → relative state → b-plane hit/miss). `GeocentricState`
+is blanket-impl'd for closures (kernel-free tests use a synthetic Earth-at-origin).
+
+**Two advisor points landed on the record:** (a) **`max_sample_dt` is the one
+correctness-critical knob**, made a **required physical cap** (default 6 h, NOT
+`None`): DOP853 steps are Sun-error-sized so segments do NOT shrink at an Earth
+approach until deep in the well, so a too-coarse grid **silently aliases away a
+fast pass** (a missing entry, not an error) — documented; 6 h is marginal for a
+50–70 km/s retrograde impactor, tighten then. `ScanOptions::max_distance` filters
+the AU-scale synodic minima a multi-year arc produces. (b) **b-plane sampled AT
+CA deliberately** — `geometry.rs:162` cautions "sample near-but-not-at CA" for
+`v_inf=√(v²−2μ/r)` cancellation, but that **does not bite for Earth in f64** (even
+near-parabolic keeps ~12 digits; it's *slow* passes that are worst, not fast),
+and CA is where Earth most dominates → cleanest hyperbola. Reconciled in the
+`b_plane` doc so the two modules aren't quietly at odds. Dense-velocity ≠ exact
+d/dt(dense-pos) noted as harmless (interpolation-order; b-plane invariants are
+sampling-invariant). **Tests (kernel-free, 6 new):** straight-line pass recovers
+exact CA epoch + miss `b`; receding motion → no CA (the `+→−`-ignored check);
+`max_distance` filter drops a distant pass → `closest_approach` None; **end-to-end
+two-body Earth hyperbola through the clock → detector → `b_plane` recovers seeded
+`v_inf`/perigee** (the loop-closing test); invalid-options rejection. Kernel-gated
+`geocenter_velocity_is_earth_orbital_speed` (~29.8 km/s band) pins the velocity
+surfacing against a real kernel (skips green offline — no local kernel this
+session). 64 core lib tests green, full workspace green, clippy clean.
+
+**"Surface Earth velocity" = its orbital velocity for `v_rel`** (per the geometry
+step-9 note), NOT surface-rotation velocity / impact footprint — that's out of
+scope for this increment (advisor confirmed the reading).
+
+**Next concrete step:** **`viewer/` (§10.10)** — the Δv-vs-lead-time headline
+chart (`egui_plot`) + the rewind→nudge→re-propagate→"Earth slides out of the way"
+animation (painter, floating-origin). The core encounter pipeline (propagate →
+clock → close-approach → b-plane hit/miss) is now complete end-to-end. See
+[[git-workflow]] for commit/push cadence.

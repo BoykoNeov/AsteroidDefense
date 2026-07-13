@@ -12,10 +12,13 @@
 //! the [`geometry`] b-plane hit test (§10.8) that turns a close approach into a
 //! hit/miss answer. The [`clock`] (§10.9) samples the [`Dop853`](integrator::Dop853)
 //! dense output at a fixed cadence, serving sub-snapshot queries from the 7th-order
-//! continuous extension rather than linear interpolation. Close-approach
-//! *detection* — root-finding on that same continuous trajectory — lands next.
+//! continuous extension rather than linear interpolation. The [`close_approach`]
+//! detector (§10.9) root-finds the range-rate on that same continuous trajectory to
+//! locate geocentric closest approach and feed the Earth-relative state into the
+//! b-plane geometry — closing the encounter pipeline into a hit/miss answer.
 
 pub mod clock;
+pub mod close_approach;
 pub mod elements;
 pub mod ephemeris;
 pub mod epoch;
@@ -27,6 +30,10 @@ pub mod propagator;
 pub mod state;
 
 pub use clock::{Clock, ClockError};
+pub use close_approach::{
+    closest_approach, find_close_approaches, CloseApproach, CloseApproachError, GeocentricState,
+    ScanOptions,
+};
 pub use elements::{ElementsError, OrbitalElements};
 pub use epoch::Epoch;
 pub use forces::{CompositeForce, ForceError, ForceModel};

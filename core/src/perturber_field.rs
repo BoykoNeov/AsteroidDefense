@@ -47,6 +47,7 @@ use crate::ephemeris::{Ephemeris, EphemerisError, KM3_S2_TO_M3_S2};
 use crate::epoch::Epoch;
 use crate::forces::point_mass::{Perturber, PerturberEphemeris, PointMassGravity};
 use crate::forces::ForceError;
+use crate::state::StateVector;
 
 /// SI conversion for **positions**: 1 km in metres. Separate from
 /// [`KM3_S2_TO_M3_S2`] (the GM factor, `1e9`) so the two can never be confused.
@@ -117,6 +118,23 @@ impl EphemerisPerturber {
     }
 }
 
+impl EphemerisPerturber {
+    /// SSB-relative **state** (position m, velocity m/s) of `self.frame` at
+    /// `epoch`, barycentric ICRF, SI. The full-state companion to
+    /// [`PerturberEphemeris::position_at`]: the close-approach detector needs a
+    /// perturber's *velocity* too (Earth's, to form `v_rel`), which the point-mass
+    /// force term never asks for. Maps an [`EphemerisError`] to
+    /// [`ForceError::Ephemeris`] so a failed lookup fails loudly.
+    pub fn state_at(&self, epoch: Epoch) -> Result<StateVector, ForceError> {
+        let (r_km, v_km_s) = self
+            .ephemeris
+            .state_km_s(self.frame, SSB_J2000, epoch.as_hifitime())
+            .map_err(|e| ForceError::Ephemeris(e.to_string()))?;
+        // anise::math::Vector3 IS nalgebra::Vector3<f64>; km→m and km/s→m/s scales.
+        Ok(StateVector::new(r_km * KM_TO_M, v_km_s * KM_TO_M))
+    }
+}
+
 impl PerturberEphemeris for EphemerisPerturber {
     /// SSB-relative position of `self.frame` at `epoch`, in **metres**,
     /// barycentric ICRF. Maps an [`EphemerisError`] to a
@@ -130,6 +148,15 @@ impl PerturberEphemeris for EphemerisPerturber {
         // anise::math::Vector3 IS nalgebra::Vector3<f64>, so this is a plain
         // km→m scale, no type conversion.
         Ok(position_km * KM_TO_M)
+    }
+}
+
+impl crate::close_approach::GeocentricState for EphemerisPerturber {
+    /// The SSB-relative state of this perturber's body — Earth's geocentre when
+    /// built with [`EARTH_J2000`]. Lets an [`EphemerisPerturber`] serve directly
+    /// as the close-approach detector's Earth-state source.
+    fn state_at(&self, epoch: Epoch) -> Result<StateVector, ForceError> {
+        EphemerisPerturber::state_at(self, epoch)
     }
 }
 

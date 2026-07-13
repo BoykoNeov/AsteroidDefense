@@ -151,26 +151,53 @@ impl Ephemeris {
         Ok(self.gm_km3_s2(SUN_J2000)? * KM3_S2_TO_M3_S2)
     }
 
-    /// Position of `target` relative to `observer` at `epoch`, in km, ICRF.
+    /// Position **and velocity** of `target` relative to `observer` at `epoch`,
+    /// as `(radius_km, velocity_km_s)`, ICRF.
     ///
     /// Geometric (no aberration correction) — the integration wants true
-    /// geometric positions, not light-time/stellar-aberration-corrected ones.
+    /// geometric states, not light-time/stellar-aberration-corrected ones. The
+    /// velocity is the component ANISE already computes alongside the radius
+    /// (`translate` returns both); the close-approach detector needs it to form
+    /// the Earth-**relative** velocity `v_rel` the b-plane geometry consumes
+    /// (HANDOFF §10.8 step-9 note, §10.9).
+    pub fn state_km_s(
+        &self,
+        target: Frame,
+        observer: Frame,
+        epoch: Epoch,
+    ) -> Result<(Vector3, Vector3), EphemerisError> {
+        let state = self
+            .almanac
+            .translate(target, observer, epoch, None)
+            .map_err(|e| EphemerisError::Translate(e.to_string()))?;
+        Ok((state.radius_km, state.velocity_km_s))
+    }
+
+    /// Position of `target` relative to `observer` at `epoch`, in km, ICRF —
+    /// the position half of [`state_km_s`](Self::state_km_s).
     pub fn position_km(
         &self,
         target: Frame,
         observer: Frame,
         epoch: Epoch,
     ) -> Result<Vector3, EphemerisError> {
-        let state = self
-            .almanac
-            .translate(target, observer, epoch, None)
-            .map_err(|e| EphemerisError::Translate(e.to_string()))?;
-        Ok(state.radius_km)
+        Ok(self.state_km_s(target, observer, epoch)?.0)
     }
 
     /// SSB→**geocenter** (reconstructed Earth, NAIF 399), km. NOT the EMB.
     pub fn geocenter_ssb_km(&self, epoch: Epoch) -> Result<Vector3, EphemerisError> {
         self.position_km(EARTH_J2000, SSB_J2000, epoch)
+    }
+
+    /// SSB→**geocenter** state (reconstructed Earth, NAIF 399) as
+    /// `(radius_km, velocity_km_s)`, ICRF. NOT the EMB. The Earth state the
+    /// close-approach detector differences the asteroid track against to form the
+    /// Earth-relative encounter state (§10.9).
+    pub fn geocenter_state_ssb_km(
+        &self,
+        epoch: Epoch,
+    ) -> Result<(Vector3, Vector3), EphemerisError> {
+        self.state_km_s(EARTH_J2000, SSB_J2000, epoch)
     }
 
     /// SSB→Earth–Moon barycenter (NAIF 3), km. Provided so callers can compare
@@ -296,6 +323,29 @@ mod tests {
         assert!(
             check.passes(),
             "geocenter check failed acceptance: {check:#?}"
+        );
+    }
+
+    /// Kernel-gated: the surfaced geocenter **velocity** is Earth's real orbital
+    /// speed (~29.8 km/s about the SSB), not garbage or zero. Pins the velocity
+    /// half of [`state_km_s`] the close-approach detector's `v_rel` rides on —
+    /// a silently-dropped or wrong-units velocity would fail this band. Skips
+    /// (passes) when `ASTEROID_DE_KERNEL` is unset so CI stays green offline.
+    #[test]
+    fn geocenter_velocity_is_earth_orbital_speed() {
+        let Ok(kernel) = std::env::var("ASTEROID_DE_KERNEL") else {
+            eprintln!("ASTEROID_DE_KERNEL unset — skipping geocenter velocity test");
+            return;
+        };
+        let eph = Ephemeris::load(&kernel).expect("load kernel");
+        let epoch = Epoch::from_gregorian(2020, 1, 1, 0, 0, 0, 0, TimeScale::TDB);
+        let (_r, v_km_s) = eph.geocenter_state_ssb_km(epoch).expect("geocenter state");
+        let speed = v_km_s.norm();
+        // Earth's heliocentric speed varies ~29.3–30.3 km/s over the year; the SSB
+        // frame adds only the Sun's small barycentric wobble. A generous band.
+        assert!(
+            (29.0..=30.5).contains(&speed),
+            "geocenter SSB speed {speed:.3} km/s is not Earth's ~29.8 km/s orbital speed"
         );
     }
 }

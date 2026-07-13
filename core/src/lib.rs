@@ -8,13 +8,16 @@
 //! (§10.3) — the analytic Kepler [`Propagator`](propagator::Propagator) (§10.4),
 //! and the composable [`ForceModel`](forces::ForceModel) + swappable
 //! [`Integrator`](integrator::Integrator) (§10.7): fixed-step [`Rk4`](integrator::Rk4)
-//! and the adaptive [`Dop853`](integrator::Dop853) MVP encounter integrator. The
-//! b-plane / encounter logic and dop853 *dense output* land in later tasks.
+//! and the adaptive [`Dop853`](integrator::Dop853) MVP encounter integrator, and
+//! the [`geometry`] b-plane hit test (§10.8) that turns a close approach into a
+//! hit/miss answer. Close-approach *detection* and dop853 *dense output* (the
+//! clock, §10.9) land in the next task.
 
 pub mod elements;
 pub mod ephemeris;
 pub mod epoch;
 pub mod forces;
+pub mod geometry;
 pub mod integrator;
 pub mod perturber_field;
 pub mod propagator;
@@ -23,6 +26,9 @@ pub mod state;
 pub use elements::{ElementsError, OrbitalElements};
 pub use epoch::Epoch;
 pub use forces::{CompositeForce, ForceError, ForceModel};
+pub use geometry::{
+    BPlaneEncounter, GeometryError, EARTH_EQUATORIAL_RADIUS_M, EARTH_MEAN_RADIUS_M,
+};
 pub use integrator::{propagate_fixed, Dop853, Integrator, IntegratorError, Rk4};
 pub use perturber_field::{tier1_perturber_field, EphemerisPerturber, TIER1_PERTURBER_FRAMES};
 pub use propagator::{KeplerPropagator, Propagator, PropagatorError};

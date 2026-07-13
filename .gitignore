@@ -37,7 +37,12 @@ env/
 #       they are the reference column the Rust test suite asserts against.
 
 # ---- Godot MCP editor plugin (dev tooling, not part of the Rust workspace) ----
-/addons/
+# The gdai-mcp plugin ships prebuilt per-platform binaries; it lives under the
+# Godot project root (godot/addons/) and is dev tooling, not a shipped artifact.
+/godot/addons/
+
+# ---- Godot editor import/cache dir (regenerated on every editor open) ----
+/godot/.godot/
 
 # ---- Viewer runtime artifact ----
 # curve.json is the cached Δv-vs-lead sweep the egui app loads: a regenerable

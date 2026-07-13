@@ -40,9 +40,13 @@ expected — the rung-3 oracle check the whole ephemeris-test-particle architect
 rests on. On top of that validated trajectory, the **b-plane hit test** is now in
 place: `core/geometry.rs` reduces a close approach to its impact parameter and the
 gravitationally-focused capture radius (`b_capture = R⊕·√(1 + (v_esc/v_inf)²)`),
-turning the encounter into an honest hit/miss answer. Next up: dop853 dense output
-+ the fixed-cadence clock (which will find closest approach and feed the hit test);
-then the viewer and the Δv-vs-lead-time curve.
+turning the encounter into an honest hit/miss answer. dop853 now emits **dense
+output** (its 7th-order continuous extension), and `core/clock.rs` layers a
+**fixed-cadence clock** on top: exact integrated snapshots at each cadence
+boundary, and sub-snapshot queries served from the dense output — *not* linear
+interpolation, which would visibly lie through the encounter's curvature. Next up:
+a close-approach detector root-finding on that continuous trajectory to feed the
+hit test; then the viewer and the Δv-vs-lead-time curve.
 
 If you're reading the code: **`HANDOFF.md` is the source of truth** for *why*
 things are the way they are. This README is the summary.
@@ -138,9 +142,10 @@ workspace/
 │   │            #    (epoch, state, orbital elements, Kepler propagator, ephemeris)
 │   ├── forces/  # ✅ composable acceleration terms (point-mass gravity) +
 │   │            #    ✅ perturber_field: ANISE DE440/441 Tier-1 field adapter
-│   ├── integrator.rs # ✅ Integrator trait: RK4 + adaptive dop853
+│   ├── integrator.rs # ✅ Integrator trait: RK4 + adaptive dop853 + dense output
 │   ├── geometry.rs   # ✅ b-plane hit test + gravitationally-focused capture radius
-│   └── ...      # 🔜 clock (dense output), lambert, deflection, ...
+│   ├── clock.rs      # ✅ fixed-cadence clock; sub-snapshot queries from dense output
+│   └── ...      # 🔜 close-approach detector, lambert, deflection, ...
 ├── viewer/      # ✅ scaffold only — MVP pure-Rust renderer (egui) comes at task 10
 ├── godot/       # 🔜 Phase 2: gdext binding, 3D rendering (not yet created)
 ├── validation/  # ✅ Rust test harness — links core only, loads fixtures

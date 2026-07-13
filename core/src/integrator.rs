@@ -21,9 +21,10 @@
 //! *same* object-safe [`Integrator`] trait — a `step(dt)` call sub-steps
 //! adaptively *inside* the interval under its own error control, which is exactly
 //! the resolved architecture "fixed snapshot **cadence**, adaptive integration
-//! **step** between snapshots" (HANDOFF §2). Its **dense output** (the continuous
-//! extension the clock will sample, §10.9) is a later batch; the per-step machinery
-//! here is factored so that interpolant is a localized add, not a rewrite.
+//! **step** between snapshots" (HANDOFF §2). Its **dense output**
+//! ([`Dop853::step_dense`] → [`DenseSegment`], §10.9) is the continuous extension
+//! the [`clock`](crate::clock) samples between snapshots, so a sub-snapshot query
+//! interpolates through the encounter's curvature instead of linearly across it.
 //!
 //! # Frame
 //! The stepper is frame-agnostic — it advances whatever frame the force model and
@@ -33,6 +34,10 @@
 use crate::epoch::Epoch;
 use crate::forces::{ForceError, ForceModel};
 use crate::state::StateVector;
+
+/// The 12 step-stage derivatives of one DOP853 sub-step (`kᵣ` = stage velocity or
+/// `kᵥ` = stage acceleration). Named so the stage-carrying signatures stay legible.
+type StageDerivs = [nalgebra::Vector3<f64>; 12];
 
 /// Failure modes of a step. A fixed step ([`Rk4`]) can only fail because the
 /// force model failed to evaluate; an adaptive step ([`Dop853`]) can additionally
@@ -189,11 +194,17 @@ impl Integrator for Rk4 {
 /// transcribed from SciPy's `scipy/integrate/_ivp/dop853_coefficients.py` — a
 /// clean, machine-readable copy of Hairer's published constants — and
 /// cross-checked by the tableau's own consistency conditions in the tests
-/// (`Σⱼ A[i][j] = C[i]`, `Σ B = 1`, `Σ E = 0`). Only the 12 stages of the step
-/// itself are carried here; the 4 extra stages DOP853 uses for its *dense output*
-/// (§10.9) are omitted until that batch. Because the FSAL derivative's error
+/// (`Σⱼ A[i][j] = C[i]`, `Σ B = 1`, `Σ E = 0`). Because the FSAL derivative's error
 /// weight is zero (`E5[12] = E3[12] = 0`), one accepted step costs 12 force
 /// evaluations (11 interior stages + the next step's start derivative).
+///
+/// # Dense output (§10.9)
+/// [`Dop853::step_dense`] additionally emits the **continuous extension** the
+/// clock samples between snapshots: a degree-7 interpolant per accepted sub-step
+/// ([`DenseSegment`]). It reuses the 12 step stages and the FSAL derivative and
+/// evaluates **3 more** stages (`C_EXTRA`/`A_EXTRA` in the tableau), so a recorded
+/// step costs 3 force evaluations beyond a plain one — paid only on the
+/// dense path.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Dop853 {
     /// Relative tolerance (per state component). Default `1e-9`.
@@ -351,10 +362,10 @@ impl Dop853 {
 
     /// Attempt one signed sub-step of `h` seconds from `state` at `epoch`, given
     /// the start derivative `k0 = (k0r, k0v)` (= `f(epoch, state)`, reused as the
-    /// first RK stage). Returns the 8th-order solution and the Hairer 5(3) error
-    /// norm — the accept/reject decision stays in [`Self::step`]. All 12 stage
-    /// derivatives are in scope here, so the §10.9 dense-output interpolant will
-    /// slot in without disturbing the caller.
+    /// first RK stage). Returns the 8th-order solution, the Hairer 5(3) error
+    /// norm, and the 12 stage derivatives `(kr, kv)` — the accept/reject decision
+    /// stays in [`Self::integrate`], and the stage arrays let the dense-output
+    /// path ([`Self::step_dense`]) build its interpolant without recomputing them.
     #[allow(clippy::too_many_arguments)]
     fn attempt_step(
         &self,
@@ -364,7 +375,7 @@ impl Dop853 {
         k0r: nalgebra::Vector3<f64>,
         k0v: nalgebra::Vector3<f64>,
         h: f64,
-    ) -> Result<(StateVector, f64), IntegratorError> {
+    ) -> Result<(StateVector, f64, StageDerivs, StageDerivs), IntegratorError> {
         use dop853_tableau::{A, B, C, E3, E5};
         use nalgebra::Vector3;
 
@@ -430,17 +441,40 @@ impl Dop853 {
             h.abs() * err5_2 / (denom * 6.0).sqrt()
         };
 
-        Ok((new, error_norm))
+        Ok((new, error_norm, kr, kv))
     }
-}
 
-impl Integrator for Dop853 {
-    fn step(
+    /// The shared adaptive driver behind both [`Integrator::step`] and
+    /// [`Self::step_dense`]. Sub-steps across `[epoch, epoch + dt]` under the
+    /// error controller (§ struct docs), landing the final sub-step exactly on
+    /// `epoch + dt`, and returns the state there.
+    ///
+    /// `on_accept` is invoked once per **accepted** sub-step, in integration
+    /// order, with everything the dense-output interpolant needs:
+    /// `(t_offset, h, y_before, y_after, kr, kv, fsal_r, fsal_v)` — the sub-step's
+    /// start offset from `epoch` (seconds) and signed length, the states at its
+    /// two ends, the 12 step stages, and the FSAL derivative `K[12]` at the end
+    /// (which this loop computes anyway as the next sub-step's first stage). The
+    /// plain `step` passes a no-op; `step_dense` builds a [`DenseSegment`]. Keeping
+    /// one loop means the two paths cannot drift in their accept/reject or
+    /// endpoint-clamping logic.
+    #[allow(clippy::too_many_arguments)]
+    fn integrate(
         &self,
         force: &dyn ForceModel,
         epoch: Epoch,
         state: &StateVector,
         dt: f64,
+        mut on_accept: impl FnMut(
+            f64,
+            f64,
+            &StateVector,
+            &StateVector,
+            &StageDerivs,
+            &StageDerivs,
+            nalgebra::Vector3<f64>,
+            nalgebra::Vector3<f64>,
+        ) -> Result<(), IntegratorError>,
     ) -> Result<StateVector, IntegratorError> {
         if dt == 0.0 {
             return Ok(*state);
@@ -493,7 +527,8 @@ impl Integrator for Dop853 {
                 h_abs = h.abs();
 
                 let step_epoch = epoch.shifted_by_seconds(t);
-                let (y_new, error_norm) = self.attempt_step(force, step_epoch, &y, fr, fv, h)?;
+                let (y_new, error_norm, kr, kv) =
+                    self.attempt_step(force, step_epoch, &y, fr, fv, h)?;
 
                 if error_norm < 1.0 {
                     let raw = if error_norm == 0.0 {
@@ -507,11 +542,14 @@ impl Integrator for Dop853 {
 
                     // Accept: advance, and compute the derivative at the new point
                     // for the next sub-step's first stage (DOP853's FSAL slot).
+                    let t_start = t;
+                    let y_start = y;
                     t = t_new;
                     y = y_new;
                     let (nfr, nfv) = derivative(force, epoch.shifted_by_seconds(t), &y)?;
                     fr = nfr;
                     fv = nfv;
+                    on_accept(t_start, h, &y_start, &y, &kr, &kv, nfr, nfv)?;
                     break;
                 }
                 h_abs *= DOP_MIN_FACTOR.max(DOP_SAFETY * error_norm.powf(DOP_ERR_EXPONENT));
@@ -520,14 +558,237 @@ impl Integrator for Dop853 {
         }
         Ok(y)
     }
+
+    /// Advance `state` by `dt` **and** emit the dense-output segments spanning
+    /// `[epoch, epoch + dt]` (§10.9). Returns the state at `epoch + dt` (identical
+    /// to [`Integrator::step`]) together with one [`DenseSegment`] per accepted
+    /// adaptive sub-step, in integration order — the continuous extension the
+    /// [`clock`](crate::clock) samples for sub-snapshot queries.
+    ///
+    /// Each recorded step costs **3 force evaluations** beyond a plain step (the
+    /// extra dense-output stages), so this is the deliberately-more-expensive path
+    /// taken only when the interpolant is wanted. Backward spans (`dt < 0`) emit
+    /// segments with `t1 < t0`; [`DenseSegment`] evaluates either direction.
+    pub fn step_dense(
+        &self,
+        force: &dyn ForceModel,
+        epoch: Epoch,
+        state: &StateVector,
+        dt: f64,
+    ) -> Result<(StateVector, Vec<DenseSegment>), IntegratorError> {
+        let t0_abs = epoch.tdb_seconds_past_j2000();
+        let mut segments: Vec<DenseSegment> = Vec::new();
+        let end = self.integrate(
+            force,
+            epoch,
+            state,
+            dt,
+            |t_off, h, y0, y1, kr, kv, fsal_r, fsal_v| {
+                let seg = DenseSegment::build(
+                    force,
+                    epoch.shifted_by_seconds(t_off),
+                    t0_abs + t_off,
+                    h,
+                    y0,
+                    y1,
+                    kr,
+                    kv,
+                    fsal_r,
+                    fsal_v,
+                )?;
+                segments.push(seg);
+                Ok(())
+            },
+        )?;
+        Ok((end, segments))
+    }
 }
 
-/// DOP853 Butcher tableau + embedded-error weights, transcribed verbatim from
-/// SciPy's `scipy/integrate/_ivp/dop853_coefficients.py` (v1.17.1), itself a copy
-/// of Hairer, Nørsett & Wanner's published constants. Only the 12 stages of the
-/// step are kept; the 4 dense-output stages (§10.9) are omitted. `E5`/`E3` carry
-/// a trailing zero for the FSAL row so the index range matches SciPy's `K`, even
-/// though that stage is never computed here.
+/// One accepted DOP853 sub-step's **dense output**: the degree-7 continuous
+/// extension `y(t)` valid across `[t0, t1]` (§10.9).
+///
+/// Built by [`Dop853::step_dense`] from the 12 step stages, the FSAL derivative,
+/// and 3 extra stage evaluations, this reproduces the integrator's own accuracy
+/// *between* its steps — [`eval`](DenseSegment::eval) at either endpoint returns
+/// the integrated state exactly, and interior points interpolate through the
+/// trajectory's curvature (not linearly across it). Both position and velocity
+/// come out of the same interpolant; per DOP853's construction the interpolated
+/// velocity is not the exact time-derivative of the interpolated position (they
+/// agree only to interpolation order) — this matches Hairer/SciPy and is correct.
+///
+/// `t0`/`t1` are absolute TDB seconds past J2000; `t1 - t0 = h` is signed (a
+/// backward step has `t1 < t0`). [`lo`](DenseSegment::lo)/[`hi`](DenseSegment::hi)
+/// give the covered interval regardless of direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DenseSegment {
+    /// Segment start, absolute TDB seconds past J2000.
+    t0: f64,
+    /// Signed step length `t1 - t0`, seconds.
+    h: f64,
+    /// State at `t0` (the interpolation base point).
+    y0: StateVector,
+    /// Interpolation coefficients for position (`F[0..7]`, SciPy convention).
+    fr: [nalgebra::Vector3<f64>; 7],
+    /// Interpolation coefficients for velocity (`F[0..7]`, SciPy convention).
+    fv: [nalgebra::Vector3<f64>; 7],
+}
+
+impl DenseSegment {
+    /// Assemble the interpolant for one accepted sub-step. Computes the 3 extra
+    /// dense-output stages (the only new force evaluations) from the already-known
+    /// 12 step stages `(kr, kv)` and the FSAL derivative `(fsal_r, fsal_v)`, then
+    /// forms the 7 interpolation coefficients per SciPy's `_dense_output_impl`:
+    /// `F[0] = Δy`, `F[1] = h·f₀ − Δy`, `F[2] = 2Δy − h·(f₁ + f₀)`, and
+    /// `F[3..7] = h · D · K` over the full 16-stage `K`.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        force: &dyn ForceModel,
+        step_epoch: Epoch,
+        t0: f64,
+        h: f64,
+        y0: &StateVector,
+        y1: &StateVector,
+        kr: &StageDerivs,
+        kv: &StageDerivs,
+        fsal_r: nalgebra::Vector3<f64>,
+        fsal_v: nalgebra::Vector3<f64>,
+    ) -> Result<Self, IntegratorError> {
+        use dop853_tableau::{A_EXTRA, C_EXTRA, D};
+        use nalgebra::Vector3;
+
+        // Full 16-stage K: the 12 step stages, the FSAL derivative (K[12]), then
+        // the 3 extra stages (K[13..16]) evaluated at C_EXTRA·h and coupled by
+        // A_EXTRA against all earlier stages.
+        let mut kr16 = [Vector3::zeros(); 16];
+        let mut kv16 = [Vector3::zeros(); 16];
+        kr16[..12].copy_from_slice(kr);
+        kv16[..12].copy_from_slice(kv);
+        kr16[12] = fsal_r;
+        kv16[12] = fsal_v;
+
+        for (e, a_row) in A_EXTRA.iter().enumerate() {
+            let s = 13 + e;
+            let mut dr = Vector3::zeros();
+            let mut dv = Vector3::zeros();
+            for j in 0..s {
+                let a = a_row[j];
+                if a != 0.0 {
+                    dr += a * kr16[j];
+                    dv += a * kv16[j];
+                }
+            }
+            let stage = StateVector::new(y0.position + h * dr, y0.velocity + h * dv);
+            let acc = force.acceleration(step_epoch.shifted_by_seconds(C_EXTRA[e] * h), &stage)?;
+            kr16[s] = stage.velocity;
+            kv16[s] = acc;
+        }
+
+        let delta_r = y1.position - y0.position;
+        let delta_v = y1.velocity - y0.velocity;
+
+        let mut fr = [Vector3::zeros(); 7];
+        let mut fv = [Vector3::zeros(); 7];
+        // F[0] = Δy
+        fr[0] = delta_r;
+        fv[0] = delta_v;
+        // F[1] = h·f₀ − Δy  (f₀ = K[0])
+        fr[1] = h * kr16[0] - delta_r;
+        fv[1] = h * kv16[0] - delta_v;
+        // F[2] = 2Δy − h·(f₁ + f₀)  (f₁ = FSAL = K[12])
+        fr[2] = 2.0 * delta_r - h * (kr16[12] + kr16[0]);
+        fv[2] = 2.0 * delta_v - h * (kv16[12] + kv16[0]);
+        // F[3..7] = h · D · K
+        for (k, d_row) in D.iter().enumerate() {
+            let mut sr = Vector3::zeros();
+            let mut sv = Vector3::zeros();
+            for s in 0..16 {
+                let d = d_row[s];
+                if d != 0.0 {
+                    sr += d * kr16[s];
+                    sv += d * kv16[s];
+                }
+            }
+            fr[3 + k] = h * sr;
+            fv[3 + k] = h * sv;
+        }
+
+        Ok(Self {
+            t0,
+            h,
+            y0: *y0,
+            fr,
+            fv,
+        })
+    }
+
+    /// Lower bound of the covered interval, absolute TDB seconds (`min(t0, t1)`).
+    pub fn lo(&self) -> f64 {
+        self.t0.min(self.t0 + self.h)
+    }
+
+    /// Upper bound of the covered interval, absolute TDB seconds (`max(t0, t1)`).
+    pub fn hi(&self) -> f64 {
+        self.t0.max(self.t0 + self.h)
+    }
+
+    /// Whether `t` (absolute TDB seconds) falls within this segment's covered
+    /// interval, up to a small slack for the shared endpoints between segments.
+    pub fn contains(&self, t: f64) -> bool {
+        let slack = 1e-6 * self.h.abs().max(1.0);
+        t >= self.lo() - slack && t <= self.hi() + slack
+    }
+
+    /// Evaluate the interpolant at absolute TDB second `t`. For `t` inside
+    /// `[lo, hi]` this is the 7th-order dense output; the two endpoints return the
+    /// integrated states exactly. Evaluating outside the interval extrapolates the
+    /// polynomial (the clock never does this — it selects the covering segment).
+    ///
+    /// Reversed-Horner form (SciPy `Dop853DenseOutput._call_impl`): with the
+    /// normalized coordinate `x = (t − t0)/h`, accumulate the coefficients from
+    /// `F[6]` down to `F[0]`, multiplying by `x` and `(1 − x)` on alternate terms,
+    /// then add the base state `y0`.
+    pub fn eval(&self, t: f64) -> StateVector {
+        let x = (t - self.t0) / self.h;
+        let mut yr = nalgebra::Vector3::zeros();
+        let mut yv = nalgebra::Vector3::zeros();
+        for i in 0..7 {
+            let idx = 6 - i;
+            yr += self.fr[idx];
+            yv += self.fv[idx];
+            if i % 2 == 0 {
+                yr *= x;
+                yv *= x;
+            } else {
+                yr *= 1.0 - x;
+                yv *= 1.0 - x;
+            }
+        }
+        StateVector::new(self.y0.position + yr, self.y0.velocity + yv)
+    }
+}
+
+impl Integrator for Dop853 {
+    fn step(
+        &self,
+        force: &dyn ForceModel,
+        epoch: Epoch,
+        state: &StateVector,
+        dt: f64,
+    ) -> Result<StateVector, IntegratorError> {
+        // Plain step: the shared adaptive loop with a no-op accept hook (no dense
+        // segments recorded, so no extra force evaluations).
+        self.integrate(force, epoch, state, dt, |_, _, _, _, _, _, _, _| Ok(()))
+    }
+}
+
+/// DOP853 Butcher tableau + embedded-error weights + dense-output tables,
+/// transcribed verbatim from SciPy's `scipy/integrate/_ivp/dop853_coefficients.py`
+/// (v1.17.1), itself a copy of Hairer, Nørsett & Wanner's published constants. The
+/// step tableau (`A`, `B`, `C`) keeps the 12 stages of the step; the dense-output
+/// tables (`C_EXTRA`, `A_EXTRA`, `D`, §10.9) add the 3 extra stages the continuous
+/// extension needs on top of the FSAL derivative. `E5`/`E3` carry a trailing zero
+/// for the FSAL row so the index range matches SciPy's `K`, even though that stage
+/// contributes nothing to the error estimate.
 mod dop853_tableau {
     /// Stage-coupling coefficients (strictly lower-triangular).
     pub const A: [[f64; 12]; 12] = [
@@ -752,6 +1013,164 @@ mod dop853_tableau {
         0.20136540080403034,
         0.02265179219836082,
         0.0,
+    ];
+
+    // ---- Dense output (7th-order continuous extension, §10.9) --------------
+    //
+    // DOP853's dense output builds a degree-7 interpolant per accepted step from
+    // the 12 step stages, the FSAL derivative (K[12]), and **3 extra** stage
+    // evaluations (K[13], K[14], K[15]) at the nodes in [`C_EXTRA`], coupled by
+    // the rows in [`A_EXTRA`]. The interpolation coefficients `F[3..7]` are then
+    // `h · D · K` over the full 16-stage `K` (see [`super::DenseSegment`]). All
+    // three tables are transcribed from the same SciPy v1.17.1
+    // `dop853_coefficients.py` as the step tableau above (there `A_EXTRA =
+    // A[13:]`, `C_EXTRA = C[13:]`, `D` is `(INTERPOLATOR_POWER-3, N_STAGES_EXTENDED)
+    // = (4, 16)`). Unlike the step tableau, these have **no** cheap self-consistency
+    // identity — they are pinned instead by the interior-point polynomial
+    // reproduction tests (a mistyped `D` still matches both step endpoints but
+    // breaks the interior; see the dense-output tests).
+
+    /// Nodes of the 3 extra dense-output stages (K[13], K[14], K[15]), as
+    /// fractions of the step. (`C[13:16]` in SciPy.)
+    pub const C_EXTRA: [f64; 3] = [0.1, 0.2, 0.7777777777777778];
+
+    /// Stage-coupling rows for the 3 extra dense-output stages. Row `e` (for
+    /// stage `13 + e`) dots against the already-computed `K[0..13+e]` (all step
+    /// stages plus the FSAL derivative and any earlier extra stages), so the
+    /// arrays are length 16 with trailing zeros. (`A[13:16]` in SciPy.)
+    pub const A_EXTRA: [[f64; 16]; 3] = [
+        [
+            0.056167502283047954,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.25350021021662483,
+            -0.2462390374708025,
+            -0.12419142326381637,
+            0.15329179827876568,
+            0.00820105229563469,
+            0.007567897660545699,
+            -0.008298,
+            0.0,
+            0.0,
+            0.0,
+        ],
+        [
+            0.03183464816350214,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.028300909672366776,
+            0.053541988307438566,
+            -0.05492374857139099,
+            0.0,
+            0.0,
+            -0.00010834732869724932,
+            0.0003825710908356584,
+            -0.00034046500868740456,
+            0.1413124436746325,
+            0.0,
+            0.0,
+        ],
+        [
+            -0.42889630158379194,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -4.697621415361164,
+            7.683421196062599,
+            4.06898981839711,
+            0.3567271874552811,
+            0.0,
+            0.0,
+            0.0,
+            -0.0013990241651590145,
+            2.9475147891527724,
+            -9.15095847217987,
+            0.0,
+        ],
+    ];
+
+    /// Interpolation-coefficient weights for `F[3], F[4], F[5], F[6]`: each row
+    /// `k` gives `F[3+k] = h · Σₛ D[k][s]·K[s]` over the full 16-stage `K`.
+    /// (`D`, shape `(4, 16)`, in SciPy.)
+    pub const D: [[f64; 16]; 4] = [
+        [
+            -8.428938276109013,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.5667149535193777,
+            -3.0689499459498917,
+            2.38466765651207,
+            2.117034582445028,
+            -0.871391583777973,
+            2.2404374302607883,
+            0.6315787787694688,
+            -0.08899033645133331,
+            18.148505520854727,
+            -9.194632392478356,
+            -4.436036387594894,
+        ],
+        [
+            10.427508642579134,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            242.28349177525817,
+            165.20045171727028,
+            -374.5467547226902,
+            -22.113666853125306,
+            7.733432668472264,
+            -30.674084731089398,
+            -9.332130526430229,
+            15.697238121770845,
+            -31.139403219565178,
+            -9.35292435884448,
+            35.81684148639408,
+        ],
+        [
+            19.985053242002433,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -387.0373087493518,
+            -189.17813819516758,
+            527.8081592054236,
+            -11.57390253995963,
+            6.8812326946963,
+            -1.0006050966910838,
+            0.7777137798053443,
+            -2.778205752353508,
+            -60.19669523126412,
+            84.32040550667716,
+            11.99229113618279,
+        ],
+        [
+            -25.69393346270375,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -154.18974869023643,
+            -231.5293791760455,
+            357.6391179106141,
+            93.40532418362432,
+            -37.45832313645163,
+            104.0996495089623,
+            29.8402934266605,
+            -43.53345659001114,
+            96.32455395918828,
+            -39.17726167561544,
+            -149.72683625798564,
+        ],
     ];
 }
 
@@ -1068,5 +1487,157 @@ mod tests {
         let dynamic: &dyn Integrator = &Dop853::new();
         let s = StateVector::from_components(1.0, 0.0, 0.0, 0.0, 1.0, 0.0);
         assert!(dynamic.step(&field, epoch0(), &s, 0.01).is_ok());
+    }
+
+    // ---- DOP853 dense output (§10.9) --------------------------------------
+
+    /// A spatially-uniform acceleration that is a power of time: `a(t) = c·tᵖ`
+    /// (t = seconds past J2000). The trajectory is a polynomial of degree `p + 2`,
+    /// which DOP853's degree-7 dense output reproduces exactly for `p ≤ 5`.
+    struct PowerInTimeField {
+        c: Vector3<f64>,
+        p: i32,
+    }
+    impl ForceModel for PowerInTimeField {
+        fn acceleration(
+            &self,
+            epoch: Epoch,
+            _state: &StateVector,
+        ) -> Result<Vector3<f64>, ForceError> {
+            Ok(self.c * epoch.tdb_seconds_past_j2000().powi(self.p))
+        }
+    }
+
+    /// A plain `step_dense` and `step` must integrate the *identical* trajectory —
+    /// the dense path only records segments (extra stage evals that don't feed
+    /// back), so the returned final states are bit-for-bit equal, and the dense
+    /// eval reproduces the integrator's own state exactly at the step endpoints.
+    #[test]
+    fn dense_output_endpoints_match_the_step() {
+        let mu = 1.327_124_400_18e20;
+        let field = PointMassGravity::new(vec![(mu, FixedPerturber::at_origin()).into()]);
+        let au = 1.495_978_707e11;
+        let s0 = StateVector::from_components(au, 0.0, 0.0, 0.0, (mu / au).sqrt(), 0.0);
+        let span = 40.0 * 86_400.0;
+        let dop = Dop853::new();
+
+        let (end, segs) = dop.step_dense(&field, epoch0(), &s0, span).unwrap();
+        let plain = dop.step(&field, epoch0(), &s0, span).unwrap();
+        assert_eq!(
+            end, plain,
+            "dense and plain paths must integrate identically"
+        );
+        assert!(!segs.is_empty());
+
+        let first = segs.first().unwrap();
+        let last = segs.last().unwrap();
+        // x=0 and x=1 zero out F[3..6], so endpoints recover the integrated states.
+        assert!((first.eval(first.lo()).position - s0.position).norm() / au < 1e-12);
+        assert!((last.eval(last.hi()).position - end.position).norm() / au < 1e-12);
+        // Segments tile the span contiguously from the seed epoch to the target.
+        assert!((first.lo() - epoch0().tdb_seconds_past_j2000()).abs() < 1e-6);
+        assert!((last.hi() - span).abs() < 1e-6);
+        for w in segs.windows(2) {
+            assert!(
+                (w[0].hi() - w[1].lo()).abs() < 1e-6,
+                "segments must be contiguous"
+            );
+        }
+    }
+
+    /// The D-matrix pin. Endpoint continuity and the tableau consistency identities
+    /// are both **blind to D** (F[3..6] vanish at x∈{0,1}), so D is only exercised
+    /// at *interior* points. A polynomial trajectory of degree ≤ 7 is reproduced
+    /// exactly by the correct dense output at every x; `p = 3` (a quintic path)
+    /// makes the `h·D·K` coefficients genuinely nonzero, so a mistyped D — which
+    /// still matches both endpoints — breaks the interior match here.
+    #[test]
+    fn dense_output_reproduces_polynomial_interior_pins_d() {
+        for p in [1, 3] {
+            let c = Vector3::new(0.7, -0.4, 0.2);
+            let field = PowerInTimeField { c, p };
+            let r0 = Vector3::new(1.0, -2.0, 0.5);
+            let v0 = Vector3::new(0.3, 0.1, -0.2);
+            let s0 = StateVector::new(r0, v0);
+            let span = 8.0;
+
+            let (_, segs) = Dop853::new()
+                .step_dense(&field, epoch0(), &s0, span)
+                .unwrap();
+            assert!(!segs.is_empty());
+            let (pp1, pp2) = ((p + 1) as f64, (p + 2) as f64);
+            for seg in &segs {
+                for f in [0.13, 0.37, 0.5, 0.71, 0.92] {
+                    let t = seg.lo() + f * (seg.hi() - seg.lo());
+                    let got = seg.eval(t);
+                    let r_exact = r0 + v0 * t + c * t.powi(p + 2) / (pp1 * pp2);
+                    let v_exact = v0 + c * t.powi(p + 1) / pp1;
+                    // Relative bound: the interpolation error scales with the
+                    // trajectory magnitude, while its floor is the hifitime ns
+                    // quantization of the stage epochs (reading *absolute* tᵖ time
+                    // amplifies a ~0.5 ns stage-epoch slip; see the sibling
+                    // epoch-threading test). A mistyped D — invisible at the
+                    // endpoints — instead injects an O(1)-relative spurious term at
+                    // these interior points, so 1e-8 relative cleanly pins D.
+                    let rel_pos = (got.position - r_exact).norm() / r_exact.norm().max(1.0);
+                    let rel_vel = (got.velocity - v_exact).norm() / v_exact.norm().max(1.0);
+                    assert!(
+                        rel_pos < 1e-8,
+                        "p={p}: interior pos rel err {rel_pos:.3e} at t={t}"
+                    );
+                    assert!(
+                        rel_vel < 1e-8,
+                        "p={p}: interior vel rel err {rel_vel:.3e} at t={t}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Independent (non-polynomial) confidence: a dense eval at an interior
+    /// sub-step time equals a fresh integration to that same time, to ~integration
+    /// tolerance. The two paths pick different internal steps, so agreement is to
+    /// tolerance, not machine ε (HANDOFF §2 determinism note).
+    #[test]
+    fn dense_output_matches_reintegration_on_two_body() {
+        let mu = 1.327_124_400_18e20;
+        let field = PointMassGravity::new(vec![(mu, FixedPerturber::at_origin()).into()]);
+        let au = 1.495_978_707e11;
+        let s0 = StateVector::from_components(au, 0.0, 0.0, 0.0, (mu / au).sqrt(), 0.0);
+        let span = 60.0 * 86_400.0;
+        let dop = Dop853::new();
+
+        let (_, segs) = dop.step_dense(&field, epoch0(), &s0, span).unwrap();
+        let seg = &segs[segs.len() / 2];
+        let t = seg.lo() + 0.5 * (seg.hi() - seg.lo());
+        let dense = seg.eval(t);
+
+        let dt = t - epoch0().tdb_seconds_past_j2000();
+        let reint = dop.step(&field, epoch0(), &s0, dt).unwrap();
+        let rel = (dense.position - reint.position).norm() / au;
+        assert!(rel < 1e-8, "dense vs reintegration rel err {rel:.3e}");
+    }
+
+    /// Dense output on a **backward** span (`dt < 0`): segments carry `t1 < t0`,
+    /// and eval still reproduces the endpoints — the query convention is
+    /// direction-agnostic via `lo`/`hi`.
+    #[test]
+    fn dense_output_backward_span_endpoints() {
+        let mu = 1.327_124_400_18e20;
+        let field = PointMassGravity::new(vec![(mu, FixedPerturber::at_origin()).into()]);
+        let au = 1.495_978_707e11;
+        let s0 = StateVector::from_components(au, 0.0, 0.0, 0.0, (mu / au).sqrt(), 0.0);
+        let span = -20.0 * 86_400.0;
+        let dop = Dop853::new();
+
+        let (end, segs) = dop.step_dense(&field, epoch0(), &s0, span).unwrap();
+        assert!(!segs.is_empty());
+        // Integration ran backward: the first segment starts at the seed epoch...
+        let first = segs.first().unwrap();
+        let last = segs.last().unwrap();
+        assert!((first.hi() - epoch0().tdb_seconds_past_j2000()).abs() < 1e-6);
+        assert!((last.lo() - span).abs() < 1e-6);
+        assert!((first.eval(first.hi()).position - s0.position).norm() / au < 1e-12);
+        assert!((last.eval(last.lo()).position - end.position).norm() / au < 1e-12);
     }
 }

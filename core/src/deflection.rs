@@ -330,6 +330,25 @@ impl<'a> DeflectionScenario<'a> {
         deflection_epoch: Epoch,
         delta_v: Vector3<f64>,
     ) -> Result<Option<BPlaneEncounter>, DeflectionError> {
+        let (_clock, encounter) = self.deflected_trajectory(deflection_epoch, delta_v)?;
+        Ok(encounter)
+    }
+
+    /// Like [`evaluate`](Self::evaluate), but also hands back the propagated
+    /// post-deflection [`Clock`] — the sampled deflected arc itself, not just the
+    /// encounter it produces.
+    ///
+    /// The animation needs the trajectory, not only its perigee: it draws the
+    /// deflected path against the nominal one and against Earth to *show* the
+    /// hit becoming a miss. [`evaluate`](Self::evaluate) is defined in terms of
+    /// this method (discarding the clock), so the two can never disagree on the
+    /// encounter — the displayed track and the reported b-plane perigee come from
+    /// one propagation.
+    pub fn deflected_trajectory(
+        &self,
+        deflection_epoch: Epoch,
+        delta_v: Vector3<f64>,
+    ) -> Result<(Clock, Option<BPlaneEncounter>), DeflectionError> {
         let t_d = deflection_epoch.tdb_seconds_past_j2000();
         if t_d >= self.span_end_seconds {
             return Err(DeflectionError::InvalidInput(format!(
@@ -356,10 +375,11 @@ impl<'a> DeflectionScenario<'a> {
         )?;
 
         let ca = closest_approach(&clock, self.earth, self.scan)?;
-        match ca {
-            Some(c) => Ok(Some(c.b_plane(self.mu_earth, self.earth_radius)?)),
-            None => Ok(None),
-        }
+        let encounter = match ca {
+            Some(c) => Some(c.b_plane(self.mu_earth, self.earth_radius)?),
+            None => None,
+        };
+        Ok((clock, encounter))
     }
 
     /// The b-plane perigee (m) after a `magnitude`·`direction` impulse at
@@ -686,6 +706,57 @@ mod tests {
             )
             .expect("solve");
         assert_eq!(dv, 0.0);
+    }
+
+    /// `deflected_trajectory` and `evaluate` must never disagree on the encounter:
+    /// `evaluate` is *defined* as `deflected_trajectory().1`, and the animation
+    /// draws the returned clock while the planner reports that same perigee — so
+    /// the visible track and the headline number come from one propagation. We
+    /// also re-scan the returned clock ourselves and confirm the perigee it yields
+    /// matches, i.e. the sampled arc the painter walks is the arc the b-plane was
+    /// reduced from — the displayed miss cannot silently lie.
+    #[test]
+    fn deflected_trajectory_and_evaluate_agree() {
+        let force = ZeroForce;
+        let earth = |_e: Epoch| Ok(StateVector::new(Vector3::zeros(), Vector3::zeros()));
+        let sc = straight_line_scenario(&force, &earth);
+
+        let e0 = Epoch::from_tdb_seconds_past_j2000(0.0);
+        // A cross-track nudge that opens a real miss (not a clean escape past the
+        // scan gate, so both paths carry a Some(encounter) to compare).
+        let dv = Vector3::new(0.0, 0.05, 0.0);
+
+        let from_eval = sc.evaluate(e0, dv).expect("evaluate");
+        let (clock, from_traj) = sc.deflected_trajectory(e0, dv).expect("trajectory");
+
+        // Both must agree the pass is (or isn't) an encounter, and on its perigee.
+        match (from_eval, from_traj) {
+            (Some(a), Some(b)) => {
+                assert_eq!(
+                    a.perigee, b.perigee,
+                    "evaluate and deflected_trajectory disagree on perigee"
+                );
+                // The returned clock, re-scanned independently, reproduces it.
+                let ca = closest_approach(&clock, &earth, sc.scan)
+                    .expect("scan")
+                    .expect("close approach");
+                let bp = ca.b_plane(MU_EARTH, R_EARTH).expect("b-plane");
+                assert!(
+                    (bp.perigee - a.perigee).abs() <= 1.0e-6 * a.perigee.abs().max(1.0),
+                    "re-scanned clock perigee {:.6e} ≠ reported {:.6e}",
+                    bp.perigee,
+                    a.perigee
+                );
+            }
+            (None, None) => panic!("expected an encounter for this nudge"),
+            (l, r) => panic!("evaluate/trajectory encounter mismatch: {l:?} vs {r:?}"),
+        }
+
+        // The clock is the post-deflection arc: it starts at the deflection epoch
+        // with the impulse folded into the seed velocity.
+        let seed = sc.nominal().state_at(e0).unwrap();
+        let start = clock.state_at(e0).unwrap();
+        assert_eq!(start.velocity, seed.velocity + dv);
     }
 
     // ---- Test 3: the thesis — earlier deflection costs less Δv ---------------

@@ -6,9 +6,33 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[lib]
+name = "viewer"
+path = "src/lib.rs"
+
+# The default binary (the egui app, task 10 Commit B2) — kept as `src/main.rs`.
+# `src/bin/curve.rs` is the headless Δv-vs-lead sweep (Commit B1): it imports the
+# egui-free `viewer::scenario` and prints the curve, so the physics thesis is
+# proven before any renderer links.
+[[bin]]
+name = "viewer"
+path = "src/main.rs"
+
 [dependencies]
 asteroid_core = { version = "0.1.0", path = "../core" }
-# The egui rendering stack (eframe/egui/egui_plot, and the wgpu/GPU deps it drags
-# in) is deferred to task 10, when the viewer actually renders. Adding it now
-# taxes every intermediate task's build for a scaffold that only prints. Re-add
-# with `cargo add eframe egui egui_plot` when task 10 wires the real UI.
+# anise, for the frame constants (EARTH_J2000 / SUN_J2000) the scenario builder
+# needs to pull Earth/Sun states from the DE440 kernel. default-features off for
+# the same offline reason core sets it (no network metaload).
+anise = { version = "0.10.3", default-features = false }
+nalgebra.workspace = true
+# serde (+ serde_json): the `curve` binary serialises the swept Δv-vs-lead curve
+# to curve.json (a fixed property of the designed scenario), and the egui app
+# loads it instantly instead of re-running the ~680 s sweep on startup.
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+# The egui rendering stack (Commit B2). egui_plot 0.36 tracks egui 0.35 (the plot
+# crate's minor lags egui's by one), so this trio resolves to a single egui — a
+# mismatch would drag in a second egui and PlotUi/Line types would not unify.
+eframe = "0.35.0"
+egui = "0.35.0"
+egui_plot = "0.36.0"

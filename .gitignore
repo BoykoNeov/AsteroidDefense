@@ -36,6 +36,16 @@ env/
 # NOTE: generated validation fixtures (pyref/ output, *.json) ARE committed —
 #       they are the reference column the Rust test suite asserts against.
 
+# ---- Godot MCP editor plugin (dev tooling, not part of the Rust workspace) ----
+/addons/
+
+# ---- Viewer runtime artifact ----
+# curve.json is the cached Δv-vs-lead sweep the egui app loads: a regenerable
+# product of `cargo run -p viewer --bin curve` (a fixed property of the designed
+# scenario), not a source or a committed validation fixture. Root-only so it does
+# not shadow the committed pyref/ *.json fixtures.
+/curve.json
+
 # ---- OS / editor ----
 .DS_Store
 Thumbs.db

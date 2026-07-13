@@ -46,6 +46,11 @@ env/
 # not shadow the committed pyref/ *.json fixtures.
 /curve.json
 
+# ---- Local clickable launchers (dev convenience, machine-specific paths) ----
+# scripts/*.cmd hold a hard-coded local kernel path; regenerable and personal,
+# so kept out of the public repo.
+/scripts/
+
 # ---- OS / editor ----
 .DS_Store
 Thumbs.db

@@ -19,9 +19,7 @@ fn main() {
         .nth(1)
         .or_else(|| std::env::var("ASTEROID_PLANETARY_CONSTANTS").ok())
         .unwrap_or_else(|| {
-            eprintln!(
-                "usage: probe_sun_gm <pck11.pca>  (or set ASTEROID_PLANETARY_CONSTANTS)"
-            );
+            eprintln!("usage: probe_sun_gm <pck11.pca>  (or set ASTEROID_PLANETARY_CONSTANTS)");
             std::process::exit(2);
         });
 
@@ -33,7 +31,10 @@ fn main() {
         }
     };
 
-    match (eph.gm_km3_s2(anise::constants::frames::SUN_J2000), eph.sun_gm_m3_s2()) {
+    match (
+        eph.gm_km3_s2(anise::constants::frames::SUN_J2000),
+        eph.sun_gm_m3_s2(),
+    ) {
         (Ok(km), Ok(si)) => {
             println!("Sun GM (ANISE, from {pca}):");
             println!("  {km:.6} km^3/s^2");

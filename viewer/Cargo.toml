@@ -1,6 +1,9 @@
 [package]
 name = "viewer"
 version = "0.1.0"
+# The crate ships three bins (viewer, curve, probe_prop); name the egui app as
+# the default so `cargo run -p viewer` is unambiguous.
+default-run = "viewer"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true

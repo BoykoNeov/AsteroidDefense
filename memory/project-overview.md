@@ -449,10 +449,52 @@ Tier-2, `linux_p1550p2650.440` ASSIST-only) live under
 `pyref`. ANISE reads the `.bsp`+`.pca`; wire via `ASTEROID_DE_KERNEL` /
 `ASTEROID_PLANETARY_CONSTANTS`.
 
-**Next concrete step (task-10 Commit B):** **`viewer/` (egui)** — add the
-`eframe/egui/egui_plot` deps (deliberately deferred until now), render the
-Δv-vs-lead-time headline curve from `DeflectionScenario::required_dv_along_track`
-over the **real DE440 field** (multi-orbit leads), then the
-rewind→nudge→re-propagate→"Earth slides out of the way" painter animation
-(floating-origin). Watch the three carry-forward items above. See
-[[git-workflow]] for commit/push cadence.
+**Task 10 Commit B (§10.10) — egui viewer DONE (physics tested, GUI UNRUN).**
+Commit `ef82cfa`. Split **B1** (headless curve gate) → **B2** (egui app); egui-free
+physics in `viewer/src/scenario.rs`. **Core add** (`deflection.rs`):
+`DeflectionScenario::deflected_trajectory(epoch,Δv) -> (Clock, Option<BPlaneEncounter>)`
+returns the post-deflection track *and* its encounter; `evaluate` now delegates to
+it (one propagation path). Equivalence test: the returned clock re-scanned == the
+reported perigee, so the drawn track and the headline number can't diverge.
+**`scenario.rs`**: `RealFieldScenario` back-propagates a designer DE440
+Earth-impactor (default 12-yr campaign, 18 km/s v_rel → **a=0.855 AU, T=0.79 yr,
+15.19 orbits of lead**); `CurvePoint`(serde)+`CurveFile`+`DEFAULT_CURVE_JSON`;
+`sweep` = the headline curve; `EncounterFrame`+`nominal_hit`+`frame_from` sample
+both asteroid tracks **geocentric** (Earth-at-origin) over ±1.5 d centred on impact,
+reusing a prebuilt `DeflectionScenario`+nominal encounter so each nudge pays only
+the short post-deflection arc — the full 12-yr nominal scan is **hoisted out**
+(measured **401 s in DEBUG** when recomputed per call; release `frame_from` is
+sub-second-to-few-s, cost ∝ arc length). Shared consts
+`ENCOUNTER_HALF_WINDOW_SECONDS`/`ENCOUNTER_SAMPLES` used by app **and** test.
+**B1 GATE PASS**: real-field sweep log-log slope **−1.049 (all) / −0.912 (tail ≥1
+orbit)** → the multi-orbit `Δv∝1/lead` falloff is **REAL** (carry-item (a)
+discharged). The `curve` binary writes `curve.json` (**gitignored runtime
+artifact**; a fixed property of the design, computed once ~480–680 s, app loads
+instantly — no live recompute, per advisor). **egui app** (`main.rs`): worker-thread
+build (~12 s) + per-nudge `frame_from` on the worker, **coalesced single-in-flight**
+requests, `ctx.request_repaint` from the worker; left panel = Δv log-log curve from
+`curve.json` + current-lead marker; central = encounter-frame painter (Earth disc +
+focused capture radius, **nominal-red spears / deflected-green slides past**); **play
+sweeps only the in-view band** (~2% of the window the asteroid is on-screen —
+advisor caught that a full-window sweep leaves both dots clipped ~5.9/6 s). Displayed
+miss = `deflected_perigee` (exact from the b-plane, not pixel geometry). **eframe
+0.35 API churn**: `App::ui(&mut Ui)` (not `update(ctx)`); panels unified to
+`egui::containers::Panel::{top,left}` (SidePanel/TopBottomPanel gone, `default_size`
+not `default_width`); **`egui_plot` 0.36 pairs with egui 0.35** (0.35 wanted egui
+0.34 — a two-egui mismatch). `probe_prop` retargeted to time `frame_from` (the real
+per-nudge cost) in release.
+
+**HONEST STATUS: the GUI has NOT been run** — no display in the build env, so
+painter / projection basis / world→screen scaling / panel layout / play animation
+have **zero runtime validation**. Only the physics is tested (73 core + a
+kernel-gated viewer test that pins the drawn track brackets the reported perigee;
+clippy clean). Validate with a manual `cargo run -p viewer --release`
+(`ASTEROID_DE_KERNEL`/`ASTEROID_PLANETARY_CONSTANTS` set) — the **play animation
+especially**; advisor flagged it will likely need a tweak once seen.
+
+**Carry forward:** (b) real-Earth-mass focusing / path-bending still **untested**
+(the massless-Earth `NotHyperbolic→hit` branch rarely fires with real mass); (c) the
+**1.0-orbit** curve point (Δv 0.428→0.510) is expected **phasing non-monotonicity**
+(impulse phase vs encounter geometry), absorbed by the LSQ fit — not a bug, but
+watch curve smoothness. **Next:** run the GUI to validate B2 visuals; then remaining
+task-10 polish or the next HANDOFF task. See [[git-workflow]] for commit/push cadence.

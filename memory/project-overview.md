@@ -408,8 +408,51 @@ session). 64 core lib tests green, full workspace green, clippy clean.
 step-9 note), NOT surface-rotation velocity / impact footprint — that's out of
 scope for this increment (advisor confirmed the reading).
 
-**Next concrete step:** **`viewer/` (§10.10)** — the Δv-vs-lead-time headline
-chart (`egui_plot`) + the rewind→nudge→re-propagate→"Earth slides out of the way"
-animation (painter, floating-origin). The core encounter pipeline (propagate →
-clock → close-approach → b-plane hit/miss) is now complete end-to-end. See
+**Deflection core (task-10 Commit A) DONE** — advisor-steered core-first split of
+the viewer task: build the physics the headline curve needs *before* taxing the
+build with the egui/wgpu stack. New `core/src/deflection.rs` (re-exported): the
+mission-planner primitive **`apply_impulse(state, Δv)`** (adds to velocity,
+§4's entire physics coupling), `along_track_unit` (v̂ heading), thin
+**`kinetic_impactor_dv(β,m_imp,v_rel,M_ast)`** (`|Δv|=β·(m/M)·v_rel`, DART β≈3.6;
+nuclear/gravity-tractor spectrum deferred). The substance = **`DeflectionScenario`**:
+propagates the nominal once, then `evaluate(epoch,Δv)` re-propagates from the
+deflection epoch (samples nominal `state_at`, applies impulse, fresh `Clock` →
+`closest_approach` → `b_plane`) and **`required_dv`** solves the headline curve —
+geometric bracket-expand on |Δv| then bisect until the gravitationally-focused
+b-plane **perigee** (NOT raw CA distance — that's the §10.8 point) clears a safe
+target. `required_dv_along_track` fixes the §5/§7 fixed-phase along-track direction.
+
+**Two conditioning facts nailed (the hard part):** (1) with a **massless** test-
+Earth (Sun-only field, the codebase's convention), sampling a *hit* at its own CA
+is `NotHyperbolic` unless v_rel > Earth escape speed — so the thesis test uses a
+*fast* (~30 km/s, fixed-Earth gives it free) encounter + small perpendicular miss.
+(2) `perigee_after` maps **`NotHyperbolic → 0`** (a dead-centre near-collision =
+worst hit): a Δv sweep passes *through* a near-collision on its way to opening a
+miss, so the solver must read that as "still a hit," not fail. **7 kernel-free
+tests green** (72 core total): impulse/β primitives; straight-line cross-track
+machinery (solver hits target perigee to 0.5%, monotone, 0-when-already-clear);
+and the **thesis** — earlier along-track deflection needs less Δv (`dv_early <
+0.75·dv_late`, leads 0.7 vs 0.1 period). Clippy clean.
+
+**Carry to Commit B (advisor):** (a) the thesis test is **sub-orbital** — it pins
+the leverage *direction*, NOT the multi-orbit `Δv∝1/lead` accumulation (§144);
+that falloff must be visibly steeper-than-linear on the **real-field** curve or
+it's a bug. (b) `NotHyperbolic→0` is a massless-Earth artifact — with real Earth
+mass a near-centre pass is a genuine deep hyperbola, so that branch rarely fires
+and real focusing/path-bending is still untested. (c) perigee(Δv) is non-monotone
+near nominal (a dip), so the bisect can return a **conservative (non-minimal)** Δv
+— safe (never under-reports) but watch **curve monotonicity/smoothness** in B.
+
+**Kernel located (unblocks Commit B):** `de440s.bsp` + `pck11.pca` (+ `sb441-n16.bsp`
+Tier-2, `linux_p1550p2650.440` ASSIST-only) live under
+`M:\claud_projects\temp\AsteroidDefense\kernels`, git-ignored, downloaded by
+`pyref`. ANISE reads the `.bsp`+`.pca`; wire via `ASTEROID_DE_KERNEL` /
+`ASTEROID_PLANETARY_CONSTANTS`.
+
+**Next concrete step (task-10 Commit B):** **`viewer/` (egui)** — add the
+`eframe/egui/egui_plot` deps (deliberately deferred until now), render the
+Δv-vs-lead-time headline curve from `DeflectionScenario::required_dv_along_track`
+over the **real DE440 field** (multi-orbit leads), then the
+rewind→nudge→re-propagate→"Earth slides out of the way" painter animation
+(floating-origin). Watch the three carry-forward items above. See
 [[git-workflow]] for commit/push cadence.

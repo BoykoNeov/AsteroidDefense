@@ -19,6 +19,7 @@
 
 pub mod clock;
 pub mod close_approach;
+pub mod deflection;
 pub mod elements;
 pub mod ephemeris;
 pub mod epoch;
@@ -33,6 +34,10 @@ pub use clock::{Clock, ClockError};
 pub use close_approach::{
     closest_approach, find_close_approaches, CloseApproach, CloseApproachError, GeocentricState,
     ScanOptions,
+};
+pub use deflection::{
+    along_track_unit, apply_impulse, kinetic_impactor_dv, DeflectionError, DeflectionScenario,
+    DvSolveTol,
 };
 pub use elements::{ElementsError, OrbitalElements};
 pub use epoch::Epoch;

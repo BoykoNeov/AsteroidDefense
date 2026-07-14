@@ -283,8 +283,10 @@ dependencies = [
 name = "asteroid_gdext"
 version = "0.1.0"
 dependencies = [
+ "anise",
  "asteroid_core",
  "godot",
+ "nalgebra",
 ]
 
 [[package]]

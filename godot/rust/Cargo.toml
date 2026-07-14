@@ -10,9 +10,16 @@ publish = false
 # The GDExtension binding: a C-ABI dynamic library Godot loads at runtime.
 # Dependency flows ONE way — this crate depends on `asteroid_core`, never the
 # reverse (HANDOFF §10: no renderer/UI type ever links into the core).
+# `rlib` alongside `cdylib` so the godot-free `mission_core` logic can be unit
+# tested with `cargo test` (the physics/marshalling checks that must not depend
+# on a running Godot).
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 godot = "0.5.4"
 asteroid_core = { path = "../../core" }
+# anise for the J2000 frame constants + Frame::from_ephem_j2000 (body positions
+# by NAIF id); default-features off for the same offline reason core sets it.
+anise = { version = "0.10.3", default-features = false }
+nalgebra.workspace = true

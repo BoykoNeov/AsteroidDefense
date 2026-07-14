@@ -29,7 +29,9 @@ use nalgebra::Vector3;
 
 use asteroid_core::ephemeris::Ephemeris;
 use asteroid_core::scenario::{ImpactorConfig, RealFieldScenario, ScenarioError};
-use asteroid_core::{along_track_unit, Clock, DvSolveTol, Epoch};
+use asteroid_core::{
+    along_track_unit, Clock, DvSolveTol, EphemerisPerturber, Epoch, OrbitalElements, StateVector,
+};
 
 /// Kilometres per astronomical unit — the display scale positions cross into.
 const AU_KM: f64 = 1.495_978_707e8;
@@ -51,6 +53,32 @@ pub fn icrf_km_to_ecliptic_au(v_km: Vector3<f64>) -> Vector3<f64> {
         (c * v_km.y + s * v_km.z) / AU_KM,
         (-s * v_km.y + c * v_km.z) / AU_KM,
     )
+}
+
+/// Rotate an **ecliptic-J2000** vector into ICRF (equatorial-J2000) — the exact
+/// inverse of the rotation in [`icrf_km_to_ecliptic_au`] (a `+ε` about X vs the
+/// forward `−ε`), and **unit-agnostic**: it rotates a vector, so it maps both a
+/// position and a velocity. The synthetic-body seed path needs it: a designer
+/// orbit is authored with its inclination referred to the *ecliptic* (the plane
+/// the display and a human designer think in), but the integrator runs in ICRF,
+/// so the element→state result is rotated here before it is seeded.
+fn ecliptic_to_icrf(v: Vector3<f64>) -> Vector3<f64> {
+    let eps = OBLIQUITY_ARCSEC / 3600.0 * std::f64::consts::PI / 180.0;
+    let (s, c) = eps.sin_cos();
+    Vector3::new(v.x, c * v.y - s * v.z, s * v.y + c * v.z)
+}
+
+/// One body in the orrery catalog: a pre-integrated, dense-output trajectory the
+/// display scrubs over. The `Clock` is built **once** (at [`MissionCore::
+/// add_synthetic_body`]) in the same validated Tier-1 field as the threat, so a
+/// scrub query is a cheap dense-output evaluation, never a re-integration.
+struct OrreryBody {
+    /// Display label (e.g. `"C/2029 K1"`).
+    name: String,
+    /// Coarse class the frontend styles on (`"asteroid"`, `"comet"`, …).
+    kind: String,
+    /// The pre-integrated trajectory in SSB metres (the integration frame).
+    clock: Clock,
 }
 
 /// A committed deflection plan and its precomputed result.
@@ -84,6 +112,11 @@ pub struct MissionCore {
     /// The current deflection plan, recomputed only on [`set_plan`](Self::set_plan)
     /// and read cheaply thereafter.
     plan: Option<PlanState>,
+    /// The orrery catalog: extra bodies (synthetic designer comets/asteroids now,
+    /// real cataloged bodies later) each pre-integrated into a dense-output `Clock`
+    /// at add time, so the multi-body display scrubs cheaply. Independent of the
+    /// threat/plan; indexed by insertion order.
+    bodies: Vec<OrreryBody>,
 }
 
 impl MissionCore {
@@ -106,6 +139,7 @@ impl MissionCore {
             scenario: None,
             nominal_clock: None,
             plan: None,
+            bodies: Vec::new(),
         })
     }
 
@@ -121,6 +155,7 @@ impl MissionCore {
         self.scenario = Some(scenario);
         self.nominal_clock = Some(nominal_clock);
         self.plan = None; // a new scenario invalidates any prior plan
+        self.bodies.clear(); // …and any orrery bodies flown in the old field
         Ok(())
     }
 
@@ -345,6 +380,111 @@ impl MissionCore {
             .as_ref()
             .map_or(0.0, |s| s.epoch0().tdb_seconds_past_j2000())
     }
+
+    // --- Orrery catalog (the multi-body, long-span, scrubbable display) --------
+
+    /// Add a **synthetic designer body** to the orrery catalog and return its
+    /// index. The orbit is given by classical Keplerian `elements` referred to the
+    /// **ecliptic** (the plane the display and a human designer reason in), valid
+    /// at `epoch0`; the body is then integrated **once** through the scenario's
+    /// validated Tier-1 field into a dense-output [`Clock`] spanning
+    /// `n_snapshots · cadence_seconds` from `epoch0` (sign of the cadence sets the
+    /// direction — a forward span for a body seeded at the display's start epoch).
+    ///
+    /// Requires [`build_scenario`](Self::build_scenario) first (the field lives on
+    /// the scenario). The seed is built in the integration frame: element→state
+    /// about the Sun (heliocentric, ecliptic), rotate ecliptic→ICRF, add the Sun's
+    /// SSB state — the exact inverse of the read path, so a query back at `epoch0`
+    /// recovers the authored position.
+    ///
+    /// **Cost:** one N-body integration over the whole span (seconds for a
+    /// multi-decade comet). Call at load, not per frame; reads are cheap after.
+    pub fn add_synthetic_body(
+        &mut self,
+        name: &str,
+        kind: &str,
+        elements: OrbitalElements,
+        epoch0: Epoch,
+        cadence_seconds: f64,
+        n_snapshots: u32,
+    ) -> Result<usize, ScenarioError> {
+        let sc = self
+            .scenario
+            .as_ref()
+            .ok_or_else(|| ScenarioError::NominalNotAHit("scenario not built".into()))?;
+        let mu_sun = self
+            .ephemeris
+            .sun_gm_m3_s2()
+            .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
+
+        // Heliocentric ecliptic state from the elements, rotated into the ICRF
+        // integration frame, then lifted to SSB by adding the Sun's barycentric
+        // state — the seed the field integrates.
+        let helio_ecl = elements.to_state(mu_sun);
+        let helio_icrf = StateVector::new(
+            ecliptic_to_icrf(helio_ecl.position),
+            ecliptic_to_icrf(helio_ecl.velocity),
+        );
+        let sun_ssb = EphemerisPerturber::new(Arc::clone(&self.ephemeris), SUN_J2000)
+            .state_at(epoch0)
+            .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
+        let seed = StateVector::new(
+            helio_icrf.position + sun_ssb.position,
+            helio_icrf.velocity + sun_ssb.velocity,
+        );
+
+        let clock = sc.propagate_free(epoch0, seed, cadence_seconds, n_snapshots)?;
+        self.bodies.push(OrreryBody {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            clock,
+        });
+        Ok(self.bodies.len() - 1)
+    }
+
+    /// Number of bodies in the orrery catalog.
+    pub fn catalog_count(&self) -> usize {
+        self.bodies.len()
+    }
+
+    /// Display label of catalog body `i` (`None` if out of range).
+    pub fn catalog_name(&self, i: usize) -> Option<&str> {
+        self.bodies.get(i).map(|b| b.name.as_str())
+    }
+
+    /// Coarse class of catalog body `i` (`"asteroid"`/`"comet"`/…; `None` if OOR).
+    pub fn catalog_kind(&self, i: usize) -> Option<&str> {
+        self.bodies.get(i).map(|b| b.kind.as_str())
+    }
+
+    /// The propagated span of catalog body `i` as `(lo, hi)` seconds past J2000 —
+    /// the frontend clamps/hides the body outside this (the reverse/long scrub
+    /// exposes bodies with a bounded arc). `None` if `i` is out of range.
+    pub fn catalog_span_tdb(&self, i: usize) -> Option<(f64, f64)> {
+        self.bodies.get(i).map(|b| b.clock.covered_span())
+    }
+
+    /// Position of catalog body `i` at `tdb`, heliocentric **ecliptic AU** — the
+    /// same display frame as the planets and the threat. `None` if `i` is out of
+    /// range or `tdb` is outside the body's propagated span (the frontend uses
+    /// [`catalog_span_tdb`](Self::catalog_span_tdb) to know which).
+    pub fn catalog_position_ecl_au(&self, i: usize, tdb: f64) -> Option<Vector3<f64>> {
+        let b = self.bodies.get(i)?;
+        let epoch = Epoch::from_tdb_seconds_past_j2000(tdb);
+        let st = b.clock.state_at(epoch).ok()?;
+        self.ssb_m_to_helio_ecl_au(st.position, epoch)
+    }
+
+    /// Catalog body `i`'s trajectory as `n` heliocentric ecliptic-AU points across
+    /// its whole propagated span — the orbit polyline. Sampled **once**. Empty if
+    /// `i` is out of range.
+    pub fn catalog_track_ecl_au(&self, i: usize, n: usize) -> Vec<Vector3<f64>> {
+        let Some(b) = self.bodies.get(i) else {
+            return Vec::new();
+        };
+        let (t0, t1) = b.clock.covered_span();
+        self.track_ecl_au(n, t0, t1, |e| b.clock.state_at(e).ok().map(|s| s.position))
+    }
 }
 
 #[cfg(test)]
@@ -354,6 +494,15 @@ mod tests {
     fn have_kernels() -> bool {
         std::env::var("ASTEROID_DE_KERNEL").is_ok()
             && std::env::var("ASTEROID_PLANETARY_CONSTANTS").is_ok()
+    }
+
+    /// Metres per AU — for authoring synthetic-body semi-major axes in SI.
+    const AU_M: f64 = AU_KM * M_PER_KM;
+
+    /// 2035-01-01 TDB — comfortably inside the de440s span; the synthetic-body
+    /// seed epoch for the catalog tests.
+    fn epoch_2035() -> Epoch {
+        Epoch::from_tdb_gregorian(2035, 1, 1, 0, 0, 0, 0)
     }
 
     /// The obliquity rotation is a pure rotation: it preserves length and leaves
@@ -581,5 +730,89 @@ mod tests {
 
         // The deflected track is a full n-point line too.
         assert_eq!(mc.deflected_track_ecl_au(150).len(), 150);
+    }
+
+    /// Kernel-gated (release-run). The orrery seed path is correct end-to-end. A
+    /// synthetic body authored with **ecliptic** elements and **zero inclination**
+    /// must (a) read back at its seed epoch as the *authored* heliocentric position
+    /// — proving the ecliptic→ICRF→+Sun seed is the exact inverse of the read path
+    /// — and (b) stay in the ecliptic plane (|z| ≈ 0) all along its integrated
+    /// track, which it would NOT if the ecliptic↔ICRF rotation were wrong (a ~23°
+    /// tilt would lift z by up to ~0.4·r). Also checks the orbit is physically on
+    /// its designed ellipse (distance in `[a(1−e), a(1+e)]`) and the metadata.
+    #[test]
+    fn synthetic_body_seeds_and_frames_correctly() {
+        if !have_kernels() {
+            eprintln!("skipping synthetic_body_seeds_and_frames_correctly: no DE kernel");
+            return;
+        }
+        let mut mc = MissionCore::load().expect("load kernels");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+
+        // Adding a body before a scenario is built is an error, not a panic.
+        // (Re-checked here since build already ran; use a fresh core for the guard.)
+        let mut unbuilt = MissionCore::load().expect("load kernels");
+        let planar = OrbitalElements::new(2.0 * AU_M, 0.2, 0.0, 0.0, 0.0, 0.0);
+        assert!(unbuilt
+            .add_synthetic_body("X", "asteroid", planar, epoch_2035(), 5.0 * 86_400.0, 4)
+            .is_err());
+
+        let a_m = 2.0 * AU_M;
+        let e = 0.2;
+        let elements = OrbitalElements::new(a_m, e, 0.0, 0.0, 0.0, 0.0); // ecliptic, planar
+        let epoch0 = epoch_2035();
+        let epoch0_tdb = epoch0.tdb_seconds_past_j2000();
+        let cadence = 5.0 * 86_400.0;
+        let n = 146; // ~2 years — most of one orbit (T = 2^1.5 ≈ 2.83 yr)
+
+        // The authored heliocentric ecliptic position, in AU, for the round-trip.
+        let mu_sun = mc.ephemeris.sun_gm_m3_s2().expect("sun GM");
+        let expected_ecl_au = elements.to_state(mu_sun).position / AU_M;
+
+        let idx = mc
+            .add_synthetic_body("TEST-COMET", "comet", elements, epoch0, cadence, n)
+            .expect("add synthetic body");
+        assert_eq!(idx, 0);
+        assert_eq!(mc.catalog_count(), 1);
+        assert_eq!(mc.catalog_name(idx), Some("TEST-COMET"));
+        assert_eq!(mc.catalog_kind(idx), Some("comet"));
+
+        // (a) Seed round-trip: at epoch0 the read recovers the authored position.
+        let at0 = mc
+            .catalog_position_ecl_au(idx, epoch0_tdb)
+            .expect("position at seed epoch");
+        assert!(
+            (at0 - expected_ecl_au).norm() < 1e-6,
+            "seed round-trip off by {:.3e} AU — ecliptic↔ICRF seed/read not inverse",
+            (at0 - expected_ecl_au).norm()
+        );
+
+        // Span covers [epoch0, epoch0 + n·cadence]; used to clamp/hide the body.
+        let (lo, hi) = mc.catalog_span_tdb(idx).expect("span");
+        assert!((lo - epoch0_tdb).abs() < 1.0);
+        assert!((hi - (epoch0_tdb + cadence * n as f64)).abs() < 1.0);
+
+        // (b) Planarity + on-ellipse across the whole track.
+        let track = mc.catalog_track_ecl_au(idx, 200);
+        assert_eq!(track.len(), 200, "track should be a full n-point line");
+        for p in &track {
+            assert!(
+                p.z.abs() < 0.02,
+                "planar (i=0) ecliptic orbit lifted to |z| = {:.4} AU — rotation wrong",
+                p.z.abs()
+            );
+            assert!(
+                (1.55..=2.45).contains(&p.norm()),
+                "distance {:.4} AU outside the designed ellipse [a(1−e), a(1+e)]",
+                p.norm()
+            );
+        }
+
+        // Out-of-range index and out-of-span epoch both return None (no panic).
+        assert!(mc.catalog_position_ecl_au(9, epoch0_tdb).is_none());
+        assert!(mc
+            .catalog_position_ecl_au(idx, epoch0_tdb - 1.0e9)
+            .is_none());
     }
 }

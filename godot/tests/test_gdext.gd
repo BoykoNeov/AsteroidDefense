@@ -65,5 +65,18 @@ func _init() -> void:
 	var bad: Vector3 = m.body_position_ecl_au(999999, t)
 	_check(bad == Vector3.ZERO, "unknown NAIF id returns ZERO (no panic)")
 
+	# Orrery catalog #[func]s are registered and FFI-safe on the fast path (no
+	# scenario built here — building is the release-side cost). With no scenario,
+	# the catalog is empty and add/read fail gracefully instead of panicking.
+	_check(m.catalog_count() == 0, "catalog empty before any bodies added")
+	var idx: int = m.add_synthetic_body("PROBE", "comet",
+		2.0, 0.2, 5.0, 0.0, 0.0, 0.0, 0.0, 365.0, 5.0)
+	_check(idx == -1 and not (m.last_error() as String).is_empty(),
+		"add_synthetic_body before build_scenario fails with an error, no panic")
+	_check(m.catalog_position_ecl_au(0, t) == Vector3.ZERO,
+		"catalog_position on empty catalog returns ZERO (no panic)")
+	_check(m.catalog_span_tdb(0).is_empty(),
+		"catalog_span on empty catalog returns an empty array")
+
 	print("gdext gate: %s" % ("PASS" if fails == 0 else "FAIL (%d)" % fails))
 	quit(fails)

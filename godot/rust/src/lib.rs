@@ -20,7 +20,12 @@ mod mission_core;
 use godot::prelude::*;
 
 use asteroid_core::scenario::ImpactorConfig;
+use asteroid_core::{Epoch, OrbitalElements};
 use mission_core::MissionCore;
+
+/// Metres per astronomical unit — synthetic-body semi-major axes reach the SI
+/// core as AU from GDScript.
+const AU_M: f64 = 1.495_978_707e11;
 
 struct AsteroidGdext;
 
@@ -312,5 +317,157 @@ impl Mission {
             .as_ref()
             .and_then(|c| c.plan_deflection_tdb_seconds())
             .unwrap_or(-1.0)
+    }
+
+    // --- Orrery catalog: multiple bodies, long spans, cheap scrub --------------
+
+    /// Add a synthetic designer body to the orrery and return its index (`-1` on
+    /// failure, with the reason in [`last_error`](Self::last_error)). Orbit given
+    /// by ecliptic Keplerian elements — `a_au` (AU), `e`, and the angles in
+    /// **degrees** — valid at `epoch0_tdb_seconds`, then integrated once through
+    /// the real field over `span_days` at `cadence_days` snapshots. Requires
+    /// [`build_scenario`](Self::build_scenario). **Expensive** (one integration);
+    /// call at load, not per frame.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn add_synthetic_body(
+        &mut self,
+        name: GString,
+        kind: GString,
+        a_au: f64,
+        e: f64,
+        incl_deg: f64,
+        raan_deg: f64,
+        argp_deg: f64,
+        true_anomaly_deg: f64,
+        epoch0_tdb_seconds: f64,
+        span_days: f64,
+        cadence_days: f64,
+    ) -> i64 {
+        let Some(core) = self.core.as_mut() else {
+            self.error = "load()/build_scenario() must succeed before add_synthetic_body()".into();
+            return -1;
+        };
+        // Validate the orbit up front so nothing panics across the FFI boundary
+        // (an out-of-range inclination would trip the core's debug_assert, a
+        // non-elliptical e would produce a nonsense state).
+        if !(a_au.is_finite() && a_au > 0.0)
+            || !(0.0..1.0).contains(&e)
+            || !(0.0..=180.0).contains(&incl_deg)
+            || !(cadence_days.is_finite() && cadence_days > 0.0)
+            || !(span_days.is_finite() && span_days > 0.0)
+        {
+            self.error =
+                "invalid orbit: need a_au>0, 0<=e<1, incl in [0,180] deg, span/cadence>0".into();
+            return -1;
+        }
+        let elements = OrbitalElements::new(
+            a_au * AU_M,
+            e,
+            incl_deg.to_radians(),
+            raan_deg.to_radians(),
+            argp_deg.to_radians(),
+            true_anomaly_deg.to_radians(),
+        );
+        let epoch0 = Epoch::from_tdb_seconds_past_j2000(epoch0_tdb_seconds);
+        let cadence_seconds = cadence_days * 86_400.0;
+        let n_snapshots = (span_days / cadence_days).ceil().max(1.0) as u32;
+        match core.add_synthetic_body(
+            &name.to_string(),
+            &kind.to_string(),
+            elements,
+            epoch0,
+            cadence_seconds,
+            n_snapshots,
+        ) {
+            Ok(idx) => {
+                self.error = GString::new();
+                idx as i64
+            }
+            Err(e) => {
+                self.error = e.to_string().as_str().into();
+                -1
+            }
+        }
+    }
+
+    /// Number of bodies in the orrery catalog.
+    #[func]
+    fn catalog_count(&self) -> i64 {
+        self.core.as_ref().map_or(0, |c| c.catalog_count() as i64)
+    }
+
+    /// Display label of catalog body `index` (empty string if out of range).
+    #[func]
+    fn catalog_name(&self, index: i64) -> GString {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.core.as_ref().and_then(|c| c.catalog_name(i)))
+            .map_or_else(GString::new, |s| s.into())
+    }
+
+    /// Coarse class of catalog body `index` (`"asteroid"`/`"comet"`/…; empty if
+    /// out of range).
+    #[func]
+    fn catalog_kind(&self, index: i64) -> GString {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.core.as_ref().and_then(|c| c.catalog_kind(i)))
+            .map_or_else(GString::new, |s| s.into())
+    }
+
+    /// Position of catalog body `index` at `tdb_seconds`, heliocentric **ecliptic
+    /// AU** (the planets' frame). `Vector3::ZERO` if the index is invalid or the
+    /// epoch is outside the body's propagated span (use
+    /// [`catalog_span_tdb`](Self::catalog_span_tdb) to know which).
+    #[func]
+    fn catalog_position_ecl_au(&self, index: i64, tdb_seconds: f64) -> Vector3 {
+        match usize::try_from(index).ok().and_then(|i| {
+            self.core
+                .as_ref()
+                .and_then(|c| c.catalog_position_ecl_au(i, tdb_seconds))
+        }) {
+            Some(v) => Vector3::new(v.x as f32, v.y as f32, v.z as f32),
+            None => Vector3::ZERO,
+        }
+    }
+
+    /// Catalog body `index`'s orbit as `samples` heliocentric ecliptic-AU points
+    /// across its whole propagated span — the polyline. Sample **once**. Empty if
+    /// the index is invalid.
+    #[func]
+    fn catalog_track_ecl_au(&self, index: i64, samples: i64) -> PackedVector3Array {
+        let n = samples.max(0) as usize;
+        let pts = usize::try_from(index)
+            .ok()
+            .map(|i| {
+                self.core
+                    .as_ref()
+                    .map(|c| c.catalog_track_ecl_au(i, n))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let mut arr = PackedVector3Array::new();
+        for v in pts {
+            arr.push(Vector3::new(v.x as f32, v.y as f32, v.z as f32));
+        }
+        arr
+    }
+
+    /// Catalog body `index`'s propagated span as `[lo, hi]` seconds past J2000 (a
+    /// 2-element array; **empty** if the index is invalid). f64 precision, unlike a
+    /// `Vector2`, because a TDB second near 1e9 would lose ~64 s as f32. The
+    /// frontend clamps/hides the body outside this window.
+    #[func]
+    fn catalog_span_tdb(&self, index: i64) -> PackedFloat64Array {
+        let mut arr = PackedFloat64Array::new();
+        if let Some((lo, hi)) = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.core.as_ref().and_then(|c| c.catalog_span_tdb(i)))
+        {
+            arr.push(lo);
+            arr.push(hi);
+        }
+        arr
     }
 }

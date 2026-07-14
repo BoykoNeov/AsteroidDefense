@@ -89,6 +89,9 @@ func _build_planets() -> void:
 		["EARTH",   1.0000, 0.0167, 0.000, 0.000, 102.937, 100.464, 0.080],
 		["MARS",    1.5237, 0.0934, 1.850, 49.558, 336.060, 355.450, 0.060],
 		["JUPITER", 5.2026, 0.0484, 1.303, 100.556, 14.753, 34.404, 0.180],
+		["SATURN",  9.5549, 0.0539, 2.486, 113.715, 92.432, 49.954, 0.150],
+		["URANUS", 19.2184, 0.0473, 0.773, 74.006, 170.954, 313.238, 0.105],
+		["NEPTUNE", 30.110, 0.0086, 1.770, 131.784, 44.965, 304.880, 0.100],
 	]
 	for r in raw:
 		var el := _elements(r[1], r[2], deg_to_rad(r[3]), deg_to_rad(r[4]),
@@ -125,6 +128,27 @@ func _build_threat() -> void:
 	# this b-plane circle, focusing bends the track onto the surface.
 	var ca := close_approach(ast_el)
 	cap_km = R_E * sqrt(1.0 + pow(V_ESC / ca.v_kms.length(), 2.0))
+
+
+# Moon: display-only geocentric circle. The true lunar distance (0.00257 AU
+# = 0.026 scene units) sits INSIDE the wireframe Earth (vis_r 0.08), so the
+# orbit radius is exaggerated the same way body radii are. Never feed this
+# into encounter math — miss distances in LD come from the f64 pipeline.
+const MOON_VIS_R := 0.022              # scene units
+const MOON_ORBIT_VIS := 0.30           # scene units around Earth
+const MOON_PERIOD_D := 27.322
+const MOON_INCL := deg_to_rad(5.145)
+
+
+## Moon offset from Earth in scene units (prograde, slightly inclined).
+func moon_local(t_days: float) -> Vector3:
+	var a := TAU * t_days / MOON_PERIOD_D
+	return Vector3(cos(a), 0.0, -sin(a)).rotated(
+		Vector3.RIGHT, MOON_INCL) * MOON_ORBIT_VIS
+
+
+func moon_pos3d(t_days: float) -> Vector3:
+	return pos3d(earth_el, t_days) + moon_local(t_days)
 
 
 func _build_comet() -> void:

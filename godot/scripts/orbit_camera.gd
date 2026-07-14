@@ -16,7 +16,7 @@ var _dragging := false
 func _ready() -> void:
 	camera = Camera3D.new()
 	camera.near = 0.005
-	camera.far = 3000.0
+	camera.far = 5000.0
 	camera.fov = 55.0
 	add_child(camera)
 	focus_getter = func() -> Vector3: return Vector3.ZERO
@@ -26,7 +26,7 @@ func _process(delta: float) -> void:
 	var target: Vector3 = focus_getter.call()
 	position = position.lerp(target, minf(1.0, delta * 6.0))
 	pitch = clampf(pitch, -1.45, 1.45)
-	distance = clampf(distance, 0.4, 400.0)
+	distance = clampf(distance, 0.4, 900.0)
 	var dir := Vector3(
 		cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw))
 	camera.position = dir * distance

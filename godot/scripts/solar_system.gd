@@ -12,6 +12,8 @@ var _line_mat: ShaderMaterial
 
 var sun_node: Node3D
 var body_nodes := {}                  # name -> MeshInstance3D (wireframe)
+var moon_node: MeshInstance3D
+var _belt: MeshInstance3D
 var ast_nominal: MeshInstance3D
 var ast_deflected: MeshInstance3D
 var comet_node: MeshInstance3D
@@ -31,6 +33,7 @@ func _ready() -> void:
 	_build_grid()
 	_build_sun()
 	_build_planets()
+	_build_belt()
 	_build_threat()
 	_build_comet()
 	_build_interceptor()
@@ -42,6 +45,10 @@ func _process(_delta: float) -> void:
 	var t: float = Sim.t
 	for el in Sim.planets:
 		body_nodes[el.name].position = Sim.pos3d(el, t)
+	moon_node.position = Sim.moon_local(t)
+	# Rigid rotation at the belt's mean motion (~2.7 AU, T ~ 4.4 yr) —
+	# Kepler shear across the annulus is invisible at display speeds.
+	_belt.rotation.y = TAU * t / (4.4 * 365.25)
 
 	ast_nominal.position = Sim.pos3d(Sim.ast_el, t)
 	ast_nominal.rotate_y(0.01)
@@ -104,7 +111,7 @@ func _build_starfield() -> void:
 	var verts := PackedVector3Array()
 	var cols := PackedColorArray()
 	for _i in 900:
-		var v := Vector3(rng.randfn(), rng.randfn(), rng.randfn()).normalized() * 700.0
+		var v := Vector3(rng.randfn(), rng.randfn(), rng.randfn()).normalized() * 1800.0
 		verts.append(v)
 		var b := rng.randf_range(0.12, 0.55)
 		cols.append(Color(b, b, b))
@@ -146,6 +153,23 @@ func _build_grid() -> void:
 	mi.name = "EclipticGrid"
 	add_child(mi)
 
+	# Sparse outer rings so the far planets sit on a readable scale.
+	var opts := PackedVector3Array()
+	for r_au in [5.0, 10.0, 20.0, 30.0]:
+		var r: float = r_au * Sim.AU
+		var prev := Vector3(r, 0, 0)
+		for k in range(1, 193):
+			var a := TAU * k / 192.0
+			var p := Vector3(cos(a) * r, 0, sin(a) * r)
+			opts.append(prev)
+			opts.append(p)
+			prev = p
+	var omi := _line_mesh(opts, Mesh.PRIMITIVE_LINES)
+	omi.set_instance_shader_parameter("line_color", Color(1, 1, 1))
+	omi.set_instance_shader_parameter("energy", 0.05)
+	omi.name = "OuterGrid"
+	add_child(omi)
+
 
 func _build_sun() -> void:
 	sun_node = Node3D.new()
@@ -184,7 +208,7 @@ func _build_sun() -> void:
 
 func _build_planets() -> void:
 	for el in Sim.planets:
-		var pts: PackedVector3Array = Sim.orbit_points(el)
+		var pts: PackedVector3Array = Sim.orbit_points(el, 192 if el.a < 6.0 else 384)
 		var orbit := _line_mesh(pts, Mesh.PRIMITIVE_LINE_STRIP)
 		var bright := 0.55 if el.name == "EARTH" else 0.28
 		orbit.set_instance_shader_parameter("line_color", Color(1, 1, 1))
@@ -198,6 +222,81 @@ func _build_planets() -> void:
 		body.name = el.name
 		add_child(body)
 		body_nodes[el.name] = body
+
+		if el.name == "SATURN":
+			_add_saturn_rings(body, el.vis_r)
+		elif el.name == "EARTH":
+			_add_moon(body)
+
+
+## Three concentric ring circles tilted to Saturn's obliquity, parented to
+## the planet so they track it. Gap between 2nd and 3rd reads as Cassini.
+func _add_saturn_rings(body: MeshInstance3D, vis_r: float) -> void:
+	var pts := PackedVector3Array()
+	var tilt := Basis(Vector3.RIGHT, deg_to_rad(26.7))
+	for f in [1.45, 1.75, 2.15]:
+		var r: float = vis_r * f
+		var prev := tilt * Vector3(r, 0, 0)
+		for k in range(1, 65):
+			var a := TAU * k / 64.0
+			var p := tilt * Vector3(cos(a) * r, 0, sin(a) * r)
+			pts.append(prev)
+			pts.append(p)
+			prev = p
+	var rings := _line_mesh(pts, Mesh.PRIMITIVE_LINES)
+	rings.set_instance_shader_parameter("line_color", Color(1, 1, 1))
+	rings.set_instance_shader_parameter("energy", 0.9)
+	rings.name = "SaturnRings"
+	body.add_child(rings)
+
+
+## Moon + its orbit circle, parented to Earth (display-exaggerated radius,
+## see Sim.MOON_ORBIT_VIS). Local position driven from _process.
+func _add_moon(earth_body: MeshInstance3D) -> void:
+	var pts := PackedVector3Array()
+	for k in 97:
+		pts.append(Sim.moon_local(Sim.MOON_PERIOD_D * k / 96.0))
+	var orbit := _line_mesh(_dash(pts, 2, 2), Mesh.PRIMITIVE_LINES)
+	orbit.set_instance_shader_parameter("line_color", Color(1, 1, 1))
+	orbit.set_instance_shader_parameter("energy", 0.30)
+	orbit.name = "MoonOrbit"
+	earth_body.add_child(orbit)
+
+	moon_node = _wire_sphere(Sim.MOON_VIS_R, 8, 4)
+	moon_node.set_instance_shader_parameter("line_color", Color(1, 1, 1))
+	moon_node.set_instance_shader_parameter("energy", 1.1)
+	moon_node.name = "Moon"
+	earth_body.add_child(moon_node)
+
+
+## Main asteroid belt: dim point scatter 2.1-3.3 AU with slight vertical
+## dispersion. Reuses the starfield point shader; rotated rigidly in
+## _process at the belt's mean orbital rate.
+func _build_belt() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 27021801
+	var verts := PackedVector3Array()
+	var cols := PackedColorArray()
+	for _i in 1600:
+		var r := rng.randf_range(2.1, 3.3) * Sim.AU
+		var a := rng.randf() * TAU
+		var y := rng.randfn() * 0.03 * r
+		verts.append(Vector3(cos(a) * r, y, sin(a) * r))
+		var b := rng.randf_range(0.05, 0.20)
+		cols.append(Color(b, b, b))
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_COLOR] = cols
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_POINTS, arrays)
+	var mat := ShaderMaterial.new()
+	mat.shader = STAR_SHADER
+	_belt = MeshInstance3D.new()
+	_belt.mesh = mesh
+	_belt.material_override = mat
+	_belt.name = "AsteroidBelt"
+	add_child(_belt)
 
 
 func _build_threat() -> void:

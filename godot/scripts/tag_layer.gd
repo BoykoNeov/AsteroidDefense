@@ -32,6 +32,9 @@ func _draw() -> void:
 	_tag_box(cam, Vector3.ZERO, "SOL", dim)
 	for el in Sim.planets:
 		_tag_box(cam, Sim.pos3d(el, t), el.name, mid if el.name == "EARTH" else dim)
+	# Moon tag only at close zoom — at system scale it overlaps EARTH's.
+	if camera_rig.distance < 10.0:
+		_tag_box(cam, Sim.moon_pos3d(t), "MOON", dim)
 
 	var burned: bool = Sim.burned()
 	if burned:

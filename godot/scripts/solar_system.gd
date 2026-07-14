@@ -34,6 +34,8 @@ func _ready() -> void:
 	_build_threat()
 	_build_comet()
 	_build_interceptor()
+	Sim.plan_changed.connect(_rebuild_plan_visuals)
+	_rebuild_plan_visuals()
 
 
 func _process(_delta: float) -> void:
@@ -45,15 +47,18 @@ func _process(_delta: float) -> void:
 	ast_nominal.rotate_y(0.01)
 	ast_nominal.rotate_x(0.004)
 
-	var burned: bool = t >= Sim.T_INTERCEPT
+	var burned: bool = Sim.burned()
 	ast_deflected.visible = burned
-	_defl_orbit_line.visible = burned
+	# Deflected orbit: bright once real, dim dashed preview while planning.
+	var preview: bool = not burned and (Sim.planner_open or Sim.committed)
+	_defl_orbit_line.visible = burned or preview
+	_defl_orbit_line.set_instance_shader_parameter("energy", 1.2 if burned else 0.45)
+	# Nominal track fades to a dim ghost once the real object is deflected.
+	ast_nominal.set_instance_shader_parameter("energy", 0.5 if burned else 2.2)
 	if burned:
 		ast_deflected.position = Sim.pos3d(Sim.ast_defl_el, t)
 		ast_deflected.rotate_y(0.01)
 		ast_deflected.rotate_x(0.004)
-		# Nominal track fades to a dim ghost once the real object is deflected.
-		ast_nominal.set_instance_shader_parameter("energy", 0.5)
 
 	comet_node.position = Sim.pos3d(Sim.comet_el, t)
 	comet_node.rotate_y(0.006)
@@ -61,7 +66,10 @@ func _process(_delta: float) -> void:
 
 	var phase: String = Sim.interceptor_phase(t)
 	interceptor.visible = phase == "CRUISE"
-	_intercept_path_line.visible = phase != "PRELAUNCH"
+	_intercept_path_line.visible = phase == "CRUISE" or phase == "EXPENDED" \
+		or (Sim.planner_open and not burned)
+	_intercept_path_line.set_instance_shader_parameter(
+		"energy", 0.8 if phase == "CRUISE" or phase == "EXPENDED" else 0.35)
 	if phase == "CRUISE":
 		interceptor.position = Sim.interceptor_pos(t)
 	# Brief expanding flash at the intercept point.
@@ -301,6 +309,16 @@ func _build_interceptor() -> void:
 	add_child(intercept_flash)
 
 
+## Plan-dependent geometry: deflected orbit, transfer arc, flash position.
+## Rebuilt whenever the mission plan changes (Sim.plan_changed).
+func _rebuild_plan_visuals() -> void:
+	_defl_orbit_line.mesh = _line_im(
+		_dash(Sim.orbit_points(Sim.ast_defl_el, 384)), Mesh.PRIMITIVE_LINES)
+	_intercept_path_line.mesh = _line_im(
+		_dash(Sim.interceptor_path(), 2, 2), Mesh.PRIMITIVE_LINES)
+	intercept_flash.position = Sim.pos3d(Sim.ast_el, Sim.T_INTERCEPT)
+
+
 func _update_comet_tail() -> void:
 	var anti_sun := comet_node.position.normalized()
 	var pm: ParticleProcessMaterial = comet_tail.process_material
@@ -314,14 +332,18 @@ func _update_comet_tail() -> void:
 
 # ------------------------------------------------------------------ meshes ---
 
-func _line_mesh(pts: PackedVector3Array, primitive: int) -> MeshInstance3D:
+func _line_im(pts: PackedVector3Array, primitive: int) -> ImmediateMesh:
 	var im := ImmediateMesh.new()
 	im.surface_begin(primitive)
 	for p in pts:
 		im.surface_add_vertex(p)
 	im.surface_end()
+	return im
+
+
+func _line_mesh(pts: PackedVector3Array, primitive: int) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
-	mi.mesh = im
+	mi.mesh = _line_im(pts, primitive)
 	mi.material_override = _line_mat
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	return mi

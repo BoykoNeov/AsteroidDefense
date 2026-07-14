@@ -17,6 +17,7 @@ var hud: HUD
 var tags: TagLayer
 var map2d: Map2D
 var enc: EncounterView
+var planner: PlannerPanel
 var boot: BootScreen
 
 var _green := true
@@ -72,6 +73,10 @@ func _ready() -> void:
 	hud.visible = false
 	viewport.add_child(hud)
 
+	planner = PlannerPanel.new()
+	planner.name = "Planner"
+	viewport.add_child(planner)
+
 	boot = BootScreen.new()
 	boot.name = "Boot"
 	boot.finished.connect(func() -> void:
@@ -88,7 +93,7 @@ func _ready() -> void:
 		["SUN", func() -> Vector3: return Vector3.ZERO, 32.0],
 		["EARTH", func() -> Vector3: return Sim.pos3d(Sim.earth_el, Sim.t), 3.0],
 		["2031-XK", func() -> Vector3: return Sim.pos3d(
-			Sim.ast_defl_el if Sim.t >= Sim.T_INTERCEPT else Sim.ast_el, Sim.t), 1.6],
+			Sim.ast_defl_el if Sim.burned() else Sim.ast_el, Sim.t), 1.6],
 		["C/2029K1", func() -> Vector3: return Sim.pos3d(Sim.comet_el, Sim.t), 2.4],
 		["ATLAS-1", func() -> Vector3:
 			return Sim.interceptor_pos(Sim.t) if Sim.interceptor_phase(Sim.t) == "CRUISE" \
@@ -138,6 +143,21 @@ func _input(event: InputEvent) -> void:
 		Sim.jump_next_milestone()
 	elif event.is_action_pressed("time_reset"):
 		Sim.jump(0.0)
+	elif event.is_action_pressed("plan_toggle"):
+		planner.visible = not planner.visible
+		Sim.planner_open = planner.visible
+	elif planner.visible and event.is_action_pressed("plan_lead_up"):
+		Sim.adjust_lead(10.0)
+	elif planner.visible and event.is_action_pressed("plan_lead_down"):
+		Sim.adjust_lead(-10.0)
+	elif planner.visible and event.is_action_pressed("plan_dv_up"):
+		Sim.adjust_dv(1.25)
+	elif planner.visible and event.is_action_pressed("plan_dv_down"):
+		Sim.adjust_dv(0.8)
+	elif planner.visible and event.is_action_pressed("plan_dir"):
+		Sim.toggle_burn_dir()
+	elif planner.visible and event.is_action_pressed("plan_commit"):
+		Sim.try_commit()
 
 
 func _apply_focus() -> void:
@@ -147,7 +167,7 @@ func _apply_focus() -> void:
 
 func _sync_overlay_sizes() -> void:
 	var vs := Vector2(viewport.size)
-	for c: Control in [map2d, enc, tags, hud, boot]:
+	for c: Control in [map2d, enc, tags, hud, planner, boot]:
 		if is_instance_valid(c):
 			c.position = Vector2.ZERO
 			c.size = vs

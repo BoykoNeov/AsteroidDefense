@@ -33,7 +33,7 @@ func _draw() -> void:
 	for el in Sim.planets:
 		_tag_box(cam, Sim.pos3d(el, t), el.name, mid if el.name == "EARTH" else dim)
 
-	var burned: bool = t >= Sim.T_INTERCEPT
+	var burned: bool = Sim.burned()
 	if burned:
 		_tag_diamond(cam, Sim.pos3d(Sim.ast_el, t), "NOMINAL TRK", dim)
 		_tag_diamond(cam, Sim.pos3d(Sim.ast_defl_el, t), "2031-XK", bright)

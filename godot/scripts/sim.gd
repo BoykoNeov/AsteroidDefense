@@ -11,10 +11,11 @@ const AU := 10.0                       # Godot units per AU
 const AU_KM := 1.495978707e8
 const LD_KM := 384400.0                # lunar distance, km
 
-# Mission timeline (days from epoch).
+# Mission timeline (days from epoch). The impact epoch is fixed by the
+# threat; launch/intercept epochs come from the operator's plan ([M]).
 const T_IMPACT := 1200.0
-const T_LAUNCH := T_IMPACT - 420.0
-const T_INTERCEPT := T_IMPACT - 180.0
+var T_LAUNCH := T_IMPACT - 420.0
+var T_INTERCEPT := T_IMPACT - 180.0
 
 var t := 0.0                           # mission-elapsed time, days
 var paused := false
@@ -31,8 +32,27 @@ var ast_el: Dictionary                 # nominal threat orbit
 var ast_defl_el: Dictionary            # post-intercept (deflected) orbit
 var comet_el: Dictionary
 
-var miss_ld := 0.0                     # projected miss distance after burn, LD
-var dv_ms := 0.0                       # imparted delta-v (display value), m/s
+# Mission plan (operator-editable in the planner until launch).
+const LEAD_MIN := 30.0
+const LEAD_MAX := 900.0
+const DV_MIN := 0.1
+const DV_MAX := 300.0
+const PAD_D := 2.0                     # minimum days between "now" and launch
+const R_E := 6371.0                    # km
+const V_ESC := 11.186                  # km/s, Earth surface escape speed
+
+var plan_lead_d := 180.0               # intercept lead before impact epoch, days
+var plan_dv_ms := 30.0                 # impulse magnitude, m/s
+var plan_retro := true                 # true = retrograde (against velocity)
+var committed := false                 # launch scheduled
+var planner_open := false              # planner panel showing (preview tracks)
+
+var miss_ld := 0.0                     # projected post-burn close approach, LD
+var dv_ms := 0.0                       # imparted delta-v, m/s (mirrors plan)
+var cap_km := 0.0                      # gravitational capture radius, km
+var deflect_ok := false                # projected miss clears the capture circle
+
+signal plan_changed
 
 var _events: Array[Dictionary] = []
 
@@ -45,6 +65,7 @@ func _ready() -> void:
 	_build_planets()
 	_build_threat()
 	_build_comet()
+	set_plan(plan_lead_d, plan_dv_ms, plan_retro)
 	_build_events()
 
 
@@ -100,25 +121,10 @@ func _build_threat() -> void:
 	el.kind = "asteroid"
 	ast_el = el
 
-	# Deflected orbit: retrograde along-track burn at T_INTERCEPT shrinks a,
-	# same phase at the burn epoch. Divergence after the burn is emergent from
-	# the period change. da/a is display-exaggerated so the split reads on a
-	# solar-system-scale screen; the HUD reports the honest equivalent dv.
-	var da_over_a := 2.0e-3
-	var a2 := a * (1.0 - da_over_a)
-	var d := ast_el.duplicate()
-	d.a = a2
-	d.n = TAU / (365.25 * pow(a2, 1.5))
-	var m_at_burn: float = wrapf(ast_el.m0 + ast_el.n * T_INTERCEPT, -PI, PI)
-	d.m0 = wrapf(m_at_burn - d.n * T_INTERCEPT, -PI, PI)
-	d.name = "2031-XK DEFL"
-	ast_defl_el = d
-
-	# Projected miss: true post-burn close-approach distance (was separation
-	# at the nominal epoch, which overstates the miss the b-plane view shows).
-	miss_ld = close_approach(ast_defl_el).r_km / LD_KM
-	var v_kms := 29.78 / sqrt(a)                    # ~circular-speed scale
-	dv_ms = 0.5 * da_over_a * v_kms * 1000.0
+	# Gravitational capture radius from the nominal encounter speed: inside
+	# this b-plane circle, focusing bends the track onto the surface.
+	var ca := close_approach(ast_el)
+	cap_km = R_E * sqrt(1.0 + pow(V_ESC / ca.v_kms.length(), 2.0))
 
 
 func _build_comet() -> void:
@@ -139,20 +145,198 @@ func _elements(a: float, e: float, i: float, om: float, w: float, m0: float) -> 
 	}
 
 
+## Default timeline: no mission on file. Impact happens unless a plan is
+## committed (which swaps in the mission timeline via _rebuild_events).
 func _build_events() -> void:
-	var ml := "%.1f" % miss_ld
+	_events.clear()
 	var raw := [
 		[1.0, "TRACKING 2031-XK - EPHEMERIS UPDATED, P(IMPACT)=1.000"],
-		[30.0, "DEFLECTION SOLUTION: KINETIC, LEAD %d D, DV %.0f M/S" % [int(T_IMPACT - T_INTERCEPT), dv_ms]],
-		[T_LAUNCH - 14.0, "ATLAS-1 ON PAD - LAUNCH WINDOW OPEN"],
-		[T_LAUNCH, "ATLAS-1 LAUNCH - TRANSFER INJECTION NOMINAL"],
-		[T_LAUNCH + 30.0, "ATLAS-1 CRUISE - GUIDANCE LOCK ON 2031-XK"],
-		[T_INTERCEPT, "KINETIC IMPACT CONFIRMED - DV APPLIED ALONG-TRACK"],
-		[T_INTERCEPT + 20.0, "POST-BURN SOLUTION: MISS " + ml + " LD - THREAT RETIRED"],
-		[T_IMPACT, "NOMINAL IMPACT EPOCH PASSED - EARTH SAFE"],
+		[20.0, "NO DEFLECTION PLAN ON FILE - [M] MISSION PLANNER"],
+		[T_IMPACT - 30.0, "FINAL WARNING - IMPACT E-030 D, NO MISSION COMMITTED"],
+		[T_IMPACT, "SURFACE IMPACT - NO DEFLECTION ATTEMPTED"],
 	]
 	for r in raw:
-		_events.append({"t": r[0], "msg": r[1], "fired": false})
+		_events.append({"t": r[0], "msg": r[1], "fired": r[0] <= t})
+
+
+## Committed-mission timeline; outcome events follow the projected verdict.
+func _rebuild_events() -> void:
+	_events.clear()
+	var ml := "%.2f" % miss_ld
+	var raw := [
+		[1.0, "TRACKING 2031-XK - EPHEMERIS UPDATED, P(IMPACT)=1.000"],
+		[T_LAUNCH - 14.0, "ATLAS-1 ON PAD - LAUNCH WINDOW OPEN"],
+		[T_LAUNCH, "ATLAS-1 LAUNCH - TRANSFER INJECTION NOMINAL"],
+		[minf(T_LAUNCH + 30.0, T_INTERCEPT - 5.0), "ATLAS-1 CRUISE - GUIDANCE LOCK ON 2031-XK"],
+		[T_INTERCEPT, "KINETIC IMPACT CONFIRMED - DV %.1f M/S %s" %
+			[plan_dv_ms, "RETROGRADE" if plan_retro else "PROGRADE"]],
+	]
+	if deflect_ok:
+		raw.append([T_INTERCEPT + 20.0, "POST-BURN SOLUTION: MISS " + ml + " LD - THREAT RETIRED"])
+		raw.append([T_IMPACT, "NOMINAL IMPACT EPOCH PASSED - EARTH SAFE"])
+	else:
+		raw.append([T_INTERCEPT + 20.0, "POST-BURN SOLUTION: MISS " + ml + " LD - INSUFFICIENT"])
+		raw.append([T_IMPACT, "SURFACE IMPACT - DEFLECTION FAILED"])
+	for r in raw:
+		_events.append({"t": r[0], "msg": r[1], "fired": r[0] <= t})
+
+
+# --------------------------------------------------------------- mission plan ---
+# The planner edits (lead, dv, direction); the deflected orbit is rebuilt
+# from the actual impulse-perturbed Kepler state, so the projected miss is
+# emergent — this is the placeholder stand-in for core's DeflectionScenario.
+
+const MU := pow(TAU / 365.25, 2.0)     # AU^3/day^2, consistent with n above
+const MS_TO_AUD := 86.4 / AU_KM        # 1 m/s in AU/day
+
+
+func cruise_d(lead_d: float = -1.0) -> float:
+	return clampf(lead_d if lead_d > 0.0 else plan_lead_d, 60.0, 240.0)
+
+
+func locked() -> bool:
+	return committed and t >= T_LAUNCH
+
+
+func burned() -> bool:
+	return committed and t >= T_INTERCEPT
+
+
+## Longest lead the launch window still allows (launch >= now + PAD_D).
+func lead_cap() -> float:
+	var avail := T_IMPACT - t - PAD_D
+	var cap: float = avail - 240.0
+	if cap < 240.0:
+		cap = minf(avail * 0.5, 240.0)
+	if cap < 60.0:
+		cap = minf(avail - 60.0, 60.0)
+	return clampf(cap, 0.0, LEAD_MAX)
+
+
+## Apply a mission plan. The impulse is added to the heliocentric velocity
+## at the intercept epoch (f64 throughout) and the deflected element set is
+## recovered from the perturbed state, so divergence and miss distance are
+## genuine orbital mechanics, not a scripted offset.
+func set_plan(lead_d: float, dv: float, retro: bool) -> void:
+	plan_lead_d = clampf(lead_d, LEAD_MIN, maxf(lead_cap(), LEAD_MIN))
+	plan_dv_ms = clampf(dv, DV_MIN, DV_MAX)
+	plan_retro = retro
+	T_INTERCEPT = T_IMPACT - plan_lead_d
+	T_LAUNCH = T_INTERCEPT - cruise_d()
+	dv_ms = plan_dv_ms
+
+	var r := pos_ecl64(ast_el, T_INTERCEPT)
+	var v := vel_ecl64(ast_el, T_INTERCEPT)
+	var vlen := sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+	var dv_aud := plan_dv_ms * MS_TO_AUD * (-1.0 if plan_retro else 1.0)
+	for k in 3:
+		v[k] += v[k] / vlen * dv_aud
+	var el := elements_from_rv(r, v, T_INTERCEPT)
+	el.name = "2031-XK DEFL"
+	el.vis_r = ast_el.vis_r
+	el.kind = "asteroid"
+	ast_defl_el = el
+
+	miss_ld = close_approach(ast_defl_el).r_km / LD_KM
+	deflect_ok = miss_ld * LD_KM > cap_km
+	if committed:
+		_rebuild_events()
+	plan_changed.emit()
+
+
+func adjust_lead(dd: float) -> void:
+	if _plan_edit_blocked():
+		return
+	set_plan(plan_lead_d + dd, plan_dv_ms, plan_retro)
+
+
+func adjust_dv(factor: float) -> void:
+	if _plan_edit_blocked():
+		return
+	set_plan(plan_lead_d, plan_dv_ms * factor, plan_retro)
+
+
+func toggle_burn_dir() -> void:
+	if _plan_edit_blocked():
+		return
+	set_plan(plan_lead_d, plan_dv_ms, not plan_retro)
+
+
+func _plan_edit_blocked() -> bool:
+	if locked():
+		event_logged.emit("PLAN LOCKED - INTERCEPTOR IN FLIGHT")
+		return true
+	return false
+
+
+func try_commit() -> void:
+	if committed:
+		event_logged.emit("MISSION ALREADY COMMITTED")
+		return
+	if T_LAUNCH < t + PAD_D:
+		event_logged.emit("COMMIT REFUSED - LAUNCH WINDOW CLOSED, REDUCE LEAD")
+		return
+	committed = true
+	_rebuild_events()
+	event_logged.emit("MISSION COMMITTED - LAUNCH E-%04d, INTERCEPT E-%04d" %
+		[int(T_IMPACT - T_LAUNCH), int(plan_lead_d)])
+
+
+## First-order estimate of the dv needed for a 1.0 LD miss at this lead
+## (b-plane displacement is ~linear in dv; nominal b is ~0 by construction).
+func req_dv_1ld() -> float:
+	return plan_dv_ms / maxf(miss_ld, 1.0e-4)
+
+
+## Heliocentric velocity, AU/day, f64 components (central difference).
+## dt balances truncation vs f64 cancellation; 0.002 d keeps the derived
+## element set within a few km of truth over the full mission arc.
+func vel_ecl64(el: Dictionary, t_days: float) -> PackedFloat64Array:
+	var dt := 0.002
+	var p1 := pos_ecl64(el, t_days + dt)
+	var p0 := pos_ecl64(el, t_days - dt)
+	return PackedFloat64Array([
+		(p1[0] - p0[0]) / (2.0 * dt),
+		(p1[1] - p0[1]) / (2.0 * dt),
+		(p1[2] - p0[2]) / (2.0 * dt)])
+
+
+## Classical elements from a heliocentric ecliptic state (AU, AU/day) at
+## epoch t_days, same dictionary shape as _elements(). Elliptic, nonzero
+## inclination/eccentricity only — fine for the designer threat.
+func elements_from_rv(r: PackedFloat64Array, v: PackedFloat64Array,
+		t_days: float) -> Dictionary:
+	var rlen := sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2])
+	var v2 := v[0] * v[0] + v[1] * v[1] + v[2] * v[2]
+	var rv := r[0] * v[0] + r[1] * v[1] + r[2] * v[2]
+	var hx := r[1] * v[2] - r[2] * v[1]
+	var hy := r[2] * v[0] - r[0] * v[2]
+	var hz := r[0] * v[1] - r[1] * v[0]
+	var hlen := sqrt(hx * hx + hy * hy + hz * hz)
+
+	var a := 1.0 / (2.0 / rlen - v2 / MU)
+	var c := v2 - MU / rlen
+	var ex := (c * r[0] - rv * v[0]) / MU
+	var ey := (c * r[1] - rv * v[1]) / MU
+	var ez := (c * r[2] - rv * v[2]) / MU
+	var e := sqrt(ex * ex + ey * ey + ez * ez)
+	var i := acos(clampf(hz / hlen, -1.0, 1.0))
+
+	var nx := -hy                       # node vector k x h
+	var ny := hx
+	var nlen := sqrt(nx * nx + ny * ny)
+	var om := atan2(ny, nx)
+	var w := acos(clampf((nx * ex + ny * ey) / (nlen * e), -1.0, 1.0))
+	if ez < 0.0:
+		w = -w
+	var nu := acos(clampf((ex * r[0] + ey * r[1] + ez * r[2]) / (e * rlen), -1.0, 1.0))
+	if rv < 0.0:
+		nu = -nu
+	var ecc := 2.0 * atan2(sqrt(1.0 - e) * sin(nu * 0.5), sqrt(1.0 + e) * cos(nu * 0.5))
+	var m := ecc - e * sin(ecc)
+	var el := _elements(a, e, i, om, w, 0.0)
+	el.m0 = wrapf(m - el.n * t_days, -PI, PI)
+	return el
 
 
 # ------------------------------------------------------------ propagation ---
@@ -278,6 +462,8 @@ func close_approach(el: Dictionary) -> Dictionary:
 # ------------------------------------------------------------ interceptor ---
 
 func interceptor_phase(t_days: float) -> String:
+	if not committed:
+		return "STANDBY"
 	if t_days < T_LAUNCH:
 		return "PRELAUNCH"
 	if t_days < T_INTERCEPT:
@@ -307,7 +493,7 @@ func interceptor_path(count: int = 96) -> PackedVector3Array:
 
 ## Range Earth <-> active asteroid track, km.
 func threat_range_km(t_days: float) -> float:
-	var el := ast_defl_el if t_days >= T_INTERCEPT else ast_el
+	var el := ast_defl_el if (committed and t_days >= T_INTERCEPT) else ast_el
 	return (pos_ecl(el, t_days) - pos_ecl(earth_el, t_days)).length() * AU_KM
 
 
@@ -320,7 +506,9 @@ func jump(to_days: float) -> void:
 
 
 func jump_next_milestone() -> void:
-	for m in [T_LAUNCH - 10.0, T_INTERCEPT - 10.0, T_IMPACT - 20.0, T_IMPACT + 60.0]:
+	var ms := [T_LAUNCH - 10.0, T_INTERCEPT - 10.0, T_IMPACT - 20.0, T_IMPACT + 60.0] \
+		if committed else [T_IMPACT - 20.0, T_IMPACT + 60.0]
+	for m in ms:
 		if t < m - 0.5:
 			jump(m)
 			event_logged.emit("CLOCK SLEW - MJD-REL %07.1f" % t)

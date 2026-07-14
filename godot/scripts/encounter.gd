@@ -33,6 +33,8 @@ func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 	_font = Sim.mono_font
+	# Deflected track and b-point depend on the mission plan.
+	Sim.plan_changed.connect(func() -> void: _built = false)
 
 
 func _process(_delta: float) -> void:
@@ -117,7 +119,8 @@ func _draw() -> void:
 	var dim := Color(0.42, 0.42, 0.42)
 	var faint := Color(0.18, 0.18, 0.18)
 	var t: float = Sim.t
-	var post := t >= Sim.T_INTERCEPT
+	var post: bool = Sim.burned()
+	var preview: bool = not post and (Sim.planner_open or Sim.committed)
 
 	# Targeting axes.
 	draw_line(Vector2(0, center.y), Vector2(w, center.y), faint, 1.0)
@@ -150,11 +153,21 @@ func _draw() -> void:
 			"CAPTURE %.1f RE" % (_cap_km / R_E),
 			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, dim)
 
-	# Tracks: nominal always; deflected once the burn has happened.
+	# Tracks: nominal always; deflected once the burn has happened, or as a
+	# planned-solution preview while the planner is open / plan committed.
 	_draw_track(_nom, center, ppl, dim if post else mid,
 		"NOMINAL TRK" if post else "2031-XK INBOUND")
 	if post:
 		_draw_track(_defl, center, ppl, mid, "2031-XK DEFLECTED")
+	elif preview:
+		_draw_track(_defl, center, ppl, Color(1, 1, 1, 0.5), "PLANNED TRK")
+		if _defl.b_found:
+			var bplan: Vector2 = center + _defl.b / Sim.LD_KM * ppl
+			_dashed_line(center, bplan, dim, 6.0, 5.0)
+			_diamond(bplan, 6.0, mid)
+			draw_string(_font, bplan + Vector2(10, -6),
+				"PLAN B %.2f LD" % (_defl.b.length() / Sim.LD_KM),
+				HORIZONTAL_ALIGNMENT_LEFT, -1, _fs, mid)
 
 	# B-vector markers.
 	if _nom.b_found:

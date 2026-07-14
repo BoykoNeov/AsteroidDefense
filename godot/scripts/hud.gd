@@ -68,10 +68,11 @@ func _draw() -> void:
 	var py := h * 0.30
 	_panel(Rect2(MARGIN, py, PANEL_W, 9.4 * lh + 14.0), "TRK 001 - TARGET", bright)
 	var ty := py + lh + 8.0
-	var el: Dictionary = Sim.ast_defl_el if Sim.t >= Sim.T_INTERCEPT else Sim.ast_el
+	var burned: bool = Sim.burned()
+	var el: Dictionary = Sim.ast_defl_el if burned else Sim.ast_el
 	var rng_km: float = Sim.threat_range_km(Sim.t)
 	var lines := [
-		["DESIG", "2031-XK" + ("  [DEFLECTED]" if Sim.t >= Sim.T_INTERCEPT else "")],
+		["DESIG", "2031-XK" + ("  [DEFLECTED]" if burned else "")],
 		["CLASS", "ATEN-TYPE / KINETIC-VIABLE"],
 		["SMA   a", "%.4f AU" % el.a],
 		["ECC   e", "%.4f" % el.e],
@@ -82,15 +83,22 @@ func _draw() -> void:
 	for ln in lines:
 		_text(Vector2(MARGIN + 12, ty), "%-8s %s" % [ln[0], ln[1]], mid)
 		ty += lh
-	if Sim.t >= Sim.T_INTERCEPT:
+	if burned and Sim.deflect_ok:
 		_text(Vector2(MARGIN + 12, ty), "P(IMPACT) 0.000", bright); ty += lh
-		_text(Vector2(MARGIN + 12, ty), "PROJ MISS %.1f LD" % Sim.miss_ld, bright)
+		_text(Vector2(MARGIN + 12, ty), "PROJ MISS %.2f LD" % Sim.miss_ld, bright)
+	elif burned:
+		if Sim.blink(1.4):
+			_text(Vector2(MARGIN + 12, ty), "P(IMPACT) 1.000 ", bright)
+			_text(Vector2(MARGIN + 12 + 17 * _fs * 0.6, ty), "<INSUFFICIENT>", bright)
+		ty += lh
+		_text(Vector2(MARGIN + 12, ty), "PROJ MISS %.2f LD" % Sim.miss_ld, mid)
 	else:
 		if Sim.blink(1.4):
 			_text(Vector2(MARGIN + 12, ty), "P(IMPACT) 1.000 ", bright)
 			_text(Vector2(MARGIN + 12 + 17 * _fs * 0.6, ty), "<THREAT>", bright)
 		ty += lh
-		_text(Vector2(MARGIN + 12, ty), "IMPACT E-%d D" % int(maxf(0, days_to)), mid)
+		_text(Vector2(MARGIN + 12, ty), ("IMPACT E-%d D" % int(days_to)) if days_to >= 0.0
+			else "IMPACT OCCURRED E+%d D" % int(-days_to), mid)
 
 	# ---- interceptor panel (right) ----
 	var ph := 7.4 * lh + 14.0
@@ -100,13 +108,20 @@ func _draw() -> void:
 	var phase: String = Sim.interceptor_phase(Sim.t)
 	var ilines := []
 	match phase:
+		"STANDBY":
+			ilines = [
+				["STATUS", "STANDBY - NO MISSION"],
+				["THREAT", "P(IMPACT) 1.000 UNMITIGATED"],
+				["PLAN", "AWAITING DEFLECTION PLAN"],
+				["ACTION", "[M] OPEN MISSION PLANNER"],
+			]
 		"PRELAUNCH":
 			ilines = [
 				["STATUS", "PRELAUNCH / PAD"],
 				["WINDOW", "E-%04d D" % int(Sim.T_IMPACT - Sim.T_LAUNCH)],
 				["PLAN", "KINETIC IMPACTOR"],
 				["BETA", "3.6 (EST)"],
-				["DV EQ", "%.0f M/S AT INTERCEPT" % Sim.dv_ms],
+				["DV EQ", "%.1f M/S AT INTERCEPT" % Sim.dv_ms],
 				["LEAD", "%d D BEFORE EPOCH" % int(Sim.T_IMPACT - Sim.T_INTERCEPT)],
 			]
 		"CRUISE":
@@ -116,15 +131,17 @@ func _draw() -> void:
 				["XFER", _bar(frac) + " %3d%%" % int(frac * 100.0)],
 				["TTI", "%d D" % int(Sim.T_INTERCEPT - Sim.t)],
 				["BETA", "3.6 (EST)"],
-				["DV EQ", "%.0f M/S AT INTERCEPT" % Sim.dv_ms],
+				["DV EQ", "%.1f M/S AT INTERCEPT" % Sim.dv_ms],
 				["LEAD", "%d D BEFORE EPOCH" % int(Sim.T_IMPACT - Sim.T_INTERCEPT)],
 			]
 		_:
 			ilines = [
 				["STATUS", "EXPENDED - IMPACT GOOD"],
-				["RESULT", "DV %.0f M/S ALONG-TRACK" % Sim.dv_ms],
-				["MISS", "%.1f LD PROJECTED" % Sim.miss_ld],
-				["ASSESS", "DEFLECTION SUCCESSFUL"],
+				["RESULT", "DV %.1f M/S %s" % [Sim.dv_ms,
+					"RETROGRADE" if Sim.plan_retro else "PROGRADE"]],
+				["MISS", "%.2f LD PROJECTED" % Sim.miss_ld],
+				["ASSESS", "DEFLECTION SUCCESSFUL" if Sim.deflect_ok
+					else "INSUFFICIENT - IMPACT"],
 			]
 	for ln in ilines:
 		_text(Vector2(px + 12, iy), "%-8s %s" % [ln[0], ln[1]], mid)
@@ -147,7 +164,7 @@ func _draw() -> void:
 
 	# ---- help line (bottom-right) ----
 	_text_r(Vector2(w - MARGIN, h - MARGIN),
-		"[SPC]HOLD [,/.]WARP [J]JUMP [F]FOCUS:%s [1]3D [2]MAP [3]ENC [T]PHOSPHOR" % camera_rig.focus_name,
+		"[SPC]HOLD [,/.]WARP [J]JUMP [M]PLAN [F]FOCUS:%s [1]3D [2]MAP [3]ENC [T]PHOSPHOR" % camera_rig.focus_name,
 		dim, _fs - 2)
 
 	# ---- frame corners (screen bezel ticks) ----

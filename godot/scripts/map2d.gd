@@ -64,8 +64,10 @@ func _draw() -> void:
 			continue                          # Jupiter off-plot
 		_orbit_trace(el, center, s, dim if el.name == "EARTH" else faint)
 	_orbit_trace(Sim.ast_el, center, s, mid)
-	if t >= Sim.T_INTERCEPT:
+	if Sim.burned():
 		_orbit_trace(Sim.ast_defl_el, center, s, dim, true)
+	elif Sim.planner_open or Sim.committed:
+		_orbit_trace(Sim.ast_defl_el, center, s, faint, true)
 
 	# Sun.
 	draw_circle(center, 4.0, bright)
@@ -83,8 +85,9 @@ func _draw() -> void:
 			mid if el.name == "EARTH" else dim)
 
 	# Threat + range line to Earth.
+	var burned: bool = Sim.burned()
 	var p_e := _to_screen(Sim.pos_ecl(Sim.earth_el, t), center, s)
-	var el_act: Dictionary = Sim.ast_defl_el if t >= Sim.T_INTERCEPT else Sim.ast_el
+	var el_act: Dictionary = Sim.ast_defl_el if burned else Sim.ast_el
 	var p_a := _to_screen(Sim.pos_ecl(el_act, t), center, s)
 	_dashed_line(p_e, p_a, dim, 6.0, 5.0)
 	var mid_pt := (p_e + p_a) * 0.5
@@ -92,12 +95,12 @@ func _draw() -> void:
 		"RNG %.3f AU" % (Sim.threat_range_km(t) / Sim.AU_KM),
 		HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 1, mid)
 
-	var tcol := bright if (t >= Sim.T_INTERCEPT or Sim.blink(1.4)) else mid
+	var tcol := bright if (burned or Sim.blink(1.4)) else mid
 	_diamond(p_a, 6.0, tcol)
 	draw_string(_font, p_a + Vector2(10, 4),
-		"2031-XK" + ("" if t >= Sim.T_INTERCEPT else " <THREAT>"),
+		"2031-XK" + ("" if burned else " <THREAT>"),
 		HORIZONTAL_ALIGNMENT_LEFT, -1, _fs, tcol)
-	if t >= Sim.T_INTERCEPT:
+	if burned:
 		var p_n := _to_screen(Sim.pos_ecl(Sim.ast_el, t), center, s)
 		_diamond(p_n, 5.0, faint)
 		draw_string(_font, p_n + Vector2(9, 12), "NOMINAL",
@@ -112,7 +115,7 @@ func _draw() -> void:
 			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 1, bright)
 
 	# Predicted impact X.
-	if t < Sim.T_INTERCEPT and Sim.blink(2.2):
+	if not burned and Sim.blink(2.2):
 		var p_x := _to_screen(Sim.pos_ecl(Sim.earth_el, Sim.T_IMPACT), center, s)
 		draw_line(p_x + Vector2(-7, -7), p_x + Vector2(7, 7), bright, 1.5)
 		draw_line(p_x + Vector2(-7, 7), p_x + Vector2(7, -7), bright, 1.5)

@@ -15,6 +15,7 @@ const LINES := [
 	"B-PLANE TARGETING .......... ONLINE",
 	"CLOSE-APPROACH SCANNER ..... ONLINE",
 	"DEFLECTION SOLVER .......... ONLINE",
+	"MISSION PLANNER ............ READY - KEY [M]",
 	"",
 	"THREAT DB .................. 1 OBJECT(S) FLAGGED",
 	"> 2031-XK  P(IMPACT)=1.000  EPOCH E-1200 D",

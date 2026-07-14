@@ -19,6 +19,7 @@ var map2d: Map2D
 var enc: EncounterView
 var planner: PlannerPanel
 var boot: BootScreen
+var time_bar: TimeBar
 
 var _green := true
 var _focus_idx := 0
@@ -73,6 +74,11 @@ func _ready() -> void:
 	hud.visible = false
 	viewport.add_child(hud)
 
+	time_bar = TimeBar.new()
+	time_bar.name = "TimeBar"
+	time_bar.visible = false
+	viewport.add_child(time_bar)
+
 	planner = PlannerPanel.new()
 	planner.name = "Planner"
 	viewport.add_child(planner)
@@ -81,6 +87,7 @@ func _ready() -> void:
 	boot.name = "Boot"
 	boot.finished.connect(func() -> void:
 		hud.visible = true
+		time_bar.visible = true
 		tags.visible = not (map2d.visible or enc.visible))
 	viewport.add_child(boot)
 
@@ -117,6 +124,8 @@ func _input(event: InputEvent) -> void:
 		Sim.warp_idx = mini(Sim.warp_idx + 1, Sim.WARP_STEPS.size() - 1)
 	elif event.is_action_pressed("warp_down"):
 		Sim.warp_idx = maxi(Sim.warp_idx - 1, 0)
+	elif event.is_action_pressed("time_reverse"):
+		Sim.reverse()
 	elif event.is_action_pressed("phosphor_toggle"):
 		_green = not _green
 		crt_mat.set_shader_parameter("phosphor",
@@ -171,3 +180,6 @@ func _sync_overlay_sizes() -> void:
 		if is_instance_valid(c):
 			c.position = Vector2.ZERO
 			c.size = vs
+	# The scrub bar is a bottom strip, not a full-rect overlay.
+	if is_instance_valid(time_bar):
+		time_bar.layout(vs)

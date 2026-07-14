@@ -6,6 +6,7 @@ extends Control
 
 const MARGIN := 18.0
 const PANEL_W := 340.0
+const BOTTOM_RESERVE := 50.0         # clearance for the TimeBar scrub strip
 
 var camera_rig: OrbitCameraRig
 var view_name := "TACTICAL 3D"
@@ -149,7 +150,7 @@ func _draw() -> void:
 
 	# ---- console (bottom-left) ----
 	var rows: int = _console.size()
-	var cy := h - MARGIN - (rows + 1) * lh
+	var cy := h - MARGIN - BOTTOM_RESERVE - (rows + 1) * lh
 	_text(Vector2(MARGIN, cy - 4), "-- EVENT LOG " + "-".repeat(38), faint)
 	for k in rows:
 		var line := _console[k]
@@ -162,9 +163,9 @@ func _draw() -> void:
 	if Sim.blink(2.5):
 		_text(Vector2(MARGIN + last_w + 4, cy + rows * lh), "_", bright)
 
-	# ---- help line (bottom-right) ----
-	_text_r(Vector2(w - MARGIN, h - MARGIN),
-		"[SPC]HOLD [,/.]WARP [J]JUMP [M]PLAN [F]FOCUS:%s [1]3D [2]MAP [3]ENC [T]PHOSPHOR" % camera_rig.focus_name,
+	# ---- help line (bottom-right, above the scrub strip) ----
+	_text_r(Vector2(w - MARGIN, h - MARGIN - BOTTOM_RESERVE),
+		"[SPC]HOLD [,/.]WARP [B]REV [J]JUMP [M]PLAN [F]FOCUS:%s [1]3D [2]MAP [3]ENC [T]PHOSPHOR" % camera_rig.focus_name,
 		dim, _fs - 2)
 
 	# ---- frame corners (screen bezel ticks) ----

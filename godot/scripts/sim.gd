@@ -20,7 +20,16 @@ var T_INTERCEPT := T_IMPACT - 180.0
 var t := 0.0                           # mission-elapsed time, days
 var paused := false
 var warp_idx := 3
-const WARP_STEPS: Array[float] = [0.1, 0.5, 2.0, 5.0, 15.0, 45.0, 120.0]  # days/sec
+var time_dir := 1.0                    # +1 forward, -1 reverse (run time backward)
+# Selectable warp rates, days/sec — extended into years/sec so the long clock
+# (decades, several comet passes) scrubs in seconds without endless key-holding.
+const WARP_STEPS: Array[float] = [0.1, 0.5, 2.0, 5.0, 15.0, 45.0, 120.0, 365.0, 1095.0, 3650.0]
+
+# Clock bounds, mission-elapsed days (epoch 2031-01-01). Wide enough to run well
+# before the campaign and far past it — a ~110-year window so long-period bodies
+# show several passes. The clock clamps here; it never wraps.
+const T_MIN := -3650.0                  # ~10 years before epoch
+const T_MAX := 40000.0                  # ~110 years after epoch
 
 var mono_font: SystemFont
 
@@ -72,11 +81,37 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if paused:
 		return
-	t += WARP_STEPS[warp_idx] * delta
+	var prev := t
+	t = clampf(t + time_dir * WARP_STEPS[warp_idx] * delta, T_MIN, T_MAX)
+	# Fire an event only when the clock *advances* across it (time_dir > 0). Running
+	# time backward silently un-fires the events it passes, so advancing again
+	# re-plays them — no spam while reversing or scrubbing.
 	for ev in _events:
-		if not ev.fired and t >= ev.t:
-			ev.fired = true
+		var passed: bool = t >= ev.t
+		if passed and not ev.fired and t > prev:
 			event_logged.emit("E%+05d  %s" % [int(ev.t - T_IMPACT), ev.msg])
+		ev.fired = passed
+
+
+## Flip the time direction (forward <-> reverse). Warp magnitude is unchanged.
+func reverse() -> void:
+	time_dir = -time_dir
+
+
+## Set the warp level directly (clamped to the available steps).
+func set_warp(idx: int) -> void:
+	warp_idx = clampi(idx, 0, WARP_STEPS.size() - 1)
+
+
+## Scrub the clock to a fraction [0,1] of the full [T_MIN, T_MAX] span. Silent
+## (no event replay) — the operator is dragging, not living through the timeline.
+func scrub_frac(frac: float) -> void:
+	jump(T_MIN + clampf(frac, 0.0, 1.0) * (T_MAX - T_MIN))
+
+
+## The clock's current position as a fraction [0,1] of [T_MIN, T_MAX].
+func clock_frac() -> float:
+	return clampf((t - T_MIN) / (T_MAX - T_MIN), 0.0, 1.0)
 
 
 # ---------------------------------------------------------------- bodies ---
@@ -524,7 +559,7 @@ func threat_range_km(t_days: float) -> float:
 ## Jump the mission clock; events at or before the new time are marked
 ## consumed silently so the console only shows live traffic.
 func jump(to_days: float) -> void:
-	t = to_days
+	t = clampf(to_days, T_MIN, T_MAX)
 	for ev in _events:
 		ev.fired = ev.t <= t
 
@@ -543,9 +578,14 @@ func jump_next_milestone() -> void:
 
 func warp_label() -> String:
 	var w := WARP_STEPS[warp_idx]
+	var rate: String
 	if w < 1.0:
-		return "x%.1f D/S" % w
-	return "x%d D/S" % int(w)
+		rate = "x%.1f D/S" % w
+	elif w < 365.0:
+		rate = "x%d D/S" % int(w)
+	else:
+		rate = "x%.1f Y/S" % (w / 365.25)
+	return ("<< " + rate) if time_dir < 0.0 else rate
 
 
 func blink(hz: float = 2.0) -> bool:

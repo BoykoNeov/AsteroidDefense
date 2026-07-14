@@ -120,7 +120,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         max_lead_seconds: sc.impact_epoch().tdb_seconds_past_j2000()
             - sc.epoch0().tdb_seconds_past_j2000(),
         target_perigee_m,
-        points,
+        points: points.into_iter().map(Into::into).collect(),
     };
     let json = serde_json::to_string_pretty(&curve)?;
     std::fs::write(DEFAULT_CURVE_JSON, &json)?;

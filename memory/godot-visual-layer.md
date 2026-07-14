@@ -60,7 +60,30 @@ registered in the *editor's* ProjectSettings. `clear_output_logs` MCP tool
 errored (harmless). Static funcs called via autoload instance warn on 4.7 —
 made pos_ecl/ecl_to_godot instance methods.
 
+**Encounter/b-plane close-up view (key 3, DONE 2026-07-14, screenshot-verified):**
+`scripts/encounter.gd` (EncounterView), wired in main.gd as third view
+(`view_encounter` action = KEY_3, registered via execute_editor_script since
+editor was open — disk edits to project.godot get clobbered). Geocentric plot
+on classic targeting axes: S = v_rel_hat at nominal CA, XI = S×N (N = ecliptic
+north), ZETA = S×XI (≈south, drawn screen-down). **sim.gd grew f64 encounter
+helpers** honoring the subtract-then-cast contract (GDScript scalars are f64;
+only Vector3 is f32): `pos_ecl64` (PackedFloat64Array twin of pos_ecl — kept
+duplicated off the hot path, keep math in sync), `geo_km` (diff in doubles,
+cast small residual), `geo_vel_kms` (central diff), `close_approach` (ternary
+search ±80 d of T_IMPACT). View: Earth disk (min 3 px) + dashed gravitational
+capture circle b_c = R⊕√(1+(v_esc/v∞)²) ≈ 3.7 R⊕ at v∞ 3.17 km/s, LD range
+rings, ±40 d track polylines (inbound bright/outbound dim, 5-d ticks),
+b-vector by bisection on s=0 crossing, live asteroid diamond, encounter
+solution readout, wheel zoom (0.05–30 LD half-span, _unhandled_input added
+after camera rig so it wins the wheel; **wheel zoom UNTESTED** — simulate_input
+does actions only). Verified pre-intercept (nominal |B| = 4 km → SURFACE
+IMPACT blink) and post (B 2.34 LD diamond + nominal ghost). **Sim.miss_ld
+changed:** now true CA distance from close_approach (2.3 LD), was separation
+at T_IMPACT (3.4 LD) which disagreed with the plotted |B|. Gotchas: GDScript
+format strings have **no %g** (prints literally — use String.num); editor logs
+a stale "Identifier not found: Sim" for freshly scanned scripts, runtime clean.
+
 **Next candidates:** gdext binding of core/ (f64→focus-residual contract),
-scenario-designer UI surface, encounter/b-plane close-up view, Moon +
-Earth-encounter zoom, sound (Geiger-style telemetry ticks), CRT phosphor
-persistence (feedback buffer).
+scenario-designer UI surface, Moon + Earth-encounter zoom (moon marker on the
+1 LD ring), sound (Geiger-style telemetry ticks), CRT phosphor persistence
+(feedback buffer).

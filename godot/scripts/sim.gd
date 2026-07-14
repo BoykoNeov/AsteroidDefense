@@ -114,9 +114,9 @@ func _build_threat() -> void:
 	d.name = "2031-XK DEFL"
 	ast_defl_el = d
 
-	# Projected miss + equivalent dv for the HUD.
-	var sep_au := (pos_ecl(ast_defl_el, T_IMPACT) - pos_ecl(earth_el, T_IMPACT)).length()
-	miss_ld = sep_au * AU_KM / LD_KM
+	# Projected miss: true post-burn close-approach distance (was separation
+	# at the nominal epoch, which overstates the miss the b-plane view shows).
+	miss_ld = close_approach(ast_defl_el).r_km / LD_KM
 	var v_kms := 29.78 / sqrt(a)                    # ~circular-speed scale
 	dv_ms = 0.5 * da_over_a * v_kms * 1000.0
 
@@ -207,6 +207,72 @@ func orbit_points(el: Dictionary, count: int = 192) -> PackedVector3Array:
 		pts.append(ecl_to_godot(pos_ecl(el, 0.0)))
 	el.m0 = saved
 	return pts
+
+
+# ------------------------------------------------- encounter geometry (f64) ---
+# GDScript scalars are 64-bit; only Vector3 truncates to f32. Geocentric
+# differences near encounter (two ~1 AU vectors a few thousand km apart)
+# lose ~18 km to an f32 cast, so these helpers keep every component in
+# doubles and only cast the SMALL residual — the same subtract-then-cast
+# contract the gdext binding will follow (HANDOFF §7).
+
+## Heliocentric ecliptic position as 64-bit components [x, y, z], AU.
+## Mirror of pos_ecl — keep the math in sync (pos_ecl stays separate to
+## avoid per-call array churn on the hot orbit-trace path).
+func pos_ecl64(el: Dictionary, t_days: float) -> PackedFloat64Array:
+	var m: float = wrapf(el.m0 + el.n * t_days, -PI, PI)
+	var ecc := solve_kepler(m, el.e)
+	var nu := 2.0 * atan2(sqrt(1.0 + el.e) * sin(ecc * 0.5),
+		sqrt(1.0 - el.e) * cos(ecc * 0.5))
+	var r: float = el.a * (1.0 - el.e * cos(ecc))
+	var xp := r * cos(nu)
+	var yp := r * sin(nu)
+
+	var co: float = cos(el.om)
+	var so: float = sin(el.om)
+	var cw: float = cos(el.w)
+	var sw: float = sin(el.w)
+	var ci: float = cos(el.i)
+	var si: float = sin(el.i)
+	return PackedFloat64Array([
+		(co * cw - so * sw * ci) * xp + (-co * sw - so * cw * ci) * yp,
+		(so * cw + co * sw * ci) * xp + (-so * sw + co * cw * ci) * yp,
+		(sw * si) * xp + (cw * si) * yp])
+
+
+## Geocentric position of a body, km, ecliptic axes. Subtracted in doubles
+## FIRST, then cast: the residual is small, so f32 is safe.
+func geo_km(el: Dictionary, t_days: float) -> Vector3:
+	var p := pos_ecl64(el, t_days)
+	var e := pos_ecl64(earth_el, t_days)
+	return Vector3(
+		(p[0] - e[0]) * AU_KM, (p[1] - e[1]) * AU_KM, (p[2] - e[2]) * AU_KM)
+
+
+## Geocentric velocity, km/s, by central difference of the f64 residuals.
+func geo_vel_kms(el: Dictionary, t_days: float) -> Vector3:
+	var dt := 0.02                        # days
+	return (geo_km(el, t_days + dt) - geo_km(el, t_days - dt)) / (2.0 * dt * 86400.0)
+
+
+## Closest Earth approach of a track near the impact epoch (ternary search;
+## range is unimodal inside +/-80 d of the designed encounter).
+func close_approach(el: Dictionary) -> Dictionary:
+	var lo := T_IMPACT - 80.0
+	var hi := T_IMPACT + 80.0
+	for _i in 96:
+		var m1 := lo + (hi - lo) / 3.0
+		var m2 := hi - (hi - lo) / 3.0
+		if geo_km(el, m1).length() < geo_km(el, m2).length():
+			hi = m2
+		else:
+			lo = m1
+	var t_ca := (lo + hi) * 0.5
+	return {
+		"t": t_ca,
+		"r_km": geo_km(el, t_ca).length(),
+		"v_kms": geo_vel_kms(el, t_ca),
+	}
 
 
 # ------------------------------------------------------------ interceptor ---

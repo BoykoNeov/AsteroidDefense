@@ -147,7 +147,7 @@ func _draw() -> void:
 
 	# ---- help line (bottom-right) ----
 	_text_r(Vector2(w - MARGIN, h - MARGIN),
-		"[SPC]HOLD [,/.]WARP [J]JUMP [F]FOCUS:%s [1]3D [2]MAP [T]PHOSPHOR" % camera_rig.focus_name,
+		"[SPC]HOLD [,/.]WARP [J]JUMP [F]FOCUS:%s [1]3D [2]MAP [3]ENC [T]PHOSPHOR" % camera_rig.focus_name,
 		dim, _fs - 2)
 
 	# ---- frame corners (screen bezel ticks) ----

@@ -16,6 +16,7 @@ var rig: OrbitCameraRig
 var hud: HUD
 var tags: TagLayer
 var map2d: Map2D
+var enc: EncounterView
 var boot: BootScreen
 
 var _green := true
@@ -54,6 +55,11 @@ func _ready() -> void:
 	map2d.visible = false
 	viewport.add_child(map2d)
 
+	enc = EncounterView.new()
+	enc.name = "Encounter"
+	enc.visible = false
+	viewport.add_child(enc)
+
 	tags = TagLayer.new()
 	tags.name = "Tags"
 	tags.camera_rig = rig
@@ -70,7 +76,7 @@ func _ready() -> void:
 	boot.name = "Boot"
 	boot.finished.connect(func() -> void:
 		hud.visible = true
-		tags.visible = not map2d.visible)
+		tags.visible = not (map2d.visible or enc.visible))
 	viewport.add_child(boot)
 
 	# Controls parented directly to a SubViewport don't inherit its size via
@@ -112,12 +118,19 @@ func _input(event: InputEvent) -> void:
 			PHOSPHOR_GREEN if _green else PHOSPHOR_AMBER)
 	elif event.is_action_pressed("view_3d"):
 		map2d.visible = false
+		enc.visible = false
 		tags.visible = true
 		hud.view_name = "TACTICAL 3D"
 	elif event.is_action_pressed("view_map"):
 		map2d.visible = true
+		enc.visible = false
 		tags.visible = false
 		hud.view_name = "HELIO PLOT 2D"
+	elif event.is_action_pressed("view_encounter"):
+		enc.visible = true
+		map2d.visible = false
+		tags.visible = false
+		hud.view_name = "ENCOUNTER B-PLANE"
 	elif event.is_action_pressed("focus_next"):
 		_focus_idx = (_focus_idx + 1) % _focus_targets.size()
 		_apply_focus()
@@ -134,7 +147,7 @@ func _apply_focus() -> void:
 
 func _sync_overlay_sizes() -> void:
 	var vs := Vector2(viewport.size)
-	for c: Control in [map2d, tags, hud, boot]:
+	for c: Control in [map2d, enc, tags, hud, boot]:
 		if is_instance_valid(c):
 			c.position = Vector2.ZERO
 			c.size = vs

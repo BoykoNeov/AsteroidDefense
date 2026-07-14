@@ -44,7 +44,7 @@ use crate::forces::point_mass::PointMassGravity;
 use crate::geometry::BPlaneEncounter;
 use crate::perturber_field::{tier1_perturber_field, EphemerisPerturber};
 use crate::{
-    geometry, DeflectionError, DeflectionScenario, Dop853, DvSolveTol, Epoch, Integrator,
+    geometry, Clock, DeflectionError, DeflectionScenario, Dop853, DvSolveTol, Epoch, Integrator,
     ScanOptions, StateVector,
 };
 
@@ -405,6 +405,57 @@ impl RealFieldScenario {
         self.impact_epoch
     }
 
+    /// Free-propagate an arbitrary seed state through this scenario's validated
+    /// Tier-1 field into a dense-output [`Clock`] over
+    /// `[epoch0, epoch0 + n_snapshots·cadence_seconds]`.
+    ///
+    /// This is the orrery / sandbox propagation path (HANDOFF §7): any body — a
+    /// synthetic designer comet, a what-if trajectory — flies in the *same* DE440
+    /// field the deflection physics runs on, so the drawn multi-body scene and the
+    /// mission share one force model (no second field build, one source of truth).
+    ///
+    /// The seed is **SSB-relative** — the integration frame, barycentric ICRF in
+    /// SI (metres, m/s) — matching what the nominal [`Clock`] stores; a caller
+    /// holding heliocentric or ecliptic elements converts into that frame first
+    /// (element→state about the Sun, rotate to ICRF, add the Sun's SSB state).
+    ///
+    /// `cadence_seconds`'s **sign sets the direction**: a negative cadence
+    /// reconstructs the past for a reverse-time view, and the dense output serves
+    /// cheap sub-cadence scrub queries either way ([`Clock::state_at`]).
+    ///
+    /// The span is bounded by the loaded kernel's coverage: the field looks up
+    /// planet positions at every step, so a span reaching outside DE440 fails with
+    /// [`ScenarioError::Integration`] rather than extrapolating. Invalid arguments
+    /// (a zero/non-finite cadence, or `n_snapshots == 0`) also return that error
+    /// instead of panicking, so a binding can surface them as a status.
+    pub fn propagate_free(
+        &self,
+        epoch0: Epoch,
+        seed: StateVector,
+        cadence_seconds: f64,
+        n_snapshots: u32,
+    ) -> Result<Clock, ScenarioError> {
+        if !(cadence_seconds.is_finite() && cadence_seconds != 0.0) {
+            return Err(ScenarioError::Integration(
+                "propagate_free cadence must be finite and non-zero".into(),
+            ));
+        }
+        if n_snapshots < 1 {
+            return Err(ScenarioError::Integration(
+                "propagate_free needs at least one snapshot".into(),
+            ));
+        }
+        Clock::propagate(
+            &Dop853::new(),
+            &self.force,
+            epoch0,
+            seed,
+            cadence_seconds,
+            n_snapshots,
+        )
+        .map_err(|e| ScenarioError::Integration(e.to_string()))
+    }
+
     /// Sweep the headline curve: for each lead in `leads_periods` (units of the
     /// heliocentric period), solve the minimum along-track Δv that lifts the
     /// b-plane perigee to `target_perigee_m`.
@@ -571,9 +622,99 @@ mod tests {
     use super::*;
     use crate::deflection::along_track_unit;
 
+    /// 1 AU in metres — for expressing tolerances as a fraction of an AU.
+    const AU_M: f64 = 1.495_978_707e11;
+
     /// Least distance of a geocentric track from Earth's centre over the window.
     fn min_range(track: &[Vector3<f64>]) -> f64 {
         track.iter().map(|p| p.norm()).fold(f64::INFINITY, f64::min)
+    }
+
+    /// `propagate_free` must fly the seed through the scenario's *own* Tier-1
+    /// field: a sub-cadence [`Clock::state_at`] query has to agree with a direct
+    /// `Dop853` step over the same interval in that same field, to the integrator
+    /// tolerance. This pins that the orrery path (a) uses the validated field (not
+    /// a fresh/empty one), (b) hands the dense output back correctly, and (c)
+    /// serves an arbitrary sub-snapshot epoch, not just cadence boundaries.
+    ///
+    /// Kernel-gated: needs the DE440 `.bsp`/`.pca` via `ASTEROID_DE_KERNEL` /
+    /// `ASTEROID_PLANETARY_CONSTANTS`; skips (does not fail) when they are unset.
+    #[test]
+    fn propagate_free_matches_direct_step_in_the_field() {
+        if std::env::var("ASTEROID_DE_KERNEL").is_err()
+            || std::env::var("ASTEROID_PLANETARY_CONSTANTS").is_err()
+        {
+            eprintln!("skipping propagate_free_matches_direct_step_in_the_field: no DE kernel");
+            return;
+        }
+
+        let sc = RealFieldScenario::build(&ImpactorConfig::default()).expect("scenario builds");
+
+        // A bound heliocentric seed at ~2 AU, built in the SSB (integration) frame:
+        // Sun's barycentric state plus a circular-ish offset. mu_sun from the same
+        // kernel keeps the seed physically sensible.
+        let epoch0 = Epoch::from_tdb_gregorian(2030, 1, 1, 0, 0, 0, 0);
+        let sun = EphemerisPerturber::new(Arc::clone(sc.ephemeris()), SUN_J2000);
+        let sun0 = sun.state_at(epoch0).expect("sun state");
+        let mu_sun = sc.ephemeris().gm_km3_s2(SUN_J2000).expect("sun GM") * KM3_S2_TO_M3_S2;
+        let r = 2.0 * AU_M;
+        let v_circ = (mu_sun / r).sqrt();
+        let seed = StateVector::new(
+            sun0.position + Vector3::new(r, 0.0, 0.0),
+            sun0.velocity + Vector3::new(0.0, v_circ, 0.0),
+        );
+
+        let cadence = 5.0 * 86_400.0; // 5-day snapshots
+        let n = 24;
+        let clock = sc
+            .propagate_free(epoch0, seed, cadence, n)
+            .expect("free propagation");
+
+        // The clock covers [epoch0, epoch0 + 24·5 d]; span and direction check.
+        let (lo, hi) = clock.covered_span();
+        let t0 = epoch0.tdb_seconds_past_j2000();
+        assert!(
+            (lo - t0).abs() < 1e-6,
+            "span should start at the seed epoch"
+        );
+        assert!(
+            (hi - (t0 + cadence * n as f64)).abs() < 1.0,
+            "span should end n·cadence forward"
+        );
+
+        // A deliberately off-boundary sub-snapshot epoch (37.3 d in, between the
+        // 7th and 8th snapshots): dense output vs a direct step to that epoch.
+        let dt = 37.3 * 86_400.0;
+        let direct = Dop853::new()
+            .step(&sc.force, epoch0, &seed, dt)
+            .expect("direct step");
+        let dense = clock
+            .state_at(epoch0.shifted_by_seconds(dt))
+            .expect("sub-snapshot query");
+        let rel = (dense.position - direct.position).norm() / AU_M;
+        assert!(
+            rel < 1e-8,
+            "free-prop dense query diverges from a direct step in the same field: rel {rel:.3e}"
+        );
+
+        // Backward propagation reconstructs the past: a negative cadence covers
+        // [epoch0 − n·cadence, epoch0], the reverse-time view relies on.
+        let back = sc
+            .propagate_free(epoch0, seed, -cadence, 6)
+            .expect("backward free propagation");
+        let (blo, bhi) = back.covered_span();
+        assert!(
+            (bhi - t0).abs() < 1e-6,
+            "backward span ends at the seed epoch"
+        );
+        assert!(
+            (blo - (t0 - cadence * 6.0)).abs() < 1.0,
+            "backward span reaches n·cadence into the past"
+        );
+
+        // Invalid arguments surface as an error, never a panic (the FFI contract).
+        assert!(sc.propagate_free(epoch0, seed, 0.0, 4).is_err());
+        assert!(sc.propagate_free(epoch0, seed, cadence, 0).is_err());
     }
 
     /// The displayed encounter must equal the validated physics: the geocentric

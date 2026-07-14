@@ -187,4 +187,130 @@ impl Mission {
     fn epoch0_tdb_seconds(&self) -> f64 {
         self.core.as_ref().map_or(0.0, |c| c.epoch0_tdb_seconds())
     }
+
+    /// Nominal (un-deflected) threat position at `tdb_seconds`, heliocentric
+    /// **ecliptic AU** — the same display frame as
+    /// [`body_position_ecl_au`](Self::body_position_ecl_au), so the drawn asteroid
+    /// sits on the drawn planets' orbits. `Vector3::ZERO` before the scenario is
+    /// built or outside the propagated span.
+    #[func]
+    fn asteroid_position_ecl_au(&self, tdb_seconds: f64) -> Vector3 {
+        match self
+            .core
+            .as_ref()
+            .and_then(|c| c.asteroid_position_ecl_au(tdb_seconds))
+        {
+            Some(v) => Vector3::new(v.x as f32, v.y as f32, v.z as f32),
+            None => Vector3::ZERO,
+        }
+    }
+
+    /// Deflected threat position at `tdb_seconds`, heliocentric **ecliptic AU**.
+    /// Equals the nominal position before the plan's deflection epoch (no
+    /// retroactive nudge). `Vector3::ZERO` if no plan is set or the epoch is out
+    /// of span.
+    #[func]
+    fn deflected_position_ecl_au(&self, tdb_seconds: f64) -> Vector3 {
+        match self
+            .core
+            .as_ref()
+            .and_then(|c| c.deflected_position_ecl_au(tdb_seconds))
+        {
+            Some(v) => Vector3::new(v.x as f32, v.y as f32, v.z as f32),
+            None => Vector3::ZERO,
+        }
+    }
+
+    /// The nominal threat orbit as `samples` heliocentric ecliptic-AU points from
+    /// campaign start to impact — the polyline the display draws. Sample **once**
+    /// (it walks the whole span). Empty if no scenario.
+    #[func]
+    fn asteroid_track_ecl_au(&self, samples: i64) -> PackedVector3Array {
+        let n = samples.max(0) as usize;
+        let pts = self
+            .core
+            .as_ref()
+            .map(|c| c.asteroid_track_ecl_au(n))
+            .unwrap_or_default();
+        let mut arr = PackedVector3Array::new();
+        for v in pts {
+            arr.push(Vector3::new(v.x as f32, v.y as f32, v.z as f32));
+        }
+        arr
+    }
+
+    /// The deflected threat orbit as `samples` heliocentric ecliptic-AU points
+    /// (nominal up to the deflection epoch, deflected after). Empty if no plan is
+    /// set. Re-sample after [`set_plan`](Self::set_plan).
+    #[func]
+    fn deflected_track_ecl_au(&self, samples: i64) -> PackedVector3Array {
+        let n = samples.max(0) as usize;
+        let pts = self
+            .core
+            .as_ref()
+            .map(|c| c.deflected_track_ecl_au(n))
+            .unwrap_or_default();
+        let mut arr = PackedVector3Array::new();
+        for v in pts {
+            arr.push(Vector3::new(v.x as f32, v.y as f32, v.z as f32));
+        }
+        arr
+    }
+
+    /// Commit a deflection plan: an along-track impulse of `dv_along_track` (m/s)
+    /// applied `lead_seconds` before impact. Returns `true` on success; on failure
+    /// returns `false` and stores the reason in [`last_error`](Self::last_error).
+    /// **Expensive** (re-propagates) — call on a plan change, not per frame.
+    #[func]
+    fn set_plan(&mut self, lead_seconds: f64, dv_along_track: f64) -> bool {
+        let Some(core) = self.core.as_mut() else {
+            self.error = "load()/build_scenario() must succeed before set_plan()".into();
+            return false;
+        };
+        match core.set_plan(lead_seconds, dv_along_track) {
+            Ok(()) => {
+                self.error = GString::new();
+                true
+            }
+            Err(e) => {
+                self.error = e.to_string().as_str().into();
+                false
+            }
+        }
+    }
+
+    /// Whether a deflection plan is currently set.
+    #[func]
+    fn has_plan(&self) -> bool {
+        self.core.as_ref().is_some_and(|c| c.has_plan())
+    }
+
+    /// Whether the current plan produces a clean, wide miss (the deflected pass
+    /// left the scan gate) — the **success** case, distinct from "no plan". When
+    /// this is `true`, [`deflected_perigee_m`](Self::deflected_perigee_m) is `-1`
+    /// because there is no finite perigee to report.
+    #[func]
+    fn is_clean_miss(&self) -> bool {
+        self.core.as_ref().is_some_and(|c| c.is_clean_miss())
+    }
+
+    /// The deflected b-plane perigee (miss distance), m. `-1.0` if no plan is set
+    /// **or** the pass is a clean miss — distinguish those with
+    /// [`has_plan`](Self::has_plan) / [`is_clean_miss`](Self::is_clean_miss).
+    #[func]
+    fn deflected_perigee_m(&self) -> f64 {
+        self.core
+            .as_ref()
+            .and_then(|c| c.deflected_perigee_m())
+            .unwrap_or(-1.0)
+    }
+
+    /// The current plan's deflection epoch, seconds past J2000 (`-1` if no plan).
+    #[func]
+    fn plan_deflection_tdb_seconds(&self) -> f64 {
+        self.core
+            .as_ref()
+            .and_then(|c| c.plan_deflection_tdb_seconds())
+            .unwrap_or(-1.0)
+    }
 }

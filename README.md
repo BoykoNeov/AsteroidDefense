@@ -48,6 +48,16 @@ interpolation, which would visibly lie through the encounter's curvature. Next u
 a close-approach detector root-finding on that continuous trajectory to feed the
 hit test; then the viewer and the Δv-vs-lead-time curve.
 
+**Update:** the MVP (§10 tasks 1–10) is complete — close-approach detector,
+deflection scenario, and the egui viewer with the Δv-vs-lead-time headline curve
+are all in. **Phase 2 is underway:** a Godot 3D frontend (retro-CRT solar system,
+b-plane encounter view, interactive mission planner) is live, and the **gdext core
+binding** now stands up in `godot/rust/` — a GDExtension exposing `asteroid_core`
+to Godot, dependency flowing one way (godot → core). The binding's toolchain gate
+passes: the native `AsteroidCore` class loads in Godot 4.7 and round-trips the core
+version string. Wiring the real deflection physics through it (replacing the
+placeholder GDScript Kepler in `sim.gd`) is the current work.
+
 If you're reading the code: **`HANDOFF.md` is the source of truth** for *why*
 things are the way they are. This README is the summary.
 
@@ -147,7 +157,7 @@ workspace/
 │   ├── clock.rs      # ✅ fixed-cadence clock; sub-snapshot queries from dense output
 │   └── ...      # 🔜 close-approach detector, lambert, deflection, ...
 ├── viewer/      # ✅ scaffold only — MVP pure-Rust renderer (egui) comes at task 10
-├── godot/       # 🔜 Phase 2: gdext binding, 3D rendering (not yet created)
+├── godot/       # ✅ Phase 2: Godot 3D frontend + gdext binding (rust/) → core
 ├── validation/  # ✅ Rust test harness — links core only, loads fixtures
 │                #    (✅ hapsira two-body + ✅ ASSIST Tier-1 trajectory oracle)
 └── pyref/       # ✅ Python scripts that generate validation fixtures (offline)

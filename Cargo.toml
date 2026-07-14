@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "viewer", "validation"]
+members = ["core", "viewer", "validation", "godot/rust"]
 
 # pyref/ is a Python offline-oracle pipeline (hapsira, REBOUND, ASSIST) — it is
 # deliberately NOT a Cargo member and must never appear in any Cargo.toml.

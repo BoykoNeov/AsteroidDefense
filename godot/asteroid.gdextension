@@ -1,0 +1,17 @@
+; GDExtension registration for the Rust `asteroid_gdext` binding.
+; Godot loads the cdylib built by the workspace at `../target/<profile>/`.
+; `res://` is the Godot project dir (godot/), so `res://../target/` reaches
+; the shared workspace target one level up.
+
+[configuration]
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = 4.2
+reloadable = true
+
+[libraries]
+windows.debug.x86_64 = "res://../target/debug/asteroid_gdext.dll"
+windows.release.x86_64 = "res://../target/release/asteroid_gdext.dll"
+linux.debug.x86_64 = "res://../target/debug/libasteroid_gdext.so"
+linux.release.x86_64 = "res://../target/release/libasteroid_gdext.so"
+macos.debug = "res://../target/debug/libasteroid_gdext.dylib"
+macos.release = "res://../target/release/libasteroid_gdext.dylib"

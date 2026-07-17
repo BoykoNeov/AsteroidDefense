@@ -255,6 +255,87 @@ impl<'a> DeflectionScenario<'a> {
         mu_earth: f64,
         earth_radius: f64,
     ) -> Result<Self, DeflectionError> {
+        // Validate before propagating: `Clock::propagate` *asserts* on a bad
+        // cadence, so the checks must reject it as an error first.
+        Self::validate(cadence_seconds, n_snapshots, mu_earth, earth_radius)?;
+        let nominal = Clock::propagate(
+            &integrator,
+            force,
+            epoch0,
+            state0,
+            cadence_seconds,
+            n_snapshots,
+        )?;
+        Self::with_nominal(
+            integrator,
+            force,
+            earth,
+            epoch0,
+            nominal,
+            cadence_seconds,
+            n_snapshots,
+            scan,
+            mu_earth,
+            earth_radius,
+        )
+    }
+
+    /// Build from an **already-propagated** nominal trajectory, skipping the
+    /// multi-year propagation [`new`](Self::new) performs.
+    ///
+    /// The nominal is a pure function of the seed and the force field, and it
+    /// never changes — but `new` re-flies it on every construction, so a caller
+    /// that builds a scenario per interaction (a planner re-evaluating on each
+    /// nudge) pays the whole cruise each time to learn something it already knows.
+    /// [`RealFieldScenario::deflection`](crate::scenario::RealFieldScenario::deflection)
+    /// propagates once, caches, and comes through here.
+    ///
+    /// **Contract:** `nominal` must be the trajectory propagated from *this*
+    /// scenario's seed under *this* `force`, at this `epoch0`/cadence — nothing
+    /// checks that, and a foreign clock would silently report the wrong
+    /// encounter. `pub(crate)` for exactly that reason: the only caller is the
+    /// scenario that owns both the seed and the field, so the pairing cannot be
+    /// wrong. `new` remains the safe public constructor.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_nominal(
+        integrator: Dop853,
+        force: &'a dyn ForceModel,
+        earth: &'a dyn GeocentricState,
+        epoch0: Epoch,
+        nominal: Clock,
+        cadence_seconds: f64,
+        n_snapshots: u32,
+        scan: ScanOptions,
+        mu_earth: f64,
+        earth_radius: f64,
+    ) -> Result<Self, DeflectionError> {
+        Self::validate(cadence_seconds, n_snapshots, mu_earth, earth_radius)?;
+        let span_end_seconds = epoch0
+            .shifted_by_seconds(cadence_seconds * n_snapshots as f64)
+            .tdb_seconds_past_j2000();
+
+        Ok(Self {
+            integrator,
+            force,
+            earth,
+            cadence_seconds,
+            span_end_seconds,
+            scan,
+            mu_earth,
+            earth_radius,
+            nominal,
+        })
+    }
+
+    /// The construction preconditions shared by [`new`](Self::new) and
+    /// [`with_nominal`](Self::with_nominal), so the two constructors cannot drift
+    /// on what they accept.
+    pub(crate) fn validate(
+        cadence_seconds: f64,
+        n_snapshots: u32,
+        mu_earth: f64,
+        earth_radius: f64,
+    ) -> Result<(), DeflectionError> {
         if !(cadence_seconds.is_finite() && cadence_seconds > 0.0) {
             return Err(DeflectionError::InvalidInput(format!(
                 "cadence_seconds must be finite and > 0 (got {cadence_seconds})"
@@ -275,30 +356,7 @@ impl<'a> DeflectionScenario<'a> {
                 "earth_radius must be finite and > 0 (got {earth_radius})"
             )));
         }
-
-        let nominal = Clock::propagate(
-            &integrator,
-            force,
-            epoch0,
-            state0,
-            cadence_seconds,
-            n_snapshots,
-        )?;
-        let span_end_seconds = epoch0
-            .shifted_by_seconds(cadence_seconds * n_snapshots as f64)
-            .tdb_seconds_past_j2000();
-
-        Ok(Self {
-            integrator,
-            force,
-            earth,
-            cadence_seconds,
-            span_end_seconds,
-            scan,
-            mu_earth,
-            earth_radius,
-            nominal,
-        })
+        Ok(())
     }
 
     /// The nominal trajectory (read-only) — handy for the animation and for

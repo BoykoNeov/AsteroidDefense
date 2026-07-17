@@ -34,7 +34,7 @@
 
 use std::error::Error;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anise::constants::frames::{EARTH_J2000, SUN_J2000};
 use nalgebra::Vector3;
@@ -206,6 +206,13 @@ pub struct RealFieldScenario {
     cadence_seconds: f64,
     n_snapshots: u32,
 
+    /// The nominal trajectory, propagated on first use and reused thereafter (see
+    /// [`Self::nominal_clock`]). Not part of the built state: it is a *pure
+    /// function* of `seed` + `force` + `epoch0`/cadence, all of which are fixed at
+    /// construction, so caching it changes nothing about what this scenario means
+    /// — only how often it is recomputed.
+    nominal_cache: OnceLock<Clock>,
+
     /// Heliocentric semi-major axis of the seed, m (> 0; bound).
     pub semi_major_axis_m: f64,
     /// Heliocentric orbital period of the seed, seconds.
@@ -362,6 +369,7 @@ impl RealFieldScenario {
             impact_epoch: cfg.impact_epoch,
             cadence_seconds,
             n_snapshots,
+            nominal_cache: OnceLock::new(),
             semi_major_axis_m: a,
             period_seconds: period,
         };
@@ -395,19 +403,60 @@ impl RealFieldScenario {
 
     /// Build a [`DeflectionScenario`] borrowing this scenario's owned field and
     /// Earth-state source — the object the Δv solver runs on.
+    ///
+    /// **Cheap after the first call.** The nominal trajectory is propagated once
+    /// and cached ([`Self::nominal_clock`]); this then only clones it. That makes
+    /// a per-interaction caller (the planner re-evaluating on every nudge, which
+    /// builds one of these each time) pay the multi-year cruise once for the whole
+    /// session instead of once per keypress.
     pub fn deflection(&self) -> Result<DeflectionScenario<'_>, DeflectionError> {
-        DeflectionScenario::new(
+        DeflectionScenario::with_nominal(
             Dop853::new(),
             &self.force,
             &self.earth,
             self.epoch0,
-            self.seed,
+            self.nominal_clock()?.clone(),
             self.cadence_seconds,
             self.n_snapshots,
             self.scan,
             self.mu_earth,
             self.earth_radius,
         )
+    }
+
+    /// The nominal trajectory, propagated on first call and reused after.
+    ///
+    /// Safe to cache because it is fully determined by state fixed at build time
+    /// (`seed`, `force`, `epoch0`, cadence, snapshot count) — the propagation is
+    /// deterministic, so the cached clock is identical to a freshly flown one, and
+    /// nothing here can hand back a nominal belonging to a different field.
+    fn nominal_clock(&self) -> Result<&Clock, DeflectionError> {
+        if let Some(clock) = self.nominal_cache.get() {
+            return Ok(clock);
+        }
+        // Validate on the same terms `DeflectionScenario::new` would, so a bad
+        // cadence is still an error here rather than an assert inside `propagate`.
+        DeflectionScenario::validate(
+            self.cadence_seconds,
+            self.n_snapshots,
+            self.mu_earth,
+            self.earth_radius,
+        )?;
+        let nominal = Clock::propagate(
+            &Dop853::new(),
+            &self.force,
+            self.epoch0,
+            self.seed,
+            self.cadence_seconds,
+            self.n_snapshots,
+        )?;
+        // A racing thread may have filled it first; the value is deterministic, so
+        // either clock is equally correct and the loser's is simply dropped.
+        let _ = self.nominal_cache.set(nominal);
+        Ok(self
+            .nominal_cache
+            .get()
+            .expect("just set, or set by a racing thread"))
     }
 
     /// The campaign-start epoch (the seed's epoch).
@@ -643,6 +692,83 @@ mod tests {
     /// Least distance of a geocentric track from Earth's centre over the window.
     fn min_range(track: &[Vector3<f64>]) -> f64 {
         track.iter().map(|p| p.norm()).fold(f64::INFINITY, f64::min)
+    }
+
+    /// The nominal cache must be **invisible in the physics and decisive in the
+    /// cost** — the two halves of the claim that justifies it.
+    ///
+    /// *Invisible*: the cached clock is compared against a fresh propagation from
+    /// the same seed through the same field, and must agree **exactly** (same
+    /// inputs, same deterministic code path — not "to a tolerance"). If those ever
+    /// diverge, the cache is serving a trajectory the scenario would not fly, and
+    /// every b-plane number downstream is quietly wrong.
+    ///
+    /// *Decisive*: `deflection()` used to call `DeflectionScenario::new`, which
+    /// re-flew the whole multi-year cruise — ~10 s on this machine, paid **per
+    /// call**, i.e. per planner nudge. It is now a clone of the cached clock. The
+    /// threshold below is ~20× on either side of both outcomes, so it is a real
+    /// regression tripwire rather than a flaky benchmark: a "tidy-up" back to
+    /// `new()` fails here loudly instead of silently making the planner unusable.
+    ///
+    /// Kernel-gated; skips (does not fail) with no kernel.
+    #[test]
+    fn nominal_is_cached_identically_and_deflection_stops_re_flying_it() {
+        if std::env::var("ASTEROID_DE_KERNEL").is_err()
+            || std::env::var("ASTEROID_PLANETARY_CONSTANTS").is_err()
+        {
+            eprintln!("skipping nominal_is_cached_identically_*: no DE kernel");
+            return;
+        }
+
+        let sc = RealFieldScenario::build(&ImpactorConfig::default()).expect("scenario builds");
+
+        // `build` verifies its own round-trip through `deflection()`, so a built
+        // scenario arrives with the nominal already flown — nothing downstream
+        // should ever pay for it again.
+        let cached = sc
+            .nominal_cache
+            .get()
+            .expect("build's round-trip check should leave the nominal cached");
+
+        // Invisible: identical to a fresh flight of the same seed in the same field.
+        let fresh = Clock::propagate(
+            &Dop853::new(),
+            &sc.force,
+            sc.epoch0,
+            sc.seed,
+            sc.cadence_seconds,
+            sc.n_snapshots,
+        )
+        .expect("fresh nominal propagates");
+        for epoch in [sc.epoch0, sc.impact_epoch] {
+            let c = cached.state_at(epoch).expect("cached state");
+            let f = fresh.state_at(epoch).expect("fresh state");
+            assert_eq!(
+                c.position, f.position,
+                "cached nominal position differs from a fresh propagation at {epoch:?} — \
+                 the cache is serving a trajectory this scenario would not fly"
+            );
+            assert_eq!(c.velocity, f.velocity, "cached nominal velocity differs");
+        }
+
+        // Decisive: building a DeflectionScenario is now a clone, not a cruise.
+        let t = std::time::Instant::now();
+        let ds = sc.deflection().expect("deflection builds");
+        let elapsed = t.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "deflection() took {elapsed:?} — it is re-propagating the nominal again \
+             (was ~10 s per call before the cache; the planner calls this per nudge)"
+        );
+        // …and the scenario it hands back still carries that same nominal.
+        assert_eq!(
+            ds.nominal()
+                .state_at(sc.impact_epoch)
+                .expect("state")
+                .position,
+            fresh.state_at(sc.impact_epoch).expect("state").position,
+            "the DeflectionScenario's nominal is not the cached one"
+        );
     }
 
     /// `propagate_free` must fly the seed through the scenario's *own* Tier-1

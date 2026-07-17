@@ -120,6 +120,25 @@ impl Mission {
         arr
     }
 
+    /// The span the threat exists over — `[start, end]` seconds past J2000, or an
+    /// **empty** array before the scenario is built.
+    ///
+    /// The display must hide the threat outside this window, for exactly the
+    /// reason [`usable_span_tdb`](Self::usable_span_tdb) exists: outside it every
+    /// threat lookup fails, and a failed lookup is `Vector3::ZERO` — the Sun. The
+    /// clock clamp does not cover this. It is clamped to the *kernel* (~300 years);
+    /// the threat is propagated over ~12, so the great majority of the scrub range
+    /// is outside it.
+    #[func]
+    fn threat_span_tdb(&self) -> PackedFloat64Array {
+        let mut arr = PackedFloat64Array::new();
+        if let Some((lo, hi)) = self.core.as_ref().and_then(|c| c.threat_span_tdb()) {
+            arr.push(lo);
+            arr.push(hi);
+        }
+        arr
+    }
+
     /// Shared tail of [`load`](Self::load) / [`load_from`](Self::load_from): adopt
     /// the core on success, or drop it and record why on failure. Kept in one
     /// place so both entry points cannot drift on the error contract — a failed

@@ -398,10 +398,27 @@ impl MissionCore {
         Some(icrf_km_to_ecliptic_au(helio_km))
     }
 
+    /// The span the threat exists over — `(start, end)` seconds past J2000 — or
+    /// `None` before the scenario is built.
+    ///
+    /// This is the *propagated* span, read from the nominal clock itself rather
+    /// than reconstructed from the config, so it cannot drift from what
+    /// [`asteroid_position_ecl_au`](Self::asteroid_position_ecl_au) will actually
+    /// answer. A display needs it for the same reason it needs
+    /// [`usable_span_tdb`](Self::usable_span_tdb): outside this window every
+    /// lookup fails, and a failed lookup is `ZERO` — *the Sun's position* in this
+    /// heliocentric frame. The threat's window (~12 years) is far narrower than
+    /// the kernel's (~300), so the clock clamp does **not** cover it: without this
+    /// gate the asteroid would sit on the Sun for most of the scrub range.
+    pub fn threat_span_tdb(&self) -> Option<(f64, f64)> {
+        Some(self.nominal_clock.as_ref()?.covered_span())
+    }
+
     /// Nominal (un-deflected) threat position, heliocentric **ecliptic AU**, at
     /// `tdb` seconds past J2000 — the asteroid on the solar-system display, in the
     /// same frame as [`body_position_ecl_au`](Self::body_position_ecl_au). `None`
-    /// before the scenario is built or for an epoch outside the propagated span.
+    /// before the scenario is built or for an epoch outside the propagated span
+    /// ([`threat_span_tdb`](Self::threat_span_tdb)).
     pub fn asteroid_position_ecl_au(&self, tdb: f64) -> Option<Vector3<f64>> {
         let clock = self.nominal_clock.as_ref()?;
         let epoch = Epoch::from_tdb_seconds_past_j2000(tdb);
@@ -1036,6 +1053,64 @@ mod tests {
             perigee < capture,
             "nominal perigee {perigee:.4e} m is outside the capture radius \
              {capture:.4e} m — the nominal is not a hit"
+        );
+    }
+
+    /// Kernel-gated (release-run). `threat_span_tdb` reports the window the threat
+    /// can actually be looked up over, and that window is *narrow* — this is the
+    /// gate the display hides the threat outside of.
+    ///
+    /// The test deliberately asserts the failure too: one second past the end, the
+    /// position lookup returns `None`, which the binding marshals as `ZERO` — and
+    /// `ZERO` in this heliocentric frame is the **Sun**. So an unhidden threat does
+    /// not vanish outside its span, it renders sitting on the Sun. The clock clamp
+    /// cannot save it: the clock is clamped to the kernel's ~300 years, while the
+    /// span asserted here is ~12, so ~96% of the scrub range is outside it.
+    #[test]
+    fn threat_span_is_the_narrow_window_outside_which_a_lookup_is_the_sun() {
+        if !have_kernels() {
+            eprintln!("skipping threat_span_is_the_narrow_window_*: no DE kernel");
+            return;
+        }
+        let mut mc = MissionCore::load().expect("load kernels");
+        assert_eq!(mc.threat_span_tdb(), None, "no threat span before build");
+
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let (lo, hi) = mc.threat_span_tdb().expect("threat span after build");
+        let cfg = ImpactorConfig::default();
+        let epoch0 = cfg.epoch0().tdb_seconds_past_j2000();
+        let impact = cfg.impact_epoch.tdb_seconds_past_j2000();
+
+        // The span starts at the campaign epoch and runs past impact (the config's
+        // 60-day margin), so the whole drawn campaign is inside it.
+        assert!(
+            (lo - epoch0).abs() < 1.0,
+            "threat span starts at {lo}, expected the campaign epoch {epoch0}"
+        );
+        assert!(
+            hi > impact,
+            "threat span ends at {hi}, before impact at {impact} — the final \
+             approach would be un-lookupable"
+        );
+
+        // Inside: a real position. Outside: nothing — which the frontend would draw
+        // on the Sun. Both halves matter; the first alone would pass on a span that
+        // silently covered everything.
+        assert!(
+            mc.asteroid_position_ecl_au(impact).is_some(),
+            "the threat must resolve at impact, the one epoch that defines it"
+        );
+        assert_eq!(
+            mc.asteroid_position_ecl_au(hi + 1.0),
+            None,
+            "a lookup one second past the span end must fail rather than return a \
+             position — this is the ZERO-is-the-Sun trap the span gate exists for"
+        );
+        assert_eq!(
+            mc.asteroid_position_ecl_au(lo - 1.0),
+            None,
+            "a lookup one second before the span start must likewise fail"
         );
     }
 

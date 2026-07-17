@@ -81,7 +81,24 @@ impl std::error::Error for ForceError {}
 /// An acceleration source (HANDOFF §4). Object-safe by design: a
 /// [`CompositeForce`] holds a heterogeneous list of these behind
 /// `Box<dyn ForceModel>` and sums them.
-pub trait ForceModel {
+///
+/// **`Send + Sync` is load-bearing, not decoration.** Building a real-field
+/// scenario is a ~10 s propagation, and a frontend must run it off its render
+/// thread or freeze. A `Box<dyn ForceModel>` is `Send` only if the trait says so,
+/// so without this the force field — and every scenario owning one — is pinned to
+/// the thread that built it.
+///
+/// `Sync` comes along for a reason worth recording, because `Send` alone looks
+/// sufficient and is not: this trait is *decorated*. A wrapper that holds another
+/// model by reference (`&'a dyn ForceModel`) and implements `ForceModel` — the
+/// adaptive-controller test's evaluation counter does exactly this — can only be
+/// `Send` if `&dyn ForceModel` is, and `&T: Send` requires `T: Sync`. So `Send`
+/// without `Sync` would quietly outlaw the decorator pattern the tests already
+/// use. Every implementor is an immutable bundle of numbers and `Arc`s (the ANISE
+/// almanac included), so the bound costs nothing real; it does forbid hiding
+/// thread-affine mutable state (a `Cell`) behind `&self`, which is why that
+/// counter is an atomic.
+pub trait ForceModel: Send + Sync {
     /// Acceleration (m/s², barycentric ICRF, SI) felt by a body at `state` and
     /// `epoch`. Takes the full [`StateVector`] — velocity-dependent terms (1PN
     /// relativity, Yarkovsky, SRP shadowing) need it, even though pure point-mass

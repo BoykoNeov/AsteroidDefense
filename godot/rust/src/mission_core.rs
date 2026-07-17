@@ -8,13 +8,21 @@
 //! running Godot. The thin [`crate::Mission`] class marshals these to Godot types
 //! and never adds logic of its own.
 //!
-//! **Not `Send` today** (measured, not assumed): `RealFieldScenario` holds a
-//! `PointMassGravity` whose `Vec<Perturber>` owns `Box<dyn PerturberEphemeris>`,
-//! and that trait declares no `Send` bound — so a `MissionCore` cannot cross to a
-//! worker thread as written, and the expensive `build_scenario` must run wherever
-//! it is called. Moving it off Godot's main thread means adding `: Send` to the
-//! core `PerturberEphemeris` trait first; do not design threading around the
-//! assumption that this already works.
+//! **`RealFieldScenario` is `Send`** — the core traits (`ForceModel`,
+//! `PerturberEphemeris`, `GeocentricState`) carry `Send + Sync` bounds, pinned by
+//! a compile-time assertion in `core::scenario`. A built scenario can therefore be
+//! produced on a worker thread and moved here, which is the only way the ~10 s
+//! build does not freeze Godot's main thread. (This note previously said the
+//! opposite; the bounds were added once the measurement showed the build was far
+//! too slow to run inline.)
+//!
+//! What must **not** move to a worker is *this* struct: it serves planet positions
+//! (`body_position_ecl_au`) every frame from `load()`, which is ~19 ms and live
+//! immediately. Sending it away for the duration of a build would freeze the
+//! orrery for those 10 s — the very regression threading exists to prevent. The
+//! split that follows from it: clone the `Arc<Ephemeris>`, build a scenario
+//! off-thread from that clone, and hand the finished scenario back to this
+//! (still-serving) core to install.
 //!
 //! **Two-phase, on purpose.** [`load`](MissionCore::load) reads the kernels
 //! (~ms) and immediately enables body-position queries; [`build_scenario`](

@@ -44,7 +44,13 @@ use nalgebra::Vector3;
 /// A `velocity_at` sibling will join this when a velocity-dependent term (1PN,
 /// SRP) needs it; omitted now (YAGNI — pure point-mass gravity needs only
 /// position).
-pub trait PerturberEphemeris {
+/// `Send + Sync` for the same reason as [`ForceModel`](crate::forces::ForceModel):
+/// these live in a `Vec<Perturber>` inside the field, so a field is thread-mobile
+/// only if its perturbers are, and the expensive scenario build has to leave the
+/// render thread. `Sync` because the field is itself borrowed as `&dyn ForceModel`
+/// by a `DeflectionScenario`, and a shared reference is only `Send` if its referent
+/// is `Sync`.
+pub trait PerturberEphemeris: Send + Sync {
     /// Position of the perturber at `epoch`, metres, barycentric ICRF.
     fn position_at(&self, epoch: Epoch) -> Result<Vector3<f64>, ForceError>;
 }

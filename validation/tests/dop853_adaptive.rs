@@ -28,7 +28,7 @@ use asteroid_core::{
     Dop853, Epoch, Integrator, KeplerPropagator, OrbitalElements, Propagator, StateVector,
 };
 use nalgebra::Vector3;
-use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Heliocentric Sun μ (m³/s²), the ANISE-resolved value the fixtures pin against
 /// (`pyref/generate_kepler_fixture.py`). Only its being *identical* on both sides
@@ -37,27 +37,32 @@ const MU_SUN: f64 = 1.327_124_400_419_393_7e20;
 
 /// A `ForceModel` that counts how many times its acceleration is evaluated, so a
 /// test can compare the *work* the adaptive controller does at different `rtol`.
-/// `Cell` gives the interior mutability `acceleration(&self, …)` needs.
+/// An atomic gives the interior mutability `acceleration(&self, …)` needs while
+/// keeping the counter `Sync`, which `ForceModel` requires of its implementors so
+/// that a force field can cross to a worker thread (see the trait's note). This is
+/// a decorator — it holds another model by reference — which is precisely the shape
+/// that needs the bound. `Relaxed` is right: nothing synchronises on this count,
+/// and only its total is read, after the propagation is over.
 struct Counting<'a> {
     inner: &'a dyn ForceModel,
-    evals: Cell<u64>,
+    evals: AtomicU64,
 }
 
 impl<'a> Counting<'a> {
     fn new(inner: &'a dyn ForceModel) -> Self {
         Self {
             inner,
-            evals: Cell::new(0),
+            evals: AtomicU64::new(0),
         }
     }
     fn count(&self) -> u64 {
-        self.evals.get()
+        self.evals.load(Ordering::Relaxed)
     }
 }
 
 impl ForceModel for Counting<'_> {
     fn acceleration(&self, epoch: Epoch, state: &StateVector) -> Result<Vector3<f64>, ForceError> {
-        self.evals.set(self.evals.get() + 1);
+        self.evals.fetch_add(1, Ordering::Relaxed);
         self.inner.acceleration(epoch, state)
     }
 }

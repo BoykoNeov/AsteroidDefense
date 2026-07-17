@@ -60,14 +60,20 @@ use crate::state::StateVector;
 /// Blanket-implemented for any `Fn(Epoch) -> Result<StateVector, ForceError>`, so
 /// tests can pass a closure (a synthetic Earth) and the shipping build passes the
 /// ANISE-backed [`EphemerisPerturber`](crate::perturber_field::EphemerisPerturber).
-pub trait GeocentricState {
+/// `Send + Sync` for the same reason as [`ForceModel`](crate::forces::ForceModel):
+/// a scenario owns its Earth source, so it is thread-mobile only if this is, and a
+/// `DeflectionScenario` borrows it as `&dyn GeocentricState` (a shared reference is
+/// `Send` only if its referent is `Sync`). The blanket impl below inherits the
+/// bound, which every closure capturing nothing — or only `Arc`s — satisfies
+/// automatically.
+pub trait GeocentricState: Send + Sync {
     /// The body's SSB-relative state at `epoch`, barycentric ICRF, SI.
     fn state_at(&self, epoch: Epoch) -> Result<StateVector, ForceError>;
 }
 
 impl<F> GeocentricState for F
 where
-    F: Fn(Epoch) -> Result<StateVector, ForceError>,
+    F: Fn(Epoch) -> Result<StateVector, ForceError> + Send + Sync,
 {
     fn state_at(&self, epoch: Epoch) -> Result<StateVector, ForceError> {
         self(epoch)

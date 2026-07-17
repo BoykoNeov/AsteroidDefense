@@ -694,6 +694,27 @@ mod tests {
         track.iter().map(|p| p.norm()).fold(f64::INFINITY, f64::min)
     }
 
+    /// A built scenario must be able to **leave the thread that built it**, which
+    /// is the entire point of the `Send` bounds on `ForceModel`/`PerturberEphemeris`
+    /// /`GeocentricState`. Building is a ~10 s propagation: a frontend that cannot
+    /// move it to a worker must freeze its display for those 10 s, so this is a
+    /// UX-critical property of the core, not a Rust technicality.
+    ///
+    /// Kernel-free and compile-time — `assert_send` fails to *compile* if any of
+    /// those bounds is dropped, which is a louder and cheaper failure than the
+    /// frontend discovering it. `Arc<Ephemeris>` is asserted alongside because the
+    /// worker builds from a clone of it while the main thread keeps serving planet
+    /// positions from the same almanac; that requires `Sync`, which it has.
+    #[test]
+    fn a_built_scenario_and_its_ephemeris_can_cross_to_a_worker_thread() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<RealFieldScenario>();
+        assert_send::<Arc<Ephemeris>>();
+        assert_sync::<Arc<Ephemeris>>();
+        assert_send::<Clock>();
+    }
+
     /// The nominal cache must be **invisible in the physics and decisive in the
     /// cost** — the two halves of the claim that justifies it.
     ///

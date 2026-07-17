@@ -60,7 +60,21 @@ registered in the *editor's* ProjectSettings. `clear_output_logs` MCP tool
 errored (harmless). Static funcs called via autoload instance warn on 4.7 —
 made pos_ecl/ecl_to_godot instance methods.
 
-**Encounter/b-plane close-up view (key 3, DONE 2026-07-14, screenshot-verified):**
+> **SUPERSEDED (2026-07-17, Phase-2 3C-2c).** The section below describes the
+> *placeholder* b-plane view and is kept for history. It is no longer what runs:
+> `encounter.gd` now reads the core's `EncounterFrame` and owns no geometry. Every
+> number below that this view computed for itself was **wrong** — it took `v_inf`
+> from the closest-approach speed (3.17 km/s) rather than the hyperbolic excess
+> (7.63 km/s), so its capture circle was 3.7 R⊕ where the real focused disc is
+> **1.773 R⊕**. The f64 helpers it leaned on (`pos_ecl64`/`geo_km`/`geo_vel_kms`/
+> `close_approach`) were deleted in 3C-2b, not ported: two encounter pipelines that
+> must agree and cannot be checked against each other is how a display starts
+> disagreeing with its own physics. See the `gdext-binding` memory for the current
+> design — and for the verdict bug this rewrite exposed (`perigee > capture_radius`
+> is neither coherent pair; the hit test is `b > b_capture`).
+
+**Encounter/b-plane close-up view (key 3, DONE 2026-07-14, screenshot-verified) —
+HISTORICAL, superseded by 3C-2c:**
 `scripts/encounter.gd` (EncounterView), wired in main.gd as third view
 (`view_encounter` action = KEY_3, registered via execute_editor_script since
 editor was open — disk edits to project.godot get clobbered). Geocentric plot

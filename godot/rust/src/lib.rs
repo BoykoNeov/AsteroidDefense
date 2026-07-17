@@ -254,14 +254,23 @@ impl Mission {
         }
     }
 
-    /// The nominal encounter's focused capture radius, m (`-1.0` if no scenario) —
-    /// the radius of Earth's effective collision disc in the b-plane.
+    /// The nominal encounter's focused capture radius `b_capture`, m (`-1.0` if no
+    /// scenario) — the radius of Earth's effective collision disc in the b-plane,
+    /// ~1.773 R⊕ at this encounter's `v_inf`.
     ///
-    /// The honest bar for a deflection verdict: a plan is safe when the deflected
-    /// perigee clears **this**, not Earth's solid radius (focusing pulls a track
-    /// that would geometrically miss onto the surface) and not only when
-    /// [`is_clean_miss`](Self::is_clean_miss), which is a much wider bar a safe
-    /// plan need not reach.
+    /// The bar a deflection verdict is measured against, and it measures the
+    /// **impact parameter** — [`deflected_impact_parameter_m`](
+    /// Self::deflected_impact_parameter_m), not the perigee. `b > b_capture` is the
+    /// core's own [`is_hit`] criterion, which it proves equivalent to `perigee >
+    /// R⊕`. The two are equivalent only *as pairs*: b is the un-focused asymptotic
+    /// miss and b_capture is the target enlarged to account for focusing, while the
+    /// perigee already *is* the focused closest approach and so belongs against
+    /// Earth's solid radius. Comparing a perigee against this number mixes the pairs
+    /// and silently demands ~1.5× more miss than physics does. (It is also not
+    /// [`is_clean_miss`](Self::is_clean_miss), a far wider bar a safe plan need not
+    /// reach.)
+    ///
+    /// [`is_hit`]: asteroid_core::geometry::BPlaneEncounter::is_hit
     #[func]
     fn capture_radius_m(&self) -> f64 {
         self.core
@@ -270,13 +279,49 @@ impl Mission {
             .unwrap_or(-1.0)
     }
 
-    /// The nominal (un-deflected) b-plane perigee, m (`-1.0` if no scenario) — the
-    /// hit being undone, which by construction sits inside the capture radius.
+    /// The nominal (un-deflected) b-plane perigee, m (`-1.0` if no scenario) — how
+    /// close the incoming rock actually comes to Earth's centre. Inside R⊕ by
+    /// construction: it is a surface impact.
     #[func]
     fn nominal_perigee_m(&self) -> f64 {
         self.core
             .as_ref()
             .and_then(|c| c.nominal_perigee_m())
+            .unwrap_or(-1.0)
+    }
+
+    /// The nominal pass's b-plane impact parameter `b`, m (`-1.0` if no scenario) —
+    /// the hit being undone, inside [`capture_radius_m`](Self::capture_radius_m) by
+    /// construction.
+    #[func]
+    fn nominal_impact_parameter_m(&self) -> f64 {
+        self.core
+            .as_ref()
+            .and_then(|c| c.nominal_impact_parameter_m())
+            .unwrap_or(-1.0)
+    }
+
+    /// Earth's solid-body radius `R⊕` as the core models it, m (`-1.0` if no
+    /// scenario) — the disc to draw, and the bar a *perigee* is measured against.
+    #[func]
+    fn earth_radius_m(&self) -> f64 {
+        self.core
+            .as_ref()
+            .and_then(|c| c.earth_radius_m())
+            .unwrap_or(-1.0)
+    }
+
+    /// The nominal encounter's hyperbolic excess speed `v_inf`, m/s (`-1.0` if no
+    /// scenario) — the approach speed "at infinity" that sets the focusing.
+    ///
+    /// Not the config's 18 km/s `v_rel`, which is the speed at the 3000 km impact
+    /// point deep in Earth's well; with the well stripped out this is ~7.63 km/s,
+    /// and that is what makes the capture disc 1.773 R⊕ rather than ~1.18.
+    #[func]
+    fn encounter_v_inf_m_s(&self) -> f64 {
+        self.core
+            .as_ref()
+            .and_then(|c| c.encounter_v_inf_m_s())
             .unwrap_or(-1.0)
     }
 
@@ -506,6 +551,21 @@ impl Mission {
             .unwrap_or(-1.0)
     }
 
+    /// The deflected pass's b-plane impact parameter `b`, m. `-1.0` if no plan is
+    /// set **or** the pass is a clean miss — distinguish those with
+    /// [`has_plan`](Self::has_plan) / [`is_clean_miss`](Self::is_clean_miss).
+    ///
+    /// **The miss the verdict is made of.** Safe is `b > capture_radius_m()`; this
+    /// is the number to print beside that one, because those two are the pair the
+    /// core's hit test compares. See [`capture_radius_m`](Self::capture_radius_m).
+    #[func]
+    fn deflected_impact_parameter_m(&self) -> f64 {
+        self.core
+            .as_ref()
+            .and_then(|c| c.deflected_impact_parameter_m())
+            .unwrap_or(-1.0)
+    }
+
     /// The current plan's deflection epoch, seconds past J2000 (`-1` if no plan).
     #[func]
     fn plan_deflection_tdb_seconds(&self) -> f64 {
@@ -513,6 +573,100 @@ impl Mission {
             .as_ref()
             .and_then(|c| c.plan_deflection_tdb_seconds())
             .unwrap_or(-1.0)
+    }
+
+    // --- the b-plane encounter view (3C-2c) ---------------------------------
+    //
+    // The encounter arrives already projected into the core-derived b-plane display
+    // basis, as `(ξ, ζ, s)` **kilometres**: ξ/ζ are the in-plane axes to draw, and s
+    // is depth along the incoming asymptote (negative inbound, positive outbound) so
+    // the view can shade the approach without owning any geometry.
+    //
+    // f32 is safe here despite the tracks reaching ~10⁷ km at the window edge: the
+    // core subtracted Earth's position in f64 and only this geocentric residual
+    // crosses, so the error scales with the value (~1 km out at the edge, millimetres
+    // at the ~10⁴ km perigee that actually decides anything) — HANDOFF §7.
+
+    /// The nominal (impact) encounter track — `ENCOUNTER_SAMPLES` `(ξ, ζ, s)` km
+    /// points across the ±1.5 d window. Empty before the scenario is built.
+    ///
+    /// Available with **no plan**: this is the incoming impact, and it is the whole
+    /// picture until the player does something about it. Cache it — it never changes.
+    #[func]
+    fn encounter_nominal_track_km(&self) -> PackedVector3Array {
+        Self::pack(
+            self.core
+                .as_ref()
+                .map(|c| c.encounter_nominal_track_km())
+                .unwrap_or_default(),
+        )
+    }
+
+    /// The deflected encounter track in the same frame — `(ξ, ζ, s)` km points.
+    /// **Empty until a plan is solved**, which is not a zero-length track: draw
+    /// nothing, since a zeroed one would run the asteroid through Earth's centre.
+    /// Re-read after [`set_plan`](Self::set_plan).
+    #[func]
+    fn encounter_deflected_track_km(&self) -> PackedVector3Array {
+        Self::pack(
+            self.core
+                .as_ref()
+                .map(|c| c.encounter_deflected_track_km())
+                .unwrap_or_default(),
+        )
+    }
+
+    /// The encounter tracks' sample epochs as `[first, last]` seconds past J2000, or
+    /// an **empty** array before the scenario is built. Samples are uniformly spaced
+    /// and shared by both tracks, so a clock time maps to a track index directly.
+    #[func]
+    fn encounter_sample_span_tdb(&self) -> PackedFloat64Array {
+        let mut arr = PackedFloat64Array::new();
+        if let Some((lo, hi)) = self.core.as_ref().and_then(|c| c.encounter_sample_span_tdb()) {
+            arr.push(lo);
+            arr.push(hi);
+        }
+        arr
+    }
+
+    /// Where the **nominal** incoming asymptote pierces the b-plane — `(ξ, ζ, s)`
+    /// km, `Vector3::ZERO` before the scenario is built. Its distance from the
+    /// origin is [`nominal_impact_parameter_m`](Self::nominal_impact_parameter_m),
+    /// and it lies inside the capture disc: the hit.
+    ///
+    /// The core leaves the b-vector's *sign* unpinned (a Tier-3 keyhole question),
+    /// so which side of the disc this lands on is cosmetic. Its **distance** is not.
+    #[func]
+    fn nominal_b_point_km(&self) -> Vector3 {
+        Self::to_v3(self.core.as_ref().and_then(|c| c.nominal_b_point_km()))
+    }
+
+    /// Where the **deflected** asymptote pierces the b-plane — `(ξ, ζ, s)` km.
+    /// `Vector3::ZERO` if no plan or a clean miss (no finite b-plane point exists
+    /// once the pass has left the scan gate) — and ZERO is Earth's centre here, so
+    /// gate on [`has_plan`](Self::has_plan) / [`is_clean_miss`](Self::is_clean_miss)
+    /// rather than drawing it unconditionally.
+    #[func]
+    fn deflected_b_point_km(&self) -> Vector3 {
+        Self::to_v3(self.core.as_ref().and_then(|c| c.deflected_b_point_km()))
+    }
+
+    /// f64 nalgebra points → a Godot `PackedVector3Array` (the f32 cast at the FFI
+    /// boundary, in one place).
+    fn pack(pts: Vec<nalgebra::Vector3<f64>>) -> PackedVector3Array {
+        let mut arr = PackedVector3Array::new();
+        for v in pts {
+            arr.push(Vector3::new(v.x as f32, v.y as f32, v.z as f32));
+        }
+        arr
+    }
+
+    /// An optional f64 nalgebra vector → a Godot `Vector3`, absent becoming ZERO.
+    fn to_v3(v: Option<nalgebra::Vector3<f64>>) -> Vector3 {
+        match v {
+            Some(v) => Vector3::new(v.x as f32, v.y as f32, v.z as f32),
+            None => Vector3::ZERO,
+        }
     }
 
     // --- Orrery catalog: multiple bodies, long spans, cheap scrub --------------

@@ -44,7 +44,10 @@ use nalgebra::Vector3;
 
 use asteroid_core::ephemeris::Ephemeris;
 use asteroid_core::geometry::BPlaneEncounter;
-use asteroid_core::scenario::{ImpactorConfig, RealFieldScenario, ScenarioError};
+use asteroid_core::scenario::{
+    DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError,
+    ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES,
+};
 use asteroid_core::{
     along_track_unit, Clock, DvSolveTol, EphemerisPerturber, Epoch, OrbitalElements, StateVector,
 };
@@ -82,6 +85,86 @@ fn ecliptic_to_icrf(v: Vector3<f64>) -> Vector3<f64> {
     let eps = OBLIQUITY_ARCSEC / 3600.0 * std::f64::consts::PI / 180.0;
     let (s, c) = eps.sin_cos();
     Vector3::new(v.x, c * v.y - s * v.z, s * v.y + c * v.z)
+}
+
+/// The ecliptic north pole **expressed in ICRF** — `(0, −sin ε, cos ε)`.
+///
+/// Not `(0, 0, 1)`. That is the pole in *ecliptic* coordinates; here it is only
+/// ever dotted against ICRF vectors, and the two differ by the 23.4° obliquity.
+/// This is [`icrf_km_to_ecliptic_au`]'s rotation read backwards: that function maps
+/// ICRF `(0, −sin ε, cos ε)` onto ecliptic `(0, 0, 1)`.
+fn ecliptic_north_icrf() -> Vector3<f64> {
+    let eps = OBLIQUITY_ARCSEC / 3600.0 * std::f64::consts::PI / 180.0;
+    let (s, c) = eps.sin_cos();
+    Vector3::new(0.0, -s, c)
+}
+
+/// The b-plane display basis `(ξ̂, ζ̂, Ŝ)` — three ICRF unit vectors.
+///
+/// `Ŝ` is the core's incoming-asymptote direction for the nominal encounter; the
+/// b-plane is the plane through Earth's centre perpendicular to it. The two
+/// in-plane axes are a **display** choice, not physics. The core deliberately
+/// leaves the Öpik/Kizner ξ,ζ decomposition *and the b-vector's sign* unpinned
+/// (`geometry.rs` §10.8) because settling them is a keyhole/covariance question
+/// this view does not ask. So these are built the conventional way — ξ̂ ∝ Ŝ × N̂
+/// against the ecliptic pole, ζ̂ = Ŝ × ξ̂ — and treated as what they are: a frame to
+/// draw in. Everything the view *reports* (|B|, perigee, capture radius, v_inf) is
+/// a rotation-invariant scalar from the core, so no number a player reads depends
+/// on the choice made here; only which way the picture happens to be turned does.
+///
+/// **Everything in this function is ICRF, and that is load-bearing.** The tracks
+/// being projected are geocentric ICRF (the integration frame with Earth's position
+/// subtracted) and `Ŝ` is ICRF, so the reference pole must be the ecliptic north
+/// pole *in ICRF* ([`ecliptic_north_icrf`]) — never the ecliptic-frame `(0, 0, 1)`,
+/// and the tracks must never be run through [`icrf_km_to_ecliptic_au`] on the way
+/// in. Mixing the two frames here would tilt the plot by the obliquity: a picture
+/// that still looks like a plausible encounter, which is the whole danger.
+///
+/// Returns `None` only for a non-finite `Ŝ`. A `Ŝ` parallel to the ecliptic pole
+/// (an encounter straight down from ecliptic north) leaves ξ̂ undefined by this
+/// recipe rather than wrong, so it falls back to another reference axis: the pole
+/// is arbitrary for a *display* frame, and no readout depends on it.
+fn bplane_basis(s_hat: Vector3<f64>) -> Option<(Vector3<f64>, Vector3<f64>, Vector3<f64>)> {
+    if !s_hat.iter().all(|c| c.is_finite()) || s_hat.norm() < 1e-12 {
+        return None;
+    }
+    let s = s_hat.normalize();
+
+    // ξ̂ ∝ Ŝ × N̂. Degenerate only when Ŝ ∥ N̂; then any perpendicular will do, and
+    // two candidate axes cannot both be parallel to Ŝ.
+    let mut xi = s.cross(&ecliptic_north_icrf());
+    if xi.norm() < 1e-9 {
+        xi = s.cross(&Vector3::x());
+    }
+    if xi.norm() < 1e-9 {
+        xi = s.cross(&Vector3::y());
+    }
+    if xi.norm() < 1e-9 {
+        return None;
+    }
+    let xi_hat = xi.normalize();
+    // Ŝ ⊥ ξ̂ already, so this is unit without renormalising.
+    let zeta_hat = s.cross(&xi_hat);
+    Some((xi_hat, zeta_hat, s))
+}
+
+/// Project a geocentric **ICRF** vector in metres onto the b-plane display basis,
+/// returning `(ξ, ζ, s)` in **kilometres**.
+///
+/// `s` — the component along the incoming asymptote — is the depth axis: negative
+/// inbound, positive outbound, so a consumer can shade the approach and pick out
+/// the b-plane crossing without knowing any geometry.
+///
+/// The f64→f32 boundary is respected the same way the rest of the binding respects
+/// it (HANDOFF §7): the subtraction that produced this geocentric vector happened
+/// in f64 inside the core, and only the small residual crosses to Godot. At the
+/// scale that matters (a ~10⁴ km perigee) f32's ~1e-7 relative precision is
+/// millimetres.
+fn project_bplane(
+    g_m: Vector3<f64>,
+    basis: (Vector3<f64>, Vector3<f64>, Vector3<f64>),
+) -> Vector3<f64> {
+    Vector3::new(g_m.dot(&basis.0), g_m.dot(&basis.1), g_m.dot(&basis.2)) / M_PER_KM
 }
 
 /// Discover the loaded kernel's usable coverage window by bisecting on whether
@@ -152,7 +235,7 @@ struct OrreryBody {
 
 /// A committed deflection plan and its precomputed result.
 ///
-/// `perigee == None` is the **clean-miss success case** — the deflected pass left
+/// `encounter == None` is the **clean-miss success case** — the deflected pass left
 /// the scan gate, i.e. the miss is so wide it is off any sensible frame, which is
 /// exactly what the player wants. It must stay distinct from "no plan set" (that
 /// is `MissionCore::plan == None`), so the planner does not read the *best*
@@ -163,9 +246,16 @@ struct PlanState {
     deflection_seconds: f64,
     /// The post-impulse arc: a `Clock` covering `[deflection_epoch, span_end]`.
     clock: Clock,
-    /// The deflected b-plane perigee (miss distance), m, or `None` for a clean
-    /// miss that left the scan gate (see the struct note).
-    perigee: Option<f64>,
+    /// The b-plane geometry of the deflected pass — impact parameter, perigee,
+    /// `v_inf`, the focused capture disc, and the core's own `is_hit()`. `None` for
+    /// a clean miss that left the scan gate (see the struct note).
+    encounter: Option<BPlaneEncounter>,
+    /// Both tracks in Earth's frame over the encounter window. Built from the
+    /// **same** [`DeflectedArc`] as `encounter`, so the pass the b-plane view draws
+    /// and the numbers annotating it cannot describe different propagations — the
+    /// invariant `frame_from` used to hold internally, kept here now that the
+    /// propagation happens in `set_plan`.
+    frame: EncounterFrame,
 }
 
 /// A safety margin pulled in from each discovered coverage edge, seconds (1 day).
@@ -201,6 +291,12 @@ pub struct BuiltScenario {
     /// demand: it is what [`MissionCore::capture_radius_m`] reports, and a full-span
     /// scan is not something a planner readout can pay for.
     nominal_encounter: BPlaneEncounter,
+    /// The pre-plan encounter picture: the nominal track in Earth's frame, with no
+    /// deflection anywhere (`frame.deflected` is empty). Sampled here because it is
+    /// as invariant as the nominal itself — the incoming impact never changes — so
+    /// the b-plane view can open on the threat the instant the build lands, with no
+    /// propagation and nothing to wait for.
+    nominal_frame: EncounterFrame,
 }
 
 impl BuiltScenario {
@@ -212,16 +308,26 @@ impl BuiltScenario {
     pub fn build(eph: Arc<Ephemeris>, cfg: &ImpactorConfig) -> Result<Self, ScenarioError> {
         let scenario = RealFieldScenario::build_with(cfg, eph)?;
         // `build_with` already verified its round-trip through `deflection()`, so the
-        // scenario's nominal cache is warm and both of these are cheap reads of work
-        // already done — not a third propagation.
-        let (nominal_clock, nominal_encounter) = {
+        // scenario's nominal cache is warm and all of these are cheap reads of work
+        // already done — not a third propagation. The frame adds only ~1400 dense
+        // evaluations and ephemeris look-ups (milliseconds against a ~10 s build).
+        let (nominal_clock, nominal_encounter, nominal_frame) = {
             let ds = scenario.deflection()?;
-            (ds.nominal().clone(), scenario.nominal_hit(&ds)?)
+            let enc = scenario.nominal_hit(&ds)?;
+            let frame = scenario.frame_from_arcs(
+                ds.nominal(),
+                enc,
+                None, // no plan exists at build time — the pre-plan picture
+                ENCOUNTER_HALF_WINDOW_SECONDS,
+                ENCOUNTER_SAMPLES,
+            )?;
+            (ds.nominal().clone(), enc, frame)
         };
         Ok(Self {
             scenario,
             nominal_clock,
             nominal_encounter,
+            nominal_frame,
         })
     }
 }
@@ -245,8 +351,11 @@ pub struct MissionCore {
     /// The nominal encounter, scanned once at build time (see [`BuiltScenario`]).
     /// Fixed for the scenario's life — it is the hit the whole mission exists to
     /// undo — and the source of the capture radius every verdict is measured
-    /// against.
+    /// against, as well as the `Ŝ` the b-plane display frame is built on.
     nominal_encounter: Option<BPlaneEncounter>,
+    /// The pre-plan encounter picture, sampled once at build time (see
+    /// [`BuiltScenario`]). The nominal track never changes, so neither does this.
+    nominal_frame: Option<EncounterFrame>,
     /// The current deflection plan, recomputed only on [`set_plan`](Self::set_plan)
     /// and read cheaply thereafter.
     plan: Option<PlanState>,
@@ -294,6 +403,7 @@ impl MissionCore {
             scenario: None,
             nominal_clock: None,
             nominal_encounter: None,
+            nominal_frame: None,
             plan: None,
             bodies: Vec::new(),
         })
@@ -319,6 +429,7 @@ impl MissionCore {
     pub fn install(&mut self, built: BuiltScenario) {
         self.nominal_clock = Some(built.nominal_clock);
         self.nominal_encounter = Some(built.nominal_encounter);
+        self.nominal_frame = Some(built.nominal_frame);
         self.scenario = Some(built.scenario);
         self.plan = None; // a new scenario invalidates any prior plan
         self.bodies.clear(); // …and any orrery bodies flown in the old field
@@ -510,6 +621,12 @@ impl MissionCore {
     /// arc. Call on a plan change, never per frame. Read the result cheaply via
     /// [`deflected_perigee_m`](Self::deflected_perigee_m) /
     /// [`is_clean_miss`](Self::is_clean_miss) and the deflected position/track.
+    ///
+    /// The encounter frame is sampled here, from the arc **this call already flew**
+    /// — via `frame_from_arcs`, not `frame_from`. That distinction is the whole
+    /// reason the core has the split: `frame_from` would fly the identical arc a
+    /// second time, doubling this call's ~0.85 s for a picture the propagation in
+    /// hand already contains.
     pub fn set_plan(
         &mut self,
         lead_seconds: f64,
@@ -518,6 +635,9 @@ impl MissionCore {
         let sc = self
             .scenario
             .as_ref()
+            .ok_or_else(|| ScenarioError::NominalNotAHit("scenario not built".into()))?;
+        let nominal_enc = self
+            .nominal_encounter
             .ok_or_else(|| ScenarioError::NominalNotAHit("scenario not built".into()))?;
         let deflection_epoch = sc.impact_epoch().shifted_by_seconds(-lead_seconds);
         let ds = sc.deflection()?;
@@ -528,11 +648,27 @@ impl MissionCore {
         let dir = along_track_unit(seed).ok_or_else(|| {
             ScenarioError::Integration("nominal has zero velocity; no along-track heading".into())
         })?;
-        let (clock, enc) = ds.deflected_trajectory(deflection_epoch, dv_along_track * dir)?;
+        let (clock, encounter) = ds.deflected_trajectory(deflection_epoch, dv_along_track * dir)?;
+
+        // One `DeflectedArc` feeds both the stored geometry and the drawn tracks, so
+        // the two are of the same propagation by construction rather than by care.
+        let frame = sc.frame_from_arcs(
+            ds.nominal(),
+            nominal_enc,
+            Some(DeflectedArc {
+                clock: &clock,
+                encounter,
+                deflection_epoch,
+            }),
+            ENCOUNTER_HALF_WINDOW_SECONDS,
+            ENCOUNTER_SAMPLES,
+        )?;
+
         self.plan = Some(PlanState {
             deflection_seconds: deflection_epoch.tdb_seconds_past_j2000(),
             clock,
-            perigee: enc.map(|e| e.perigee),
+            encounter,
+            frame,
         });
         Ok(())
     }
@@ -545,19 +681,149 @@ impl MissionCore {
     /// Whether the current plan's deflected pass left the scan gate — a clean,
     /// wide miss (the **success** case), distinct from "no plan" / "solve failed".
     pub fn is_clean_miss(&self) -> bool {
-        self.plan.as_ref().is_some_and(|p| p.perigee.is_none())
+        self.plan.as_ref().is_some_and(|p| p.encounter.is_none())
     }
 
-    /// The deflected b-plane perigee (miss distance), m — `None` if no plan is set
-    /// **or** the pass is a clean miss (use [`is_clean_miss`](Self::is_clean_miss)
-    /// to tell those two apart).
+    /// The deflected b-plane perigee, m — `None` if no plan is set **or** the pass
+    /// is a clean miss (use [`is_clean_miss`](Self::is_clean_miss) to tell those two
+    /// apart).
+    ///
+    /// This is the *closest approach* of the pass, and it is **not** the quantity
+    /// the hit test compares against the capture radius — see
+    /// [`deflected_impact_parameter_m`](Self::deflected_impact_parameter_m). It is
+    /// reported because "how close did it actually come" is a real question a
+    /// readout may want to answer; it is not the verdict.
     pub fn deflected_perigee_m(&self) -> Option<f64> {
-        self.plan.as_ref().and_then(|p| p.perigee)
+        self.plan.as_ref().and_then(|p| p.encounter).map(|e| e.perigee)
+    }
+
+    /// The deflected pass's **b-plane impact parameter** `b`, m — the perpendicular
+    /// miss of the incoming asymptote from Earth's centre. `None` for no plan or a
+    /// clean miss, exactly like [`deflected_perigee_m`](Self::deflected_perigee_m).
+    ///
+    /// **This is the miss the verdict is made of**, and the one a readout should
+    /// print beside the capture radius. `b` pairs with `capture_radius`, and
+    /// `perigee` pairs with `earth_radius`; the core proves the two criteria
+    /// identical (`geometry.rs`, `hit_criterion_matches_perigee_inside_earth`), but
+    /// they are only identical *as pairs*. Comparing a perigee against the capture
+    /// radius mixes them and demands ~1.5× more miss than physics does, because the
+    /// perigee is already the focused closest approach while the capture radius is
+    /// the enlarged target built for the *un*focused asymptotic miss.
+    pub fn deflected_impact_parameter_m(&self) -> Option<f64> {
+        self.plan
+            .as_ref()
+            .and_then(|p| p.encounter)
+            .map(|e| e.impact_parameter)
+    }
+
+    /// The nominal pass's b-plane impact parameter `b`, m — the hit being undone,
+    /// which sits inside the capture radius by construction. `None` before a
+    /// scenario is installed.
+    pub fn nominal_impact_parameter_m(&self) -> Option<f64> {
+        self.nominal_encounter.map(|e| e.impact_parameter)
+    }
+
+    /// Earth's solid-body radius `R⊕` as the core models it, m — the disc to draw.
+    /// The target radius for a *perigee*, never for an impact parameter (that is the
+    /// capture radius). `None` before a scenario is installed.
+    pub fn earth_radius_m(&self) -> Option<f64> {
+        self.nominal_encounter.map(|e| e.earth_radius)
+    }
+
+    /// The nominal encounter's hyperbolic excess speed `v_inf`, m/s — the approach
+    /// speed "at infinity" that sets how hard Earth's gravity focuses.
+    ///
+    /// Worth knowing what this is *not*: it is not `ImpactorConfig::v_rel_kms` (18
+    /// km/s), which is the speed at the 3000 km impact point, deep in Earth's well.
+    /// Stripping the well out leaves `v_inf ≈ 7.63 km/s`, which is what sets the
+    /// 1.773 R⊕ capture disc. `None` before a scenario is installed.
+    pub fn encounter_v_inf_m_s(&self) -> Option<f64> {
+        self.nominal_encounter.map(|e| e.v_inf)
     }
 
     /// The current plan's deflection epoch, seconds past J2000 (`None` if no plan).
     pub fn plan_deflection_tdb_seconds(&self) -> Option<f64> {
         self.plan.as_ref().map(|p| p.deflection_seconds)
+    }
+
+    // --- the b-plane encounter view (3C-2c) ---------------------------------
+    //
+    // Everything below hands the encounter to the frontend already projected into
+    // the display basis (see `bplane_basis`), because choosing that basis is the
+    // only judgement involved and it is not one GDScript should be making twice.
+    // The frontend receives `(ξ, ζ, s)` kilometres and draws them; it owns no
+    // geometry, exactly as `set_plan` left it owning no orbital mechanics.
+
+    /// The b-plane display basis for the built scenario, or `None` before it is.
+    fn encounter_basis(&self) -> Option<(Vector3<f64>, Vector3<f64>, Vector3<f64>)> {
+        self.nominal_encounter.and_then(|e| bplane_basis(e.s_hat))
+    }
+
+    /// The nominal (impact) track through the encounter window, projected into the
+    /// b-plane display frame — `(ξ, ζ, s)` km per sample. Empty before the scenario
+    /// is built.
+    ///
+    /// Available with **no plan and no propagation**: this is the pre-plan picture,
+    /// the incoming impact the player has to do something about.
+    pub fn encounter_nominal_track_km(&self) -> Vec<Vector3<f64>> {
+        let Some((basis, frame)) = self.encounter_basis().zip(self.nominal_frame.as_ref()) else {
+            return Vec::new();
+        };
+        frame
+            .nominal
+            .iter()
+            .map(|&g| project_bplane(g, basis))
+            .collect()
+    }
+
+    /// The deflected track through the encounter window, projected into the same
+    /// basis — `(ξ, ζ, s)` km per sample.
+    ///
+    /// **Empty when there is no plan**, which is not the same as a zero-length
+    /// track: there is no deflected pass to draw until the core has propagated one,
+    /// and a zeroed track would draw the asteroid straight through Earth's centre.
+    pub fn encounter_deflected_track_km(&self) -> Vec<Vector3<f64>> {
+        let Some((basis, plan)) = self.encounter_basis().zip(self.plan.as_ref()) else {
+            return Vec::new();
+        };
+        plan.frame
+            .deflected
+            .iter()
+            .map(|&g| project_bplane(g, basis))
+            .collect()
+    }
+
+    /// The epochs the encounter tracks are sampled at, `(first, last)` seconds past
+    /// J2000. Uniformly spaced and shared by both tracks, so a consumer can map a
+    /// clock time onto a track index without knowing the window. `None` before the
+    /// scenario is built.
+    pub fn encounter_sample_span_tdb(&self) -> Option<(f64, f64)> {
+        let s = &self.nominal_frame.as_ref()?.sample_seconds;
+        Some((*s.first()?, *s.last()?))
+    }
+
+    /// The **nominal** b-vector projected into the display frame — `(ξ, ζ, s)` km,
+    /// where the asteroid's incoming asymptote pierces the b-plane. `|B|` equals
+    /// [`nominal_impact_parameter_m`](Self::nominal_impact_parameter_m), and it lies
+    /// inside the capture disc: this is the hit.
+    ///
+    /// The *sign* of `B` is a convention the core deliberately leaves unpinned
+    /// (`geometry.rs` §10.8), so which side of the disc this point lands on is
+    /// cosmetic — its distance from the centre, which is what the verdict reads, is
+    /// not. `None` before the scenario is built.
+    pub fn nominal_b_point_km(&self) -> Option<Vector3<f64>> {
+        let basis = self.encounter_basis()?;
+        Some(project_bplane(self.nominal_encounter?.b_vector, basis))
+    }
+
+    /// The **deflected** b-vector projected into the display frame — `(ξ, ζ, s)` km.
+    /// `None` for no plan or a clean miss (there is no finite b-plane point when the
+    /// pass left the scan gate). Same unpinned-sign caveat as
+    /// [`nominal_b_point_km`](Self::nominal_b_point_km).
+    pub fn deflected_b_point_km(&self) -> Option<Vector3<f64>> {
+        let basis = self.encounter_basis()?;
+        let enc = self.plan.as_ref()?.encounter?;
+        Some(project_bplane(enc.b_vector, basis))
     }
 
     /// The minimum along-track Δv (m/s) that lifts the b-plane perigee to
@@ -748,6 +1014,74 @@ mod tests {
         assert!((pole.x).abs() < 1e-12);
         assert!((pole.y - eps.sin()).abs() < 1e-12);
         assert!((pole.z - eps.cos()).abs() < 1e-12);
+    }
+
+    /// The b-plane display basis, kernel-free. Two things worth pinning here.
+    ///
+    /// **The reference pole is an ICRF vector.** The b-plane frame is built from
+    /// `Ŝ` and the ecliptic north pole, and everything it touches (`Ŝ`, `B`, the
+    /// geocentric tracks) is ICRF — so the pole must be ICRF too. The obvious
+    /// `(0, 0, 1)` is the pole in *ecliptic* coordinates and is wrong here by the
+    /// 23.4° obliquity. This asserts the relationship that makes it right:
+    /// `ecliptic_north_icrf()` is exactly the vector `icrf_km_to_ecliptic_au` maps
+    /// onto ecliptic `(0, 0, 1)`. Get this wrong and nothing errors — the plot just
+    /// quietly tilts.
+    ///
+    /// **The frame is orthonormal and never NaNs**, including for a `Ŝ` parallel to
+    /// the pole, where `Ŝ × N̂` vanishes and the recipe has nothing to work with. A
+    /// normalise of that zero would produce a NaN basis and an invisible plot, so
+    /// the fallback is exercised rather than assumed.
+    #[test]
+    fn bplane_basis_is_orthonormal_and_references_the_pole_in_icrf() {
+        // The pole used here must be the ICRF vector that IS ecliptic north.
+        let north_ecl = icrf_km_to_ecliptic_au(ecliptic_north_icrf() * AU_KM);
+        assert!(
+            (north_ecl - Vector3::new(0.0, 0.0, 1.0)).norm() < 1e-12,
+            "ecliptic_north_icrf() must rotate to ecliptic (0,0,1), got {north_ecl:?} — \
+             the b-plane frame would be tilted by the obliquity"
+        );
+        // …and it is emphatically not (0,0,1) itself: that is the trap.
+        assert!(
+            (ecliptic_north_icrf() - Vector3::new(0.0, 0.0, 1.0)).norm() > 0.3,
+            "the ICRF and ecliptic poles must differ by the obliquity (~23.4°)"
+        );
+
+        let check_orthonormal = |s: Vector3<f64>, label: &str| {
+            let (xi, zeta, s_out) = bplane_basis(s).unwrap_or_else(|| panic!("{label}: no basis"));
+            for (v, n) in [(xi, "ξ̂"), (zeta, "ζ̂"), (s_out, "Ŝ")] {
+                assert!(
+                    (v.norm() - 1.0).abs() < 1e-12,
+                    "{label}: {n} is not unit ({})",
+                    v.norm()
+                );
+                assert!(v.iter().all(|c| c.is_finite()), "{label}: {n} is not finite");
+            }
+            assert!(xi.dot(&zeta).abs() < 1e-12, "{label}: ξ̂·ζ̂ ≠ 0");
+            assert!(xi.dot(&s_out).abs() < 1e-12, "{label}: ξ̂·Ŝ ≠ 0");
+            assert!(zeta.dot(&s_out).abs() < 1e-12, "{label}: ζ̂·Ŝ ≠ 0");
+        };
+
+        // A generic asymptote, out of every coordinate plane.
+        check_orthonormal(Vector3::new(0.36, -0.48, 0.8).normalize(), "generic");
+        // The degenerate case the fallback exists for: straight down the pole.
+        check_orthonormal(ecliptic_north_icrf(), "along the ecliptic pole");
+        check_orthonormal(-ecliptic_north_icrf(), "against the ecliptic pole");
+        // And the ICRF axes, for good measure.
+        check_orthonormal(Vector3::x(), "ICRF +x");
+        check_orthonormal(Vector3::z(), "ICRF +z");
+
+        // In the non-degenerate case ξ̂ really is perpendicular to the pole (it is
+        // Ŝ × N̂), which is what makes ζ̂ the "roughly south" axis the plot draws down.
+        let (xi, _, _) = bplane_basis(Vector3::new(0.36, -0.48, 0.8).normalize()).unwrap();
+        assert!(
+            xi.dot(&ecliptic_north_icrf()).abs() < 1e-12,
+            "ξ̂ must lie in the ecliptic plane (ξ̂ = Ŝ × N̂ ⇒ ξ̂·N̂ = 0)"
+        );
+
+        // Garbage in, `None` out — never a NaN basis across the FFI.
+        assert!(bplane_basis(Vector3::zeros()).is_none());
+        assert!(bplane_basis(Vector3::new(f64::NAN, 0.0, 0.0)).is_none());
+        assert!(bplane_basis(Vector3::new(f64::INFINITY, 0.0, 1.0)).is_none());
     }
 
     /// Kernel-gated. Every NAIF id the orrery display draws must resolve at
@@ -1260,5 +1594,225 @@ mod tests {
         assert!(mc
             .catalog_position_ecl_au(idx, epoch0_tdb - 1.0e9)
             .is_none());
+    }
+
+    /// Kernel-gated (release-run). **The decisive test for the b-plane view**: the
+    /// projected tracks and the projected b-point have to be in the *same frame*,
+    /// and the assertion below is what proves it on real data rather than by
+    /// inspection.
+    ///
+    /// Far from Earth the asteroid is on its incoming asymptote, and the asymptote's
+    /// defining property is that it pierces the b-plane exactly at `B`. So the very
+    /// first sample of the track — ~1.5 days out, beyond Earth's sphere of influence
+    /// — must have (ξ, ζ) ≈ the b-point's (ξ, ζ). It is the *transverse* components
+    /// that must agree; `s` is enormous and negative there, which is precisely what
+    /// gives this test its teeth: the far sample sits ~10⁶ km down the `s` axis
+    /// against a `|B|` of ~10⁴ km, so a frame error of the obliquity's 23.4° would
+    /// spill `sin(23.4°) × 10⁶ ≈ 4×10⁵` km of depth into the plotted plane — a ~50×
+    /// blowout of a tolerance set at a fraction of `|B|`. That is the exact mistake
+    /// this guards: running the tracks through `icrf_km_to_ecliptic_au` (right for
+    /// the orrery, wrong here) while `Ŝ` and `B` stay ICRF. Nothing would error; the
+    /// plot would just be quietly, plausibly wrong.
+    ///
+    /// Also pinned: `|B|` survives the projection (it is a rotation), `B` lands *in*
+    /// the b-plane (`s ≈ 0`, since `B ⊥ Ŝ` by construction), `s` sweeps
+    /// monotonically from inbound to outbound, and the empty-vs-zeroed contract at
+    /// both gates (no scenario → no track; no plan → no deflected track).
+    #[test]
+    fn the_encounter_projects_into_one_frame_the_asymptote_pierces_where_b_says() {
+        if !have_kernels() {
+            eprintln!("skipping the_encounter_projects_into_one_frame_*: no DE kernel");
+            return;
+        }
+        let mut mc = MissionCore::load().expect("load kernels");
+
+        // Before the build there is no frame and nothing to draw — not a zeroed one.
+        assert!(mc.encounter_nominal_track_km().is_empty());
+        assert!(mc.encounter_deflected_track_km().is_empty());
+        assert!(mc.nominal_b_point_km().is_none());
+        assert!(mc.encounter_sample_span_tdb().is_none());
+
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+
+        let track = mc.encounter_nominal_track_km();
+        assert_eq!(
+            track.len(),
+            ENCOUNTER_SAMPLES,
+            "the nominal track must be available with no plan and no propagation"
+        );
+        assert!(
+            mc.encounter_deflected_track_km().is_empty(),
+            "no plan means NO deflected track — an empty one, not a zeroed one that \
+             would draw the asteroid through Earth's centre"
+        );
+
+        let b_point = mc.nominal_b_point_km().expect("b-point after build");
+        let b = mc.nominal_impact_parameter_m().expect("|B| after build") / M_PER_KM;
+
+        // The projection is a rotation: |B| is preserved.
+        assert!(
+            (b_point.norm() - b).abs() / b < 1e-9,
+            "projected |B| {:.3} km ≠ impact parameter {b:.3} km",
+            b_point.norm()
+        );
+        // B lies in the b-plane: its depth along the asymptote is zero.
+        assert!(
+            b_point.z.abs() / b < 1e-9,
+            "the b-point has depth s = {:.3} km along Ŝ; B ⊥ Ŝ by construction",
+            b_point.z
+        );
+
+        // s sweeps inbound (negative) → outbound (positive), strictly.
+        let (s_first, s_last) = (track[0].z, track[track.len() - 1].z);
+        assert!(
+            s_first < 0.0 && s_last > 0.0,
+            "the window must straddle the b-plane: s runs {s_first:.3e} → {s_last:.3e} km"
+        );
+        assert!(
+            track.windows(2).all(|w| w[1].z > w[0].z),
+            "depth along the incoming asymptote must increase monotonically"
+        );
+
+        // THE assertion. Far out, the track is on the asymptote, which pierces the
+        // b-plane at B — so the transverse components must already agree there.
+        let far = track[0];
+        let transverse_gap =
+            ((far.x - b_point.x).powi(2) + (far.y - b_point.y).powi(2)).sqrt();
+        assert!(
+            transverse_gap < 0.25 * b,
+            "the far-field track sample sits {transverse_gap:.1} km from the b-point in \
+             the plotted plane (|B| = {b:.1} km, depth s = {:.3e} km). The asymptote \
+             must pierce the b-plane AT B — a gap this size means the tracks and Ŝ/B \
+             are not in the same frame (an obliquity mix-up would show ~{:.1e} km here)",
+            far.z,
+            far.z.abs() * (23.4_f64.to_radians()).sin()
+        );
+
+        // The sample span is the window the core defines, centred on impact.
+        let (lo, hi) = mc.encounter_sample_span_tdb().expect("sample span");
+        assert!(
+            ((hi - lo) - 2.0 * ENCOUNTER_HALF_WINDOW_SECONDS).abs() < 1.0,
+            "sample span {:.1} s ≠ the core's ±{:.1} s window",
+            hi - lo,
+            ENCOUNTER_HALF_WINDOW_SECONDS
+        );
+    }
+
+    /// Kernel-gated (release-run). **The verdict is `b` against the capture radius**
+    /// — the pair the core's own `is_hit` compares — and this pins the frontend's
+    /// comparison to it on a real N-body encounter.
+    ///
+    /// There are exactly two coherent hit criteria, and they are equivalent:
+    /// `b > b_capture` (the un-focused asymptotic miss against the target enlarged
+    /// for focusing) and `perigee > R⊕` (the already-focused closest approach
+    /// against the solid body). Both are asserted here against `is_hit`, which also
+    /// makes this the first check that the core's two-body equivalence survives
+    /// contact with the full perturbed field.
+    ///
+    /// The mistake this exists to prevent is mixing them — testing `perigee >
+    /// b_capture`, which is neither pair. It reads plausible (both are "miss
+    /// distances", both are in metres) and it is silently ~1.5× too strict, so it
+    /// fails a plan that physics calls safe. The final assertion measures that
+    /// factor from the encounter's own μ and v_inf rather than trusting the claim.
+    #[test]
+    fn the_hit_criterion_is_b_against_the_capture_disc_not_the_perigee() {
+        if !have_kernels() {
+            eprintln!("skipping the_hit_criterion_is_b_against_the_capture_disc_*: no DE kernel");
+            return;
+        }
+        let mut mc = MissionCore::load().expect("load kernels");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+
+        let capture = mc.capture_radius_m().expect("capture radius");
+        let r_earth = mc.earth_radius_m().expect("Earth radius");
+        let v_inf = mc.encounter_v_inf_m_s().expect("v_inf");
+
+        // The nominal is the designed hit, under both criteria.
+        let b_nom = mc.nominal_impact_parameter_m().expect("nominal |B|");
+        let p_nom = mc.nominal_perigee_m().expect("nominal perigee");
+        assert!(
+            b_nom < capture && p_nom < r_earth,
+            "the nominal must be a hit both ways: b {b_nom:.4e} vs capture {capture:.4e}, \
+             perigee {p_nom:.4e} vs R⊕ {r_earth:.4e}"
+        );
+
+        // A plan chosen to land in the band where the two bars actually DISAGREE —
+        // a 0.2 m/s nudge one period before impact. Measured: b ≈ 14 640 km,
+        // perigee ≈ 9 319 km, capture ≈ 11 311 km. So b > capture (a miss) while
+        // perigee < capture (the mixed bar's "hit"). This is not a contrived corner:
+        // it is a plan a player can dial in, and on it the old comparison printed
+        // SURFACE IMPACT over a pass that physics says clears Earth by 2 941 km.
+        mc.set_plan(mc.period_seconds(), -0.2).expect("plan solves");
+        let enc = mc
+            .plan
+            .as_ref()
+            .expect("plan")
+            .encounter
+            .expect("this nudge should leave a finite-perigee encounter");
+        let b = mc.deflected_impact_parameter_m().expect("deflected |B|");
+        let perigee = mc.deflected_perigee_m().expect("deflected perigee");
+
+        assert_eq!(
+            b > capture,
+            !enc.is_hit(),
+            "the frontend's comparison (b {b:.4e} > capture {capture:.4e}) disagrees with \
+             the core's own is_hit()"
+        );
+        assert_eq!(
+            perigee > r_earth,
+            !enc.is_hit(),
+            "the other coherent pair (perigee {perigee:.4e} > R⊕ {r_earth:.4e}) disagrees \
+             with is_hit() — the two-body equivalence does not survive the real field"
+        );
+
+        // b is the asymptotic miss and the perigee is the focused one, so b > perigee
+        // always; and the capture disc is larger than the solid body. Together those
+        // are why `perigee > capture` is a *third*, stricter bar rather than a typo
+        // that happens to work.
+        assert!(
+            b > perigee,
+            "b {b:.4e} must exceed the perigee {perigee:.4e} it focuses down to"
+        );
+        assert!(capture > r_earth, "the capture disc must exceed R⊕");
+
+        // How much stricter, measured rather than asserted from memory: the b that
+        // corresponds to a perigee of exactly `capture` (via b² = r_p² + 2μr_p/v_inf²).
+        // The honest bar is b > capture; the mixed bar is b > this.
+        let b_at_perigee_capture =
+            (capture * capture + 2.0 * enc.mu * capture / (v_inf * v_inf)).sqrt();
+        assert!(
+            b_at_perigee_capture > 1.3 * capture,
+            "expected `perigee > capture` to be substantially stricter than `b > capture` \
+             ({b_at_perigee_capture:.4e} vs {capture:.4e} m) — if these have converged, the \
+             focusing is gone and the whole encounter is wrong"
+        );
+
+        // And the equivalence read the other way: the b at a perigee of exactly R⊕ IS
+        // the capture radius. This is the identity that makes the two pairs one test.
+        let b_at_perigee_r_earth =
+            (r_earth * r_earth + 2.0 * enc.mu * r_earth / (v_inf * v_inf)).sqrt();
+        assert!(
+            (b_at_perigee_r_earth - capture).abs() / capture < 1e-9,
+            "b at perigee = R⊕ is {b_at_perigee_r_earth:.6e} m but the capture radius is \
+             {capture:.6e} m — these are the same number by definition"
+        );
+
+        // The bug, pinned on the very plan that exposes it. This nudge is a genuine
+        // miss — both coherent pairs say so, and `is_hit` agrees — yet the mixed bar
+        // `perigee > capture` calls it a hit. Asserting the *disagreement* rather
+        // than only the fix is what makes this a regression test: bring the old
+        // comparison back anywhere and this fails, naming a plan it lies about.
+        assert!(
+            !enc.is_hit(),
+            "this plan is supposed to be a miss; the band it was chosen for has moved"
+        );
+        assert!(
+            perigee <= capture,
+            "expected this plan to sit in the disagreement band (perigee {perigee:.4e} < \
+             capture {capture:.4e} < b {b:.4e}) — that band is the whole point of the \
+             test, and without it nothing here would notice the mixed bar coming back"
+        );
     }
 }

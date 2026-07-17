@@ -52,26 +52,40 @@ func _post_lines() -> Array[String]:
 			out.append("! " + l)
 
 	out.append("")
-	# 3C-2a: the mission layer is dormant. Say so plainly instead of reporting a
-	# green self-test for a subsystem that is switched off.
-	if Sim.mission_online:
-		out.append("B-PLANE TARGETING .......... ONLINE")
-		out.append("DEFLECTION SOLVER .......... ONLINE")
-		out.append("MISSION PLANNER ............ READY - KEY [M]")
-		out.append("THREAT DB .................. 1 OBJECT(S) FLAGGED")
-	else:
-		out.append("B-PLANE TARGETING .......... OFFLINE")
-		out.append("DEFLECTION SOLVER .......... OFFLINE")
-		out.append("MISSION PLANNER ............ OFFLINE")
-		out.append("THREAT DB .................. 0 OBJECT(S) - REBUILDING")
-		out.append("> MISSION LAYER IS BEING REBUILT ON THE VALIDATED f64 CORE")
+	# This is a snapshot: the POST is typed once at _ready, while the threat is
+	# still integrating on its worker thread (~10 s). So it reports the build as
+	# RUNNING rather than claiming either "online" or "offline" — both would be
+	# false at the moment this text is written.
+	match Sim.build_state:
+		Sim.Build.READY:
+			out.append("DEFLECTION SOLVER .......... ONLINE [RUST CORE]")
+			out.append("MISSION PLANNER ............ READY - KEY [M]")
+			out.append("THREAT DB .................. 1 OBJECT(S) FLAGGED")
+		Sim.Build.RUNNING:
+			out.append("DEFLECTION SOLVER .......... ONLINE [RUST CORE]")
+			out.append("THREAT TRAJECTORY .......... INTEGRATING REAL FIELD...")
+			out.append("MISSION PLANNER ............ ARMS ON SOLUTION - KEY [M]")
+		Sim.Build.FAILED:
+			out.append("DEFLECTION SOLVER .......... *** SOLUTION FAILED ***")
+			out.append("MISSION PLANNER ............ OFFLINE")
+			for l in Sim.build_error.split("\n"):
+				out.append("! " + l)
+		_:
+			out.append("DEFLECTION SOLVER .......... OFFLINE - NO EPHEMERIS")
+			out.append("MISSION PLANNER ............ OFFLINE")
+
+	# The b-plane view is a separate subsystem and separately dormant (3C-2c) —
+	# reporting it green because the solver is up is exactly the kind of blanket
+	# self-test this POST exists to not be.
+	out.append("B-PLANE TARGETING .......... OFFLINE - REBUILDING ON CORE")
 
 	out.append("")
-	if Sim.bodies_online:
-		out.append("ALL SYSTEMS NOMINAL" if Sim.mission_online
-			else "ORRERY ONLINE - NO MISSION LOADED")
-	else:
+	if not Sim.bodies_online:
 		out.append("*** DEGRADED - NO EPHEMERIS ***")
+	elif Sim.build_state == Sim.Build.FAILED:
+		out.append("*** DEGRADED - ORRERY ONLINE, NO THREAT SOLUTION ***")
+	else:
+		out.append("ALL SYSTEMS NOMINAL")
 	out.append("")
 	out.append("PRESS ANY KEY TO ENGAGE TACTICAL DISPLAY")
 	return out

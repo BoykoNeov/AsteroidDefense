@@ -81,32 +81,39 @@ func _draw() -> void:
 		_help_line(w, h, dim)
 		_bezel(w, h, faint)
 		return
-	_panel(Rect2(MARGIN, py, PANEL_W, 9.4 * lh + 14.0), "TRK 001 - TARGET", bright)
+	_panel(Rect2(MARGIN, py, PANEL_W, 7.4 * lh + 14.0), "TRK 001 - TARGET", bright)
 	var ty := py + lh + 8.0
-	var burned: bool = Sim.burned()
-	var el: Dictionary = Sim.ast_defl_el if burned else Sim.ast_el
+	var burned: bool = Sim.burned() and Sim.has_plan()
+	var active: bool = Sim.threat_active(Sim.t)
 	var rng_km: float = Sim.threat_range_km(Sim.t)
+	# SMA and PERIOD are the core's, measured off the integrated seed by vis-viva
+	# — not designer inputs echoed back. ECC and INC are gone rather than faked:
+	# the core derives no eccentricity or inclination, and the old panel's values
+	# were the placeholder's own constructor arguments. A number the physics never
+	# computed has no business on a panel labelled TARGET.
 	var lines := [
 		["DESIG", "2031-XK" + ("  [DEFLECTED]" if burned else "")],
 		["CLASS", "ATEN-TYPE / KINETIC-VIABLE"],
-		["SMA   a", "%.4f AU" % el.a],
-		["ECC   e", "%.4f" % el.e],
-		["INC   i", "%.2f DEG" % rad_to_deg(el.i)],
-		["PERIOD", "%.1f D" % (TAU / el.n)],
-		["RANGE", _fmt_km(rng_km)],
+		["SMA   a", "%.4f AU" % Sim.ast_el.a],
+		["PERIOD", "%.1f D" % Sim.threat_period_d()],
+		["RANGE", _fmt_km(rng_km) if active else "-- OUTSIDE TRACKED ARC"],
 	]
 	for ln in lines:
 		_text(Vector2(MARGIN + 12, ty), "%-8s %s" % [ln[0], ln[1]], mid)
 		ty += lh
-	if burned and Sim.deflect_ok:
+	if not active:
+		# The clock is off the threat's ~12-year arc. There is no object to assign
+		# an impact probability to, so the panel says where the arc is instead.
+		_text(Vector2(MARGIN + 12, ty), "TRACK ARC %s" % Sim.threat_arc_label(), mid)
+	elif burned and Sim.deflect_ok:
 		_text(Vector2(MARGIN + 12, ty), "P(IMPACT) 0.000", bright); ty += lh
-		_text(Vector2(MARGIN + 12, ty), "PROJ MISS %.2f LD" % Sim.miss_ld, bright)
+		_text(Vector2(MARGIN + 12, ty), "PROJ MISS " + Sim.miss_label(), bright)
 	elif burned:
 		if Sim.blink(1.4):
 			_text(Vector2(MARGIN + 12, ty), "P(IMPACT) 1.000 ", bright)
 			_text(Vector2(MARGIN + 12 + 17 * _fs * 0.6, ty), "<INSUFFICIENT>", bright)
 		ty += lh
-		_text(Vector2(MARGIN + 12, ty), "PROJ MISS %.2f LD" % Sim.miss_ld, mid)
+		_text(Vector2(MARGIN + 12, ty), "PROJ MISS " + Sim.miss_label(), mid)
 	else:
 		if Sim.blink(1.4):
 			_text(Vector2(MARGIN + 12, ty), "P(IMPACT) 1.000 ", bright)
@@ -116,6 +123,10 @@ func _draw() -> void:
 			else "IMPACT OCCURRED E+%d D" % int(-days_to), mid)
 
 	# ---- interceptor panel (right) ----
+	# The interceptor itself is dormant (no Lambert solver behind its arc), but the
+	# panel stays: it is where the plan is read back, and the plan is real. The
+	# phases below describe the *plan's* timeline, which the core solves against —
+	# not a spacecraft being flown.
 	var ph := 7.4 * lh + 14.0
 	var px := w - MARGIN - PANEL_W
 	_panel(Rect2(px, py, PANEL_W, ph), "ATLAS-1 - INTERCEPTOR", bright)
@@ -154,9 +165,8 @@ func _draw() -> void:
 				["STATUS", "EXPENDED - IMPACT GOOD"],
 				["RESULT", "DV %.1f M/S %s" % [Sim.dv_ms,
 					"RETROGRADE" if Sim.plan_retro else "PROGRADE"]],
-				["MISS", "%.2f LD PROJECTED" % Sim.miss_ld],
-				["ASSESS", "DEFLECTION SUCCESSFUL" if Sim.deflect_ok
-					else "INSUFFICIENT - IMPACT"],
+				["MISS", Sim.miss_label() + " PROJECTED"],
+				["ASSESS", Sim.verdict_label()],
 			]
 	for ln in ilines:
 		_text(Vector2(px + 12, iy), "%-8s %s" % [ln[0], ln[1]], mid)
@@ -169,7 +179,8 @@ func _draw() -> void:
 
 # ------------------------------------------------------------------ panels ---
 
-## What the left/right panels say while the mission layer is dormant (3C-2a).
+## What the left/right panels say before the threat exists — during the ~10 s
+## boot integration, or after a failed build.
 ##
 ## Deliberately states the situation instead of showing zeroed-out target and
 ## interceptor readouts: a panel reading "SMA 0.0000 AU / P(IMPACT) 0.000" looks
@@ -179,14 +190,38 @@ func _offline_panels(rect: Rect2, lh: float, bright: Color, mid: Color, dim: Col
 	_panel(rect, "TRK 001 - TARGET", bright)
 	var ty := rect.position.y + lh + 8.0
 	var x := rect.position.x + 12
-	var lines := [
-		"MISSION LAYER OFFLINE",
-		"",
-		"THREAT, PLANNER AND B-PLANE",
-		"ARE BEING REBUILT ON THE",
-		"VALIDATED f64 CORE.",
-		"",
-	]
+	# This panel is now mostly a *loading* state, not a permanent one: the threat
+	# is ~10 s of real integration away at boot. It must not read like a dead
+	# subsystem while the core is working, nor claim to be working after a failure.
+	var lines: Array[String] = []
+	match Sim.build_state:
+		Sim.Build.RUNNING:
+			lines = [
+				"ACQUIRING THREAT SOLUTION",
+				"",
+				"INTEGRATING 12 YR OF REAL",
+				"N-BODY MOTION THROUGH THE",
+				"DE440 FIELD. STAND BY...",
+				"",
+			]
+		Sim.Build.FAILED:
+			lines = [
+				"*** NO THREAT SOLUTION ***",
+				"",
+				"THE TRAJECTORY BUILD FAILED.",
+				"SEE THE CONSOLE FOR THE",
+				"REASON. NO THREAT IS DRAWN.",
+				"",
+			]
+		_:
+			lines = [
+				"MISSION LAYER OFFLINE",
+				"",
+				"NO EPHEMERIS, SO NO FIELD",
+				"TO INTEGRATE A THREAT",
+				"THROUGH.",
+				"",
+			]
 	# The field is a separate subsystem from the mission layer and fails
 	# separately. This panel used to state "SOLAR FIELD IS LIVE" unconditionally,
 	# which was flatly false on a machine with no kernel — the same lie as the
@@ -203,8 +238,10 @@ func _offline_panels(rect: Rect2, lh: float, bright: Color, mid: Color, dim: Col
 			or ln.begins_with("NO ") else dim)
 		ty += lh
 	if Sim.blink(1.4):
-		_text(Vector2(x, ty), "-- 3C-2b PENDING --" if Sim.bodies_online
-			else "-- DEGRADED --", bright)
+		var tag := "-- DEGRADED --"
+		if Sim.build_state == Sim.Build.RUNNING:
+			tag = "-- COMPUTING THREAT TRAJECTORY --"
+		_text(Vector2(x, ty), tag, bright)
 
 
 func _console_block(w: float, h: float, lh: float, mid: Color, bright: Color,

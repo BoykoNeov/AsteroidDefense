@@ -1,16 +1,20 @@
 extends SceneTree
-## Headless verification of the 3C-2a orrery: the real DE440 field behind Sim's
-## unchanged public API.
+## Headless verification of the orrery (3C-2a) and the real threat (3C-2b): the
+## DE440 field and the core's integrated trajectory behind Sim's unchanged API.
 ##   godot --headless --path godot --script res://tests/test_orrery.gd
 ##
-## This drives Sim exactly as the game does — _ready() resolves the kernels and
-## loads the field — and then asks the questions the display asks. It is the
-## closest thing to "run the game and look" that a machine can answer, and it
-## covers the failure this whole slice exists to prevent: an unresolved body
+## This drives Sim exactly as the game does — _ready() resolves the kernels, loads
+## the field and starts the scenario build; _poll_build drains it — and then asks
+## the questions the display asks. It is the closest thing to "run the game and
+## look" that a machine can answer.
+##
+## It covers the failure this whole slice exists to prevent: an unresolved lookup
 ## comes back as Vector3.ZERO, and ZERO is *the Sun's position* in this
-## heliocentric frame, so a broken lookup does not draw as missing — it draws as
-## a planet sitting on the Sun. Every assertion below that looks pedantic about
-## non-ZERO is guarding that one silent failure.
+## heliocentric frame, so a broken lookup does not draw as missing — it draws as a
+## body sitting on the Sun. Every assertion below that looks pedantic about
+## non-ZERO is guarding that one silent failure. 3C-2b adds a second, narrower
+## instance of it: the threat exists for ~12 years of a ~300-year scrubbable
+## clock, so the clock clamp does not cover it (see the span-gate block).
 
 var fails := 0
 
@@ -112,10 +116,115 @@ func _init() -> void:
 		"Earth's orbit line closes after one period (gap %.4f AU)"
 		% ((pts[0] - pts[pts.size() - 1]).length() / sim.AU))
 
-	# --- The mission layer is dormant, and honest about it ------------------
-	_check(not sim.mission_online, "mission layer is dormant (3C-2a)")
-	_check(sim.ast_el.is_empty() and sim.comet_el.is_empty(),
-		"no placeholder threat/comet is built while dormant")
+	# --- The threat builds off-thread and comes online ----------------------
+	# Driven exactly as the game drives it: _ready() started the build, _process
+	# polls it. ~10 s of real integration; the display stays live throughout, which
+	# is the whole reason it is threaded.
+	_check(sim.build_state == sim.Build.RUNNING, "_ready() started the scenario build")
+	_check(not sim.mission_online, "the threat is not online before the build lands")
+	_check(sim.ast_el.is_empty(), "no threat dict exists before the build lands")
+	var t0 := Time.get_ticks_msec()
+	var polls := 0
+	while sim.build_state == sim.Build.RUNNING:
+		sim._poll_build()
+		polls += 1
+		OS.delay_msec(20)
+	_check(sim.build_state == sim.Build.READY,
+		"the scenario built (%s)" % sim.build_error)
+	_check(polls > 1, "the build ran on a worker, not the caller (%d polls, %d ms)"
+		% [polls, Time.get_ticks_msec() - t0])
+	_check(sim.mission_online, "the threat is online once the build lands")
+
+	# The comet, interceptor and b-plane view stay dark: each is gated on the real
+	# source that feeds it, and none of those exists yet. One flag for all four
+	# would have lit three lies.
+	_check(not sim.comet_online and not sim.interceptor_online
+		and not sim.encounter_online,
+		"comet/interceptor/encounter stay dormant on their own gates")
+
+	# --- The threat is REAL: it arrives on Earth ----------------------------
+	# The core integrated it backward from an impact condition, so the arc must
+	# still end on the drawn Earth after a 12-year round trip through the
+	# perturbed field. This is the whole scenario in one assertion.
+	var ast_imp: Vector3 = sim.pos_ecl(sim.ast_el, sim.T_IMPACT)
+	var earth_imp: Vector3 = sim.pos_ecl(sim.earth_el, sim.T_IMPACT)
+	var gap_km: float = (ast_imp - earth_imp).length() * sim.AU_KM
+	_check(ast_imp != Vector3.ZERO and gap_km < sim.cap_km,
+		"the threat arrives on Earth at impact (gap %d km, inside the %d km capture disc)"
+		% [int(gap_km), int(sim.cap_km)])
+	_check(sim.cap_km > 6378.0,
+		"the capture disc is gravitationally focused, wider than Earth (%.0f km, %.2f R_E)"
+		% [sim.cap_km, sim.cap_km / sim.R_E])
+
+	# --- The threat's span gate: the ZERO-is-the-Sun trap -------------------
+	# The clock clamps to the KERNEL (~300 yr); the threat exists for ~12. Outside
+	# that arc every lookup fails, and a failed lookup is ZERO — which in this
+	# heliocentric frame is the SUN. So this gate is not cosmetic tidying: without
+	# it the asteroid renders sitting on the Sun for most of the scrub range.
+	_check(sim.threat_active(0.0) and sim.threat_active(sim.T_IMPACT),
+		"the threat exists across its own campaign")
+	_check(not sim.threat_active(sim.T_MAX) and not sim.threat_active(sim.T_MIN),
+		"the threat does NOT exist at the kernel's span edges (%d, %d)"
+		% [sim.year_at(sim.T_MIN), sim.year_at(sim.T_MAX)])
+	# Prove the trap is real rather than trusting the gate: ask past the arc.
+	_check(sim.mission.asteroid_position_ecl_au(sim.tdb(sim.T_MAX)) == Vector3.ZERO,
+		"a lookup past the arc really does return ZERO — the Sun's position here")
+	_check(sim.pos_ecl(sim.ast_el, sim.T_MAX) == Vector3.ZERO
+		and sim.threat_range_km(sim.T_MAX) < 0.0,
+		"Sim refuses to place or range the threat outside its arc")
+
+	# --- The nominal track is a real arc ------------------------------------
+	var trk: PackedVector3Array = sim.orbit_points(sim.ast_el, 128)
+	var trk_zeros := 0
+	for p in trk:
+		if p == Vector3.ZERO:
+			trk_zeros += 1
+	_check(trk.size() > 2 and trk_zeros == 0,
+		"the threat track is %d real points, %d collapsed to the Sun" % [trk.size(), trk_zeros])
+	_check(sim.orbit_points(sim.ast_defl_el, 128).is_empty(),
+		"the deflected track is EMPTY with no plan solved — not a zero-length one on the Sun")
+
+	# --- The planner: edits are instant, the solve is debounced -------------
+	_check(not sim.has_plan(), "no plan is solved at boot")
+	sim.set_plan(180.0, 30.0, true)
+	_check(sim.plan_solving, "an edit marks the verdict as pending")
+	_check(sim.miss_label() == "SOLVING..." and sim.verdict_label() == "SOLVING...",
+		"a pending verdict says so rather than reporting the previous plan's")
+	sim._tick_plan_debounce(sim.PLAN_DEBOUNCE_S * 0.5)
+	_check(sim.plan_solving and not sim.has_plan(),
+		"edits inside the debounce window coalesce rather than each solving")
+	var t1 := Time.get_ticks_msec()
+	sim._tick_plan_debounce(sim.PLAN_DEBOUNCE_S)
+	var solve_ms := Time.get_ticks_msec() - t1
+	_check(not sim.plan_solving and sim.has_plan(),
+		"the solve lands after the debounce (%d ms)" % solve_ms)
+	# Guards the core's nominal cache from the frontend side: without it this was
+	# ~11 s per keypress, which no debounce could have made usable.
+	_check(solve_ms < 5000, "the solve is interactive (%d ms, ~11 000 before the cache)"
+		% solve_ms)
+	_check(not sim.orbit_points(sim.ast_defl_el, 128).is_empty(),
+		"the deflected track exists once a plan is solved")
+
+	# --- The verdict, and the clean-miss trap inside it ---------------------
+	# `deflected_perigee_m` returns -1 for a CLEAN MISS — the best outcome — as
+	# well as for no-plan. A verdict of `perigee > capture` alone therefore reads
+	# the best possible deflection as a catastrophic failure. These two cases pin
+	# both ends of that.
+	sim.set_plan(600.0, 200.0, true)
+	sim._tick_plan_debounce(1.0)
+	_check(sim.deflect_ok,
+		"200 m/s at 600 d lead clears Earth (miss %s, verdict %s)"
+		% [sim.miss_label(), sim.verdict_label()])
+	_check(not sim.miss_label().begins_with("-")
+		and not sim.verdict_label().contains("IMPACT"),
+		"a successful deflection never reports a negative miss or an impact verdict "
+		+ "(miss %s / %s)" % [sim.miss_label(), sim.verdict_label()])
+
+	sim.set_plan(sim.LEAD_MIN, sim.DV_MIN, true)
+	sim._tick_plan_debounce(1.0)
+	_check(not sim.deflect_ok and not sim.plan_clean_miss,
+		"%.1f m/s at %d d lead does NOT save Earth (miss %s)"
+		% [sim.DV_MIN, int(sim.LEAD_MIN), sim.miss_label()])
 
 	sim.free()
 	print("----")

@@ -65,24 +65,25 @@ func _draw() -> void:
 	_t(Vector2(x, y), "-".repeat(56), faint)
 	y += lh
 
+	# Miss and verdict both come from Sim's formatters, never from `miss_ld`
+	# directly: a clean miss has no finite perigee to print (the core reports -1),
+	# and it is the SUCCESS case. Formatting it here would re-open that trap.
 	_t(Vector2(x, y), "PROJ MISS", dim)
-	_t(Vector2(xv, y), "%.2f LD  (%s KM)" %
-		[Sim.miss_ld, _group(int(Sim.miss_ld * Sim.LD_KM))], bright)
+	_t(Vector2(xv, y), Sim.miss_label(true), bright)
 	y += lh
 	_t(Vector2(x, y), "CAPTURE", dim)
 	_t(Vector2(xv, y), "%.3f LD RADIUS (%.1f RE)" %
 		[Sim.cap_km / Sim.LD_KM, Sim.cap_km / Sim.R_E], mid)
 	y += lh
 	_t(Vector2(x, y), "VERDICT", dim)
-	if Sim.deflect_ok:
-		_t(Vector2(xv, y), "MISS - EARTH CLEAR", bright)
-	elif Sim.blink(1.4):
-		_t(Vector2(xv, y), "SURFACE IMPACT - INSUFFICIENT", bright)
+	# Blinking is how this panel shouts IMPACT, so only a real failure blinks. A
+	# pending solve has nothing to shout about yet, and a clean miss is good news.
+	var steady: bool = Sim.deflect_ok or Sim.plan_solving or not Sim.has_plan()
+	if steady or Sim.blink(1.4):
+		_t(Vector2(xv, y), Sim.verdict_label(), bright)
 	y += lh
 	_t(Vector2(x, y), "REQ DV EST", dim)
-	var req := Sim.req_dv_1ld()
-	_t(Vector2(xv, y), (">999 M/S" if req > 999.0 else "%.1f M/S" % req)
-		+ " FOR 1.0 LD MISS", mid)
+	_t(Vector2(xv, y), Sim.req_dv_label() + " FOR 1.0 LD MISS", mid)
 	y += lh
 	_t(Vector2(x, y), "-".repeat(56), faint)
 	y += lh
@@ -112,12 +113,3 @@ func _t(pos: Vector2, s: String, col: Color) -> void:
 func _t_r(pos: Vector2, s: String, col: Color) -> void:
 	var sw := _font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, _fs).x
 	draw_string(_font, pos - Vector2(sw, 0), s, HORIZONTAL_ALIGNMENT_LEFT, -1, _fs, col)
-
-
-func _group(v: int) -> String:
-	var s := str(v)
-	var out := ""
-	while s.length() > 3:
-		out = "," + s.right(3) + out
-		s = s.left(s.length() - 3)
-	return s + out

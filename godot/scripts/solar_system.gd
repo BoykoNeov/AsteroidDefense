@@ -20,6 +20,7 @@ var comet_node: MeshInstance3D
 var comet_tail: GPUParticles3D
 var interceptor: MeshInstance3D
 var intercept_flash: MeshInstance3D
+var _nom_orbit_line: MeshInstance3D
 var _defl_orbit_line: MeshInstance3D
 var _intercept_path_line: MeshInstance3D
 
@@ -35,15 +36,26 @@ func _ready() -> void:
 	if Sim.bodies_online:
 		_build_planets()
 	_build_belt()
-	# The threat, comet and interceptor are dormant until 3C-2b rebuilds them on
-	# the real core (see the Sim module note). Their nodes are never created, so
-	# nothing half-drawn or stale can leak into the scene.
+	# The threat cannot be built here: the scenario is ~10 s of integration on a
+	# worker thread and does not exist yet at scene load. `mission_ready` fires when
+	# it lands. The comet and interceptor stay dormant until they come from the core
+	# (3C-2c); their nodes are never created, so nothing half-drawn can leak in.
+	Sim.mission_ready.connect(_on_mission_ready)
 	if Sim.mission_online:
-		_build_threat()
+		_on_mission_ready()                # already built (rebuilt scene, autoload up)
+
+
+## The threat landed: build its nodes and start tracking plan changes.
+func _on_mission_ready() -> void:
+	_build_threat()
+	if Sim.comet_online:
 		_build_comet()
+	if Sim.interceptor_online:
 		_build_interceptor()
-		Sim.plan_changed.connect(_rebuild_plan_visuals)
-		_rebuild_plan_visuals()
+	# The deflected orbit is re-sampled from the core on every solve, so it must
+	# follow `plan_changed` — the line drawn at build time is only the first plan.
+	Sim.plan_changed.connect(_rebuild_plan_visuals)
+	_rebuild_plan_visuals()
 
 
 func _process(_delta: float) -> void:
@@ -59,26 +71,39 @@ func _process(_delta: float) -> void:
 	if not Sim.mission_online:
 		return
 
-	ast_nominal.position = Sim.pos3d(Sim.ast_el, t)
-	ast_nominal.rotate_y(0.01)
-	ast_nominal.rotate_x(0.004)
+	# The threat exists only over its propagated span (~12 yr of a ~300 yr
+	# scrubbable clock). Outside it a lookup returns ZERO, which here is the SUN —
+	# so this is a hide, not a cosmetic fade: an ungated marker parks on the Sun.
+	var active: bool = Sim.threat_active(t)
+	ast_nominal.visible = active
+	_nom_orbit_line.visible = active
+	if active:
+		ast_nominal.position = Sim.pos3d(Sim.ast_el, t)
+		ast_nominal.rotate_y(0.01)
+		ast_nominal.rotate_x(0.004)
 
-	var burned: bool = Sim.burned()
-	ast_deflected.visible = burned
+	# The deflected body needs a *solved* plan, not just a committed one: its track
+	# is the core's post-impulse arc and does not exist until the solve lands.
+	var burned: bool = Sim.burned() and Sim.has_plan()
+	ast_deflected.visible = burned and active
 	# Deflected orbit: bright once real, dim dashed preview while planning.
-	var preview: bool = not burned and (Sim.planner_open or Sim.committed)
+	var preview: bool = not burned and Sim.has_plan() and (Sim.planner_open or Sim.committed)
 	_defl_orbit_line.visible = burned or preview
 	_defl_orbit_line.set_instance_shader_parameter("energy", 1.2 if burned else 0.45)
 	# Nominal track fades to a dim ghost once the real object is deflected.
 	ast_nominal.set_instance_shader_parameter("energy", 0.5 if burned else 2.2)
-	if burned:
+	if ast_deflected.visible:
 		ast_deflected.position = Sim.pos3d(Sim.ast_defl_el, t)
 		ast_deflected.rotate_y(0.01)
 		ast_deflected.rotate_x(0.004)
 
-	comet_node.position = Sim.pos3d(Sim.comet_el, t)
-	comet_node.rotate_y(0.006)
-	_update_comet_tail()
+	if Sim.comet_online:
+		comet_node.position = Sim.pos3d(Sim.comet_el, t)
+		comet_node.rotate_y(0.006)
+		_update_comet_tail()
+
+	if not Sim.interceptor_online:
+		return
 
 	var phase: String = Sim.interceptor_phase(t)
 	interceptor.visible = phase == "CRUISE"
@@ -308,13 +333,18 @@ func _build_belt() -> void:
 	add_child(_belt)
 
 
+## Build the threat's nodes from the core's integrated trajectory. Called on
+## `mission_ready`, never at scene load — before that there is no trajectory.
 func _build_threat() -> void:
-	# Nominal (impact) orbit: bright solid track.
-	var orbit := _line_mesh(Sim.orbit_points(Sim.ast_el), Mesh.PRIMITIVE_LINE_STRIP)
-	orbit.set_instance_shader_parameter("line_color", Color(1, 1, 1))
-	orbit.set_instance_shader_parameter("energy", 0.9)
-	orbit.name = "ThreatOrbit"
-	add_child(orbit)
+	# Nominal (impact) orbit: bright solid track. Sampled once from the core; this
+	# is the real integrated arc through the perturbed field, and it is an open
+	# curve ending on Earth rather than a closed ellipse.
+	_nom_orbit_line = _line_mesh(
+		Sim.orbit_points(Sim.ast_el, 512), Mesh.PRIMITIVE_LINE_STRIP)
+	_nom_orbit_line.set_instance_shader_parameter("line_color", Color(1, 1, 1))
+	_nom_orbit_line.set_instance_shader_parameter("energy", 0.9)
+	_nom_orbit_line.name = "ThreatOrbit"
+	add_child(_nom_orbit_line)
 
 	# Deflected orbit: dashed, appears after the burn.
 	_defl_orbit_line = _line_mesh(
@@ -420,8 +450,12 @@ func _build_interceptor() -> void:
 ## Plan-dependent geometry: deflected orbit, transfer arc, flash position.
 ## Rebuilt whenever the mission plan changes (Sim.plan_changed).
 func _rebuild_plan_visuals() -> void:
+	# Re-sampled from the core on every solve: the deflected arc is a different
+	# integration per plan, not a redraw of the same one.
 	_defl_orbit_line.mesh = _line_im(
 		_dash(Sim.orbit_points(Sim.ast_defl_el, 384)), Mesh.PRIMITIVE_LINES)
+	if not Sim.interceptor_online:
+		return
 	_intercept_path_line.mesh = _line_im(
 		_dash(Sim.interceptor_path(), 2, 2), Mesh.PRIMITIVE_LINES)
 	intercept_flash.position = Sim.pos3d(Sim.ast_el, Sim.T_INTERCEPT)
@@ -442,6 +476,11 @@ func _update_comet_tail() -> void:
 
 func _line_im(pts: PackedVector3Array, primitive: int) -> ImmediateMesh:
 	var im := ImmediateMesh.new()
+	# An empty point list is a legitimate state, not a mistake: the deflected track
+	# does not exist until the core has solved a plan. Godot errors on a surface
+	# closed with no vertices, so empty in means an empty mesh out.
+	if pts.is_empty():
+		return im
 	im.surface_begin(primitive)
 	for p in pts:
 		im.surface_add_vertex(p)

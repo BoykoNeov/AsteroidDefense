@@ -72,12 +72,15 @@ func _draw() -> void:
 		if el.a > 2.0:
 			continue                          # Jupiter off-plot
 		_orbit_trace(el, center, s, dim if el.name == "EARTH" else faint)
+	# The tracks are span-wide, so they draw whenever the threat exists at all —
+	# unlike the marker below, which depends on where the clock is.
 	if Sim.mission_online:
 		_orbit_trace(Sim.ast_el, center, s, mid)
-		if Sim.burned():
-			_orbit_trace(Sim.ast_defl_el, center, s, dim, true)
-		elif Sim.planner_open or Sim.committed:
-			_orbit_trace(Sim.ast_defl_el, center, s, faint, true)
+		if Sim.has_plan():
+			if Sim.burned():
+				_orbit_trace(Sim.ast_defl_el, center, s, dim, true)
+			elif Sim.planner_open or Sim.committed:
+				_orbit_trace(Sim.ast_defl_el, center, s, faint, true)
 
 	# Sun.
 	draw_circle(center, 4.0, bright)
@@ -94,9 +97,8 @@ func _draw() -> void:
 			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 1,
 			mid if el.name == "EARTH" else dim)
 
-	# Threat, interceptor and the predicted-impact marker are dormant until 3C-2b
-	# rebuilds them on the real core (see the Sim module note).
-	if Sim.mission_online:
+	# Only where the threat actually is: outside its span a lookup is the Sun.
+	if Sim.threat_active(t):
 		_draw_threat(center, s, t, bright, mid, dim, faint)
 
 	# Plot header.
@@ -109,7 +111,7 @@ func _draw() -> void:
 ## _draw so the dormant case is one guarded call rather than five scattered ones.
 func _draw_threat(center: Vector2, s: float, t: float, bright: Color,
 		mid: Color, dim: Color, faint: Color) -> void:
-	var burned: bool = Sim.burned()
+	var burned: bool = Sim.burned() and Sim.has_plan()
 	var p_e := _to_screen(Sim.pos_ecl(Sim.earth_el, t), center, s)
 	var el_act: Dictionary = Sim.ast_defl_el if burned else Sim.ast_el
 	var p_a := _to_screen(Sim.pos_ecl(el_act, t), center, s)
@@ -130,7 +132,7 @@ func _draw_threat(center: Vector2, s: float, t: float, bright: Color,
 		draw_string(_font, p_n + Vector2(9, 12), "NOMINAL",
 			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, dim)
 
-	if Sim.interceptor_phase(t) == "CRUISE":
+	if Sim.interceptor_online and Sim.interceptor_phase(t) == "CRUISE":
 		var p_i := _map_pos(Sim.interceptor_pos(t), center, s)
 		draw_line(p_i + Vector2(-6, 0), p_i + Vector2(6, 0), bright, 1.2)
 		draw_line(p_i + Vector2(0, -6), p_i + Vector2(0, 6), bright, 1.2)

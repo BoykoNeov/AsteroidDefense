@@ -17,30 +17,54 @@ extends Node
 ## carries classical elements and is propagated analytically here. That dispatch
 ## is the whole seam — see `pos_ecl`.
 ##
-## **The mission layer is dormant** (`mission_online == false`) as of 3C-2a. The
-## threat, comet, planner, interceptor and b-plane view are switched off rather
-## than left running on placeholder Kepler, because they cannot come across
-## cleanly yet: their encounter math (`pos_ecl64` -> `geo_km` -> `close_approach`)
-## is f64 by design, and real body positions only cross the FFI as f32 Vector3s
-## (~18 km of slack at 1 AU — precisely what those helpers exist to avoid, see
-## HANDOFF §7). Feeding real Earth into them would quietly drop an f32 floor into
-## the b-plane; keeping a private Kepler Earth for them instead would mean two
-## Earths, with the threat riding the one nobody can see. Neither is honest. In
-## 3C-2b the threat comes from `asteroid_position_ecl_au` and its b-plane from the
-## core, so all that math stays inside Rust and only small residuals cross — and
-## it lands on the real timeline this clock already runs.
+## **The threat is real** as of 3C-2b. `ast_el` is no longer a Kepler ellipse
+## fitted to an impact point: it is the core's integrated trajectory through the
+## real perturbed field, sampled through `asteroid_position_ecl_au`. The planner
+## no longer models its own impulse — `set_plan` hands lead time and Δv to the
+## core, which re-propagates and returns a b-plane perigee. All the f64 encounter
+## math now lives in Rust, where it always belonged; only positions cross the FFI
+## as f32, and only after the core has subtracted (HANDOFF §7).
+##
+## **The mission layer is not one switch.** Each piece is gated on the real source
+## that feeds it, and stays dark until that source exists — see the flags below.
+## The threat is online; the comet, the interceptor and the b-plane view are not,
+## and the difference is not cosmetic. A single `mission_online` flag would light
+## all four at once, and three of them would be lying.
 
 signal event_logged(line: String)
+
+## The real threat is built and drawable. Consumers that draw it build their nodes
+## here rather than at `_ready`: the scenario takes ~10 s on a worker thread, so at
+## scene load there is genuinely nothing to draw yet.
+signal mission_ready
 
 const AU := 10.0                       # Godot units per AU
 const AU_KM := 1.495978707e8
 const LD_KM := 384400.0                # lunar distance, km
 const DAY_S := 86400.0
 
-## Whether the deflection/threat layer is live. False until 3C-2b rebuilds it on
-## the real core (see the module note). Consumers check this before drawing or
-## reading anything threat-shaped; nothing fakes a number while it is false.
+## Whether the threat and planner are live: true once the core's scenario has
+## finished building and installed (see `_poll_build`). Consumers check this
+## before drawing or reading anything threat-shaped; nothing fakes a number while
+## it is false.
 var mission_online := false
+
+## The comet is dormant until it comes from the core's orrery catalog (3C-2c).
+## It was a Kepler ellipse; drawing it beside a real integrated threat would put
+## two different physics on one screen with nothing marking which is which.
+var comet_online := false
+
+## The interceptor is dormant. Its cruise path is a cosmetic bezier with no
+## Lambert solver behind it — the one piece of this display that was never
+## physics. It stays off until it is, rather than drawing a spacecraft on a
+## trajectory no solver produced.
+var interceptor_online := false
+
+## The b-plane view is dormant until `EncounterFrame` crosses the binding (3C-2c).
+## It is the reason these flags are separate: `encounter.gd` still runs the old
+## f64 Kepler helpers, so lighting it with the threat would open a b-plane whose
+## geometry disagrees with the trajectory drawn behind it.
+var encounter_online := false
 
 ## The real DE440 field, via the gdext binding. Null when the extension or the
 ## kernels are unavailable — `bodies_online` is the flag to check, not this.
@@ -78,6 +102,24 @@ const WARP_STEPS: Array[float] = [0.1, 0.5, 2.0, 5.0, 15.0, 45.0, 120.0, 365.0, 
 var T_MIN := -3650.0
 var T_MAX := 40000.0
 
+## The window the threat exists over, days from EPOCH0_TDB — read from the core
+## (`threat_span_tdb`), never reconstructed here.
+##
+## This is a *second* coverage gate, and the clock clamp does not do its job. The
+## clock is clamped to the mounted kernel (~300 years); the threat is propagated
+## over ~12. Outside those 12 years `asteroid_position_ecl_au` fails, and a failed
+## lookup returns ZERO — which in this heliocentric frame is **the Sun**. So an
+## ungated threat does not disappear when you scrub off its arc: it sits on the
+## Sun for ~96% of the timeline. Consumers ask `threat_active()`, never the clock.
+var T_THREAT_MIN := 0.0
+var T_THREAT_MAX := 0.0
+
+## Scenario build state. The build is ~10 s of real integration on a worker
+## thread; the display keeps running (and the planets keep moving) throughout.
+enum Build { IDLE, RUNNING, READY, FAILED }
+var build_state := Build.IDLE
+var build_error := ""
+
 var mono_font: SystemFont
 
 # Bodies: dictionaries with keys
@@ -94,8 +136,14 @@ const LEAD_MAX := 900.0
 const DV_MIN := 0.1
 const DV_MAX := 300.0
 const PAD_D := 2.0                     # minimum days between "now" and launch
-const R_E := 6371.0                    # km
-const V_ESC := 11.186                  # km/s, Earth surface escape speed
+## Earth's equatorial radius, km — the display divisor for "capture = N R_E".
+##
+## Equatorial (6378), not mean (6371): the core computes the capture radius
+## against `EARTH_EQUATORIAL_RADIUS_M`, so normalising by anything else would
+## print a ratio the core's own tests disagree with. A 0.1% difference nobody can
+## see on screen, but there is no reason for the display to use a different Earth
+## than the physics.
+const R_E := 6378.137
 
 var plan_lead_d := 180.0               # intercept lead before impact epoch, days
 var plan_dv_ms := 30.0                 # impulse magnitude, m/s
@@ -103,10 +151,28 @@ var plan_retro := true                 # true = retrograde (against velocity)
 var committed := false                 # launch scheduled
 var planner_open := false              # planner panel showing (preview tracks)
 
-var miss_ld := 0.0                     # projected post-burn close approach, LD
+var miss_ld := 0.0                     # projected post-burn perigee, LD (see miss_label)
 var dv_ms := 0.0                       # imparted delta-v, m/s (mirrors plan)
-var cap_km := 0.0                      # gravitational capture radius, km
-var deflect_ok := false                # projected miss clears the capture circle
+var cap_km := 0.0                      # gravitational capture radius, km (from the core)
+var deflect_ok := false                # projected perigee clears the capture disc
+
+## A clean miss: the deflected pass left the core's scan gate entirely. This is
+## the BEST outcome, and it has no finite perigee — the core reports -1. Never
+## read `miss_ld` without checking this first; see `miss_label`.
+var plan_clean_miss := false
+
+## A solve is pending or running, so `miss_ld`/`deflect_ok` describe the PREVIOUS
+## plan, not the one on screen. Readouts must say so rather than assert a stale
+## verdict as current.
+var plan_solving := false
+
+## Debounce for the core solve. Each solve re-propagates the post-impulse arc
+## (~0.9 s, down from ~11 s before the core's nominal cache) — fast enough to feel
+## live, far too slow to run per keypress while an operator holds an arrow key.
+## So edits land instantly and the solve is coalesced to the end of the burst.
+const PLAN_DEBOUNCE_S := 0.35
+var _plan_dirty := false
+var _plan_timer := 0.0
 
 signal plan_changed
 
@@ -121,6 +187,7 @@ func _ready() -> void:
 	_load_field()
 	_build_planets()
 	_build_events()
+	_begin_build()
 
 
 ## Bring up the real DE440 field: find the kernels, load them, and adopt the
@@ -167,6 +234,11 @@ func tdb(t_days: float = INF) -> float:
 
 
 func _process(delta: float) -> void:
+	# Both of these run while paused: a paused clock does not mean a paused build,
+	# and an operator who pauses mid-edit still wants their verdict solved.
+	_poll_build()
+	_tick_plan_debounce(delta)
+
 	if paused:
 		return
 	var prev := t
@@ -252,48 +324,98 @@ func _build_planets() -> void:
 			earth_el = body
 
 
-# --- DORMANT until 3C-2b -----------------------------------------------------
-# Nothing below is called while `mission_online` is false: _ready() no longer
-# builds the threat, the comet or a plan, so `ast_el` / `comet_el` /
-# `ast_defl_el` stay empty and every consumer gates on `mission_online`.
-#
-# Kept rather than deleted because it is the working reference for what 3C-2b has
-# to reproduce against the real core (the threat is *constructed from the impact
-# condition* so the tracks genuinely converge — that idea survives; only its
-# source changes to asteroid_position_ecl_au + a core-computed b-plane).
-#
-# Why it cannot simply be pointed at real Earth today: the elements below derive
-# from `pos_ecl(earth_el, T_IMPACT)`, so against real Earth the threat *would*
-# still converge on the drawn planet. The blocker is downstream — `close_approach`
-# (via pos_ecl64/geo_km) is deliberately f64, while real positions cross the FFI
-# only as f32 Vector3 (~18 km of slack at 1 AU). Wiring real Earth into that chain
-# would put an f32 floor under the b-plane and under the capture radius computed
-# right here — exactly the error those helpers exist to exclude (HANDOFF §7).
+# ------------------------------------------------------------ the threat ---
 
-func _build_threat() -> void:
-	# Designer impactor 2031-XK (matches the Rust-core scenario family:
-	# a = 0.855 AU, interior orbit hitting Earth at aphelion). Elements are
-	# CONSTRUCTED from the impact condition so the tracks genuinely converge:
-	# ascending node at the impact point, perihelion opposite it (w = 180 deg),
-	# aphelion distance = Earth's heliocentric range at T_IMPACT.
-	var p_earth := pos_ecl(earth_el, T_IMPACT)      # AU, ecliptic
-	var r_imp := p_earth.length()
-	var theta := atan2(p_earth.y, p_earth.x)
+## Start the scenario build on a worker thread.
+##
+## This is ~10 s of real integration through the perturbed field. It is threaded
+## because the alternative is 10 s of frozen display — and since 3C-2a that
+## display is a *working* one, drawing real planets on a real clock. Freezing it
+## to build the threat would break the thing that already works to add the thing
+## that doesn't yet.
+func _begin_build() -> void:
+	if not bodies_online:
+		return
+	if not mission.begin_build_scenario():
+		build_state = Build.FAILED
+		build_error = mission.last_error()
+		return
+	build_state = Build.RUNNING
 
-	var a := 0.855
-	var e := r_imp / a - 1.0
-	var el := _elements(a, e, deg_to_rad(3.4), theta, PI, 0.0)
-	# Mean anomaly must be PI (aphelion) at T_IMPACT.
-	el.m0 = wrapf(PI - el.n * T_IMPACT, -PI, PI)
-	el.name = "2031-XK"
-	el.vis_r = 0.030
-	el.kind = "asteroid"
-	ast_el = el
 
-	# Gravitational capture radius from the nominal encounter speed: inside
-	# this b-plane circle, focusing bends the track onto the surface.
-	var ca := close_approach(ast_el)
-	cap_km = R_E * sqrt(1.0 + pow(V_ESC / ca.v_kms.length(), 2.0))
+## Drain the build. `poll_build()` is true while the worker is still running; it
+## installs the scenario into the core on the frame it lands.
+func _poll_build() -> void:
+	if build_state != Build.RUNNING:
+		return
+	if mission.poll_build():
+		return
+	if not mission.is_ready():
+		build_state = Build.FAILED
+		build_error = mission.last_error()
+		event_logged.emit(_stamp(t) + "  THREAT SOLUTION FAILED - " + build_error)
+		return
+	build_state = Build.READY
+	_install_threat()
+
+
+## Adopt the built scenario: the threat becomes drawable and the planner opens.
+##
+## `ast_el` / `ast_defl_el` stay Dictionaries with the same shape every consumer
+## already reads — only `source` changes, and `pos_ecl` / `orbit_points` dispatch
+## on it. Nothing downstream learns that the ellipse became an integration.
+func _install_threat() -> void:
+	ast_el = {
+		"name": "2031-XK", "source": "threat", "kind": "asteroid",
+		"a": mission.semi_major_axis_m() / (AU_KM * 1000.0), "vis_r": 0.030,
+	}
+	ast_defl_el = {
+		"name": "2031-XK DEFL", "source": "threat_defl", "kind": "asteroid",
+		"a": ast_el.a, "vis_r": ast_el.vis_r,
+	}
+
+	# The window the threat exists over — the ZERO-is-the-Sun gate (see
+	# T_THREAT_MIN). From the core, so it cannot drift from what a lookup answers.
+	var s: PackedFloat64Array = mission.threat_span_tdb()
+	if s.size() == 2:
+		T_THREAT_MIN = (s[0] - EPOCH0_TDB) / DAY_S
+		T_THREAT_MAX = (s[1] - EPOCH0_TDB) / DAY_S
+
+	# The capture radius: the bar the verdict is measured against, and the real
+	# one — Earth's focusing widens it to ~1.77 R_E at this encounter speed, so a
+	# "miss" inside it is a hit that Earth reels in.
+	cap_km = mission.capture_radius_m() / 1000.0
+
+	mission_online = true
+	_build_events()
+	mission_ready.emit()
+	event_logged.emit(_stamp(t) + "  THREAT SOLUTION ACQUIRED - 2031-XK TRACKING")
+
+
+## Whether the threat exists at a mission time. False outside the propagated span
+## — where a lookup would return ZERO and draw the asteroid on the Sun. Every
+## consumer that draws the threat asks this first.
+func threat_active(t_days: float = INF) -> bool:
+	if not mission_online:
+		return false
+	var d := t if is_inf(t_days) else t_days
+	return d >= T_THREAT_MIN and d <= T_THREAT_MAX
+
+
+## The threat's tracked arc as dates, for a readout that has to explain why there
+## is nothing to show at the current clock.
+func threat_arc_label() -> String:
+	if not mission_online:
+		return "--"
+	return "%s .. %s" % [date_string(T_THREAT_MIN), date_string(T_THREAT_MAX)]
+
+
+## The threat's heliocentric period, days. The core's figure (vis-viva on the
+## integrated seed), not a mean motion this layer keeps its own copy of.
+func threat_period_d() -> float:
+	if not mission_online:
+		return 0.0
+	return mission.period_seconds() / DAY_S
 
 
 # Moon: display-only geocentric circle. The true lunar distance (0.00257 AU
@@ -338,10 +460,10 @@ func _elements(a: float, e: float, i: float, om: float, w: float, m0: float) -> 
 ## Default timeline: no mission on file. Impact happens unless a plan is
 ## committed (which swaps in the mission timeline via _rebuild_events).
 ##
-## While the mission layer is dormant the threat events are NOT scheduled: a
-## console announcing "TRACKING 2031-XK - P(IMPACT)=1.000" over a display with no
-## threat on it is the loudest lie on the screen, and the event log is the one
-## surface a player reads as ground truth.
+## The threat events are scheduled only once the threat is real. The event log is
+## the one surface a player reads as ground truth, so a console announcing
+## "TRACKING 2031-XK - P(IMPACT)=1.000" over a display with no threat on it would
+## be the loudest lie on the screen.
 func _build_events() -> void:
 	_events.clear()
 	var raw := []
@@ -356,7 +478,7 @@ func _build_events() -> void:
 		raw = [
 			[1.0, "DE440 EPHEMERIS MOUNTED - %d - %d" % [year_at(T_MIN), year_at(T_MAX)]],
 			[2.0, "SOLAR FIELD LIVE - %d BODIES - DRAG TIMELINE TO SCRUB" % planets.size()],
-			[3.0, "THREAT DB EMPTY - MISSION LAYER REBUILDING ON f64 CORE"],
+			[3.0, "INTEGRATING THREAT TRAJECTORY - REAL FIELD, STAND BY"],
 		]
 	else:
 		raw = [[1.0, "NO EPHEMERIS KERNEL - SOLAR FIELD OFFLINE"]]
@@ -365,9 +487,11 @@ func _build_events() -> void:
 
 
 ## Committed-mission timeline; outcome events follow the projected verdict.
+## The miss goes through `miss_label` like every other readout — a clean miss has
+## no number to print here either.
 func _rebuild_events() -> void:
 	_events.clear()
-	var ml := "%.2f" % miss_ld
+	var ml := miss_label()
 	var raw := [
 		[1.0, "TRACKING 2031-XK - EPHEMERIS UPDATED, P(IMPACT)=1.000"],
 		[T_LAUNCH - 14.0, "ATLAS-1 ON PAD - LAUNCH WINDOW OPEN"],
@@ -377,22 +501,18 @@ func _rebuild_events() -> void:
 			[plan_dv_ms, "RETROGRADE" if plan_retro else "PROGRADE"]],
 	]
 	if deflect_ok:
-		raw.append([T_INTERCEPT + 20.0, "POST-BURN SOLUTION: MISS " + ml + " LD - THREAT RETIRED"])
+		raw.append([T_INTERCEPT + 20.0, "POST-BURN SOLUTION: MISS " + ml + " - THREAT RETIRED"])
 		raw.append([T_IMPACT, "NOMINAL IMPACT EPOCH PASSED - EARTH SAFE"])
 	else:
-		raw.append([T_INTERCEPT + 20.0, "POST-BURN SOLUTION: MISS " + ml + " LD - INSUFFICIENT"])
+		raw.append([T_INTERCEPT + 20.0, "POST-BURN SOLUTION: MISS " + ml + " - INSUFFICIENT"])
 		raw.append([T_IMPACT, "SURFACE IMPACT - DEFLECTION FAILED"])
 	for r in raw:
 		_events.append({"t": r[0], "msg": r[1], "fired": r[0] <= t})
 
 
 # --------------------------------------------------------------- mission plan ---
-# The planner edits (lead, dv, direction); the deflected orbit is rebuilt
-# from the actual impulse-perturbed Kepler state, so the projected miss is
-# emergent — this is the placeholder stand-in for core's DeflectionScenario.
-
-const MU := pow(TAU / 365.25, 2.0)     # AU^3/day^2, consistent with n above
-const MS_TO_AUD := 86.4 / AU_KM        # 1 m/s in AU/day
+# The planner edits (lead, dv, direction); the core does the physics. This layer
+# marshals a plan in and a verdict out, and owns no orbital mechanics at all.
 
 
 func cruise_d(lead_d: float = -1.0) -> float:
@@ -418,10 +538,13 @@ func lead_cap() -> float:
 	return clampf(cap, 0.0, LEAD_MAX)
 
 
-## Apply a mission plan. The impulse is added to the heliocentric velocity
-## at the intercept epoch (f64 throughout) and the deflected element set is
-## recovered from the perturbed state, so divergence and miss distance are
-## genuine orbital mechanics, not a scripted offset.
+## Apply a mission plan. The edit lands now; the physics is debounced.
+##
+## The core owns the deflection: `_solve_plan` hands it a lead time and a signed
+## along-track impulse, and it re-propagates the post-impulse arc through the real
+## perturbed field and reduces the encounter to a b-plane perigee. This function
+## deliberately computes no orbital mechanics — the chain it used to run
+## (elements_from_rv -> close_approach) is gone, not ported.
 func set_plan(lead_d: float, dv: float, retro: bool) -> void:
 	plan_lead_d = clampf(lead_d, LEAD_MIN, maxf(lead_cap(), LEAD_MIN))
 	plan_dv_ms = clampf(dv, DV_MIN, DV_MAX)
@@ -430,23 +553,110 @@ func set_plan(lead_d: float, dv: float, retro: bool) -> void:
 	T_LAUNCH = T_INTERCEPT - cruise_d()
 	dv_ms = plan_dv_ms
 
-	var r := pos_ecl64(ast_el, T_INTERCEPT)
-	var v := vel_ecl64(ast_el, T_INTERCEPT)
-	var vlen := sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
-	var dv_aud := plan_dv_ms * MS_TO_AUD * (-1.0 if plan_retro else 1.0)
-	for k in 3:
-		v[k] += v[k] / vlen * dv_aud
-	var el := elements_from_rv(r, v, T_INTERCEPT)
-	el.name = "2031-XK DEFL"
-	el.vis_r = ast_el.vis_r
-	el.kind = "asteroid"
-	ast_defl_el = el
+	# The numbers under the operator's fingers move immediately; the verdict
+	# follows the solve. `plan_solving` is what stops the panel presenting the
+	# previous plan's verdict as this one's during the gap.
+	_plan_dirty = true
+	_plan_timer = PLAN_DEBOUNCE_S
+	plan_solving = true
+	plan_changed.emit()
 
-	miss_ld = close_approach(ast_defl_el).r_km / LD_KM
-	deflect_ok = miss_ld * LD_KM > cap_km
+
+## Coalesce a burst of plan edits into one solve. An operator holding an arrow key
+## emits an edit per frame; each solve is ~0.9 s of integration, so solving per
+## edit would queue minutes of work to answer a question already superseded.
+func _tick_plan_debounce(delta: float) -> void:
+	if not _plan_dirty:
+		return
+	_plan_timer -= delta
+	if _plan_timer <= 0.0:
+		_solve_plan()
+
+
+## Hand the plan to the core and read the verdict back. Blocks for ~0.9 s — this
+## is the hitch the debounce exists to ration.
+func _solve_plan() -> void:
+	_plan_dirty = false
+	plan_solving = false
+	if not mission_online:
+		return
+
+	# Retrograde is a NEGATIVE along-track impulse. Not a convention chosen here:
+	# the core applies `dv * along_track_unit(state)`, and that unit vector is
+	# prograde by construction, so the sign is the direction.
+	var dv_signed := plan_dv_ms * (-1.0 if plan_retro else 1.0)
+	if not mission.set_plan(plan_lead_d * DAY_S, dv_signed):
+		plan_clean_miss = false
+		miss_ld = 0.0
+		deflect_ok = false
+		event_logged.emit(_stamp(t) + "  PLAN SOLVE FAILED - " + str(mission.last_error()))
+		plan_changed.emit()
+		return
+
+	plan_clean_miss = mission.is_clean_miss()
+	var perigee_km: float = mission.deflected_perigee_m() / 1000.0
+	miss_ld = perigee_km / LD_KM
+
+	# THE verdict, and the one place it is decided.
+	#
+	# A clean miss reports perigee -1: the *success* case returns the same
+	# sentinel as "no plan". Testing `perigee > cap_km` alone would therefore read
+	# the best possible outcome as a catastrophic failure — a deflection that
+	# threw the rock clean out of the encounter would display as SURFACE IMPACT
+	# with a negative miss distance. The clean-miss check must come first.
+	deflect_ok = plan_clean_miss or perigee_km > cap_km
 	if committed:
 		_rebuild_events()
 	plan_changed.emit()
+
+
+## Whether the core holds a solved plan. Not the same as "the operator opened the
+## planner": the deflected track does not exist until the core has propagated it,
+## and sampling it before then is what draws a body on the Sun.
+func has_plan() -> bool:
+	return mission_online and mission.has_plan()
+
+
+## The projected miss, formatted — the single place a perigee becomes text.
+## `with_km` adds the grouped kilometre figure for the planner's wide column.
+##
+## Three panels print this. A clean miss carries no finite perigee (the core
+## reports -1), so it must never reach a "%.2f LD": centralising the formatting is
+## what stops one of the three sites quietly printing "-0.01 LD" as a real miss.
+func miss_label(with_km: bool = false) -> String:
+	if plan_solving:
+		return "SOLVING..."
+	if not has_plan():
+		return "NO SOLUTION"
+	if plan_clean_miss:
+		return ">> OFF-SCALE (LEFT THE ENCOUNTER)"
+	var s := "%.2f LD" % miss_ld
+	if with_km:
+		s += "  (%s KM)" % group_num(int(miss_ld * LD_KM))
+	return s
+
+
+## Thousands-separated integer, for readouts where a raw 1234567 is unreadable.
+func group_num(v: int) -> String:
+	var s := str(v)
+	var out := ""
+	while s.length() > 3:
+		out = "," + s.right(3) + out
+		s = s.left(s.length() - 3)
+	return s + out
+
+
+## The verdict, formatted. Same contract as `miss_label`: clean miss first.
+func verdict_label() -> String:
+	if plan_solving:
+		return "SOLVING..."
+	if not has_plan():
+		return "NO SOLUTION ON FILE"
+	if plan_clean_miss:
+		return "CLEAN MISS - THREAT RETIRED"
+	if deflect_ok:
+		return "MISS - EARTH CLEAR"
+	return "SURFACE IMPACT - INSUFFICIENT"
 
 
 func adjust_lead(dd: float) -> void:
@@ -487,61 +697,22 @@ func try_commit() -> void:
 		[int(T_IMPACT - T_LAUNCH), int(plan_lead_d)])
 
 
-## First-order estimate of the dv needed for a 1.0 LD miss at this lead
-## (b-plane displacement is ~linear in dv; nominal b is ~0 by construction).
-func req_dv_1ld() -> float:
-	return plan_dv_ms / maxf(miss_ld, 1.0e-4)
-
-
-## Heliocentric velocity, AU/day, f64 components (central difference).
-## dt balances truncation vs f64 cancellation; 0.002 d keeps the derived
-## element set within a few km of truth over the full mission arc.
-func vel_ecl64(el: Dictionary, t_days: float) -> PackedFloat64Array:
-	var dt := 0.002
-	var p1 := pos_ecl64(el, t_days + dt)
-	var p0 := pos_ecl64(el, t_days - dt)
-	return PackedFloat64Array([
-		(p1[0] - p0[0]) / (2.0 * dt),
-		(p1[1] - p0[1]) / (2.0 * dt),
-		(p1[2] - p0[2]) / (2.0 * dt)])
-
-
-## Classical elements from a heliocentric ecliptic state (AU, AU/day) at
-## epoch t_days, same dictionary shape as _elements(). Elliptic, nonzero
-## inclination/eccentricity only — fine for the designer threat.
-func elements_from_rv(r: PackedFloat64Array, v: PackedFloat64Array,
-		t_days: float) -> Dictionary:
-	var rlen := sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2])
-	var v2 := v[0] * v[0] + v[1] * v[1] + v[2] * v[2]
-	var rv := r[0] * v[0] + r[1] * v[1] + r[2] * v[2]
-	var hx := r[1] * v[2] - r[2] * v[1]
-	var hy := r[2] * v[0] - r[0] * v[2]
-	var hz := r[0] * v[1] - r[1] * v[0]
-	var hlen := sqrt(hx * hx + hy * hy + hz * hz)
-
-	var a := 1.0 / (2.0 / rlen - v2 / MU)
-	var c := v2 - MU / rlen
-	var ex := (c * r[0] - rv * v[0]) / MU
-	var ey := (c * r[1] - rv * v[1]) / MU
-	var ez := (c * r[2] - rv * v[2]) / MU
-	var e := sqrt(ex * ex + ey * ey + ez * ez)
-	var i := acos(clampf(hz / hlen, -1.0, 1.0))
-
-	var nx := -hy                       # node vector k x h
-	var ny := hx
-	var nlen := sqrt(nx * nx + ny * ny)
-	var om := atan2(ny, nx)
-	var w := acos(clampf((nx * ex + ny * ey) / (nlen * e), -1.0, 1.0))
-	if ez < 0.0:
-		w = -w
-	var nu := acos(clampf((ex * r[0] + ey * r[1] + ez * r[2]) / (e * rlen), -1.0, 1.0))
-	if rv < 0.0:
-		nu = -nu
-	var ecc := 2.0 * atan2(sqrt(1.0 - e) * sin(nu * 0.5), sqrt(1.0 + e) * cos(nu * 0.5))
-	var m := ecc - e * sin(ecc)
-	var el := _elements(a, e, i, om, w, 0.0)
-	el.m0 = wrapf(m - el.n * t_days, -PI, PI)
-	return el
+## First-order estimate of the Δv needed for a 1.0 LD miss at this lead (b-plane
+## displacement is ~linear in Δv; nominal b is ~0 by construction), formatted.
+##
+## An *estimate* on purpose. The core can solve this exactly — `required_dv`
+## brackets and bisects on the real perigee — but takes ~18 s to do it, which is
+## not a readout that can sit next to a live planner. So this stays a labelled
+## first-order guess rather than a number pretending to be the solve.
+func req_dv_label() -> String:
+	if plan_solving or not has_plan():
+		return "--"
+	# A clean miss is already past 1 LD by an unmeasured margin, and its -1
+	# perigee would divide into a garbage requirement.
+	if plan_clean_miss:
+		return "ACHIEVED"
+	var req := plan_dv_ms / maxf(miss_ld, 1.0e-4)
+	return ">999 M/S" if req > 999.0 else "%.1f M/S" % req
 
 
 # ------------------------------------------------------------ propagation ---
@@ -566,10 +737,20 @@ static func solve_kepler(m: float, e: float) -> float:
 ## binding-side test pins every drawn id across the whole span so it stays that
 ## way.
 func pos_ecl(el: Dictionary, t_days: float) -> Vector3:
-	if el.get("source", "") == "ephem":
-		if not bodies_online:
-			return Vector3.ZERO
-		return mission.body_position_ecl_au(el.naif_id, tdb(t_days))
+	match el.get("source", ""):
+		"ephem":
+			if not bodies_online:
+				return Vector3.ZERO
+			return mission.body_position_ecl_au(el.naif_id, tdb(t_days))
+		"threat":
+			if not threat_active(t_days):
+				return Vector3.ZERO
+			return mission.asteroid_position_ecl_au(tdb(t_days))
+		"threat_defl":
+			# No plan means no deflected arc to sample — not a zero-length one.
+			if not has_plan() or not threat_active(t_days):
+				return Vector3.ZERO
+			return mission.deflected_position_ecl_au(tdb(t_days))
 	return _kepler_pos_ecl(el, t_days)
 
 
@@ -617,7 +798,23 @@ func pos3d(el: Dictionary, t_days: float) -> Vector3:
 ## far to sample; the points themselves are all real lookups.
 func orbit_points(el: Dictionary, count: int = 192) -> PackedVector3Array:
 	var pts := PackedVector3Array()
-	if el.get("source", "") == "ephem":
+
+	# The threat's track is the core's own integration, sampled span-wide by the
+	# binding — not one period of an ellipse. It is an open arc from campaign start
+	# to impact, not a closed orbit, which is the point: that arc ends on Earth.
+	var src: String = el.get("source", "")
+	if src == "threat" or src == "threat_defl":
+		if not mission_online:
+			return pts
+		if src == "threat_defl" and not has_plan():
+			return pts
+		var track: PackedVector3Array = mission.asteroid_track_ecl_au(count) \
+			if src == "threat" else mission.deflected_track_ecl_au(count)
+		for p in track:
+			pts.append(ecl_to_godot(p))
+		return pts
+
+	if src == "ephem":
 		if not bodies_online:
 			return pts
 		var period_d: float = 365.25 * pow(float(el.a), 1.5)
@@ -641,69 +838,24 @@ func orbit_points(el: Dictionary, count: int = 192) -> PackedVector3Array:
 
 
 # ------------------------------------------------- encounter geometry (f64) ---
-# GDScript scalars are 64-bit; only Vector3 truncates to f32. Geocentric
-# differences near encounter (two ~1 AU vectors a few thousand km apart)
-# lose ~18 km to an f32 cast, so these helpers keep every component in
-# doubles and only cast the SMALL residual — the same subtract-then-cast
-# contract the gdext binding will follow (HANDOFF §7).
-
-## Heliocentric ecliptic position as 64-bit components [x, y, z], AU.
-## Mirror of pos_ecl — keep the math in sync (pos_ecl stays separate to
-## avoid per-call array churn on the hot orbit-trace path).
-func pos_ecl64(el: Dictionary, t_days: float) -> PackedFloat64Array:
-	var m: float = wrapf(el.m0 + el.n * t_days, -PI, PI)
-	var ecc := solve_kepler(m, el.e)
-	var nu := 2.0 * atan2(sqrt(1.0 + el.e) * sin(ecc * 0.5),
-		sqrt(1.0 - el.e) * cos(ecc * 0.5))
-	var r: float = el.a * (1.0 - el.e * cos(ecc))
-	var xp := r * cos(nu)
-	var yp := r * sin(nu)
-
-	var co: float = cos(el.om)
-	var so: float = sin(el.om)
-	var cw: float = cos(el.w)
-	var sw: float = sin(el.w)
-	var ci: float = cos(el.i)
-	var si: float = sin(el.i)
-	return PackedFloat64Array([
-		(co * cw - so * sw * ci) * xp + (-co * sw - so * cw * ci) * yp,
-		(so * cw + co * sw * ci) * xp + (-so * sw + co * cw * ci) * yp,
-		(sw * si) * xp + (cw * si) * yp])
-
-
-## Geocentric position of a body, km, ecliptic axes. Subtracted in doubles
-## FIRST, then cast: the residual is small, so f32 is safe.
-func geo_km(el: Dictionary, t_days: float) -> Vector3:
-	var p := pos_ecl64(el, t_days)
-	var e := pos_ecl64(earth_el, t_days)
-	return Vector3(
-		(p[0] - e[0]) * AU_KM, (p[1] - e[1]) * AU_KM, (p[2] - e[2]) * AU_KM)
-
-
-## Geocentric velocity, km/s, by central difference of the f64 residuals.
-func geo_vel_kms(el: Dictionary, t_days: float) -> Vector3:
-	var dt := 0.02                        # days
-	return (geo_km(el, t_days + dt) - geo_km(el, t_days - dt)) / (2.0 * dt * 86400.0)
-
-
-## Closest Earth approach of a track near the impact epoch (ternary search;
-## range is unimodal inside +/-80 d of the designed encounter).
-func close_approach(el: Dictionary) -> Dictionary:
-	var lo := T_IMPACT - 80.0
-	var hi := T_IMPACT + 80.0
-	for _i in 96:
-		var m1 := lo + (hi - lo) / 3.0
-		var m2 := hi - (hi - lo) / 3.0
-		if geo_km(el, m1).length() < geo_km(el, m2).length():
-			hi = m2
-		else:
-			lo = m1
-	var t_ca := (lo + hi) * 0.5
-	return {
-		"t": t_ca,
-		"r_km": geo_km(el, t_ca).length(),
-		"v_kms": geo_vel_kms(el, t_ca),
-	}
+# DELETED in 3C-2b, deliberately not ported.
+#
+# `pos_ecl64` / `geo_km` / `geo_vel_kms` / `close_approach` / `elements_from_rv`
+# existed to keep the encounter in doubles while GDScript's Vector3 truncates to
+# f32 (~18 km of slack at 1 AU, HANDOFF §7). That was the right call for a
+# placeholder that had to do its own physics. It is the wrong call now: the core
+# does this properly — a real close-approach root-find on dense output, and a
+# b-plane reduction with gravitational focusing that a ternary search on range
+# cannot express.
+#
+# Keeping them "for reference" would mean two encounter pipelines that must agree
+# and cannot be checked against each other, which is how a display quietly starts
+# disagreeing with its own physics. The core is the reference. GDScript gets
+# thinner: it marshals a plan in and a verdict out.
+#
+# The f32 boundary is still real and still respected — the core subtracts in f64
+# and only the small geocentric residual crosses (see `Mission::set_plan` and the
+# 3C-2c `EncounterFrame` work).
 
 
 # ------------------------------------------------------------ interceptor ---
@@ -738,9 +890,21 @@ func interceptor_path(count: int = 96) -> PackedVector3Array:
 
 # ------------------------------------------------------------------- misc ---
 
-## Range Earth <-> active asteroid track, km.
+## Range Earth <-> active asteroid track, km. Negative when the threat does not
+## exist at this time — callers must not print a range to a body that is not
+## there (an ungated call would return the distance to the SUN, ~1 AU, and look
+## entirely plausible).
+##
+## Display-grade only: this is an f32 difference of two ~1 AU vectors, so it
+## carries ~18 km of slack (HANDOFF §7). Fine for a "RANGE 12,450,000 KM" readout,
+## never for a hit/miss call — that is `deflect_ok`, from the core's b-plane.
 func threat_range_km(t_days: float) -> float:
-	var el := ast_defl_el if (committed and t_days >= T_INTERCEPT) else ast_el
+	if not threat_active(t_days):
+		return -1.0
+	# Decided by the *queried* time, not the clock: this answers "where was it at
+	# t_days", and a caller asking about a past epoch must not get the track chosen
+	# by where the clock happens to sit now.
+	var el := ast_defl_el if (committed and has_plan() and t_days >= T_INTERCEPT) else ast_el
 	return (pos_ecl(el, t_days) - pos_ecl(earth_el, t_days)).length() * AU_KM
 
 

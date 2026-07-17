@@ -38,12 +38,13 @@ func _draw() -> void:
 	if camera_rig.distance < 10.0:
 		_tag_box(cam, Sim.moon_pos3d(t), "MOON", dim)
 
-	# Threat, comet, interceptor and impact-point tags are dormant until 3C-2b
-	# rebuilds them on the real core (see the Sim module note).
-	if not Sim.mission_online:
+	# A tag is a claim that something is *there*. Outside the threat's propagated
+	# span there is no threat to point at — and a lookup would return ZERO, so an
+	# ungated tag would confidently label the Sun "2031-XK <THREAT>".
+	if not Sim.threat_active(t):
 		return
 
-	var burned: bool = Sim.burned()
+	var burned: bool = Sim.burned() and Sim.has_plan()
 	if burned:
 		_tag_diamond(cam, Sim.pos3d(Sim.ast_el, t), "NOMINAL TRK", dim)
 		_tag_diamond(cam, Sim.pos3d(Sim.ast_defl_el, t), "2031-XK", bright)
@@ -51,9 +52,10 @@ func _draw() -> void:
 		var col := bright if Sim.blink(1.4) else mid
 		_tag_diamond(cam, Sim.pos3d(Sim.ast_el, t), "2031-XK <THREAT>", col)
 
-	_tag_diamond(cam, Sim.pos3d(Sim.comet_el, t), "C/2029 K1", dim)
+	if Sim.comet_online:
+		_tag_diamond(cam, Sim.pos3d(Sim.comet_el, t), "C/2029 K1", dim)
 
-	if Sim.interceptor_phase(t) == "CRUISE":
+	if Sim.interceptor_online and Sim.interceptor_phase(t) == "CRUISE":
 		_tag_cross(cam, Sim.interceptor_pos(t), "ATLAS-1", bright)
 
 	# Predicted impact point: Earth's position at the impact epoch.

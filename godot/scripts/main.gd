@@ -142,10 +142,13 @@ func _input(event: InputEvent) -> void:
 		tags.visible = false
 		hud.view_name = "HELIO PLOT 2D"
 	elif event.is_action_pressed("view_encounter"):
-		# The b-plane view reads the threat's f64 encounter geometry, which is
-		# dormant until 3C-2b — say so rather than open an empty frame.
-		if not Sim.mission_online:
-			Sim.event_logged.emit("ENCOUNTER VIEW OFFLINE - REBUILDING ON REAL CORE")
+		# Gated on `encounter_online`, NOT `mission_online` — the two came apart in
+		# 3C-2b. The threat is real now, but this view still builds its own b-plane
+		# from Kepler helpers that no longer exist; it returns in 3C-2c reading the
+		# core's `EncounterFrame`. Opening it on a live threat would crash, not
+		# merely mislead.
+		if not Sim.encounter_online:
+			Sim.event_logged.emit("ENCOUNTER VIEW OFFLINE - B-PLANE REBUILDING ON CORE")
 		else:
 			enc.visible = true
 			map2d.visible = false

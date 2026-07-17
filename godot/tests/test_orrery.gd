@@ -226,6 +226,28 @@ func _init() -> void:
 		"%.1f m/s at %d d lead does NOT save Earth (miss %s)"
 		% [sim.DV_MIN, int(sim.LEAD_MIN), sim.miss_label()])
 
+	# The middle band, and the readout a winning player actually sees most: a
+	# FINITE perigee that still clears the capture disc. The two cases above pin
+	# the sentinel ends (perigee < cap, and the -1 clean miss); this is the
+	# `perigee_km > cap_km` half of the verdict, and the only case that pairs a
+	# real "%.2f LD" number with EARTH CLEAR. Swept rather than hardcoded: the band
+	# sits between the capture disc and the 500 000 km scan gate, and pinning one
+	# tuned (dv, lead) would turn a physics change into a mystery failure here.
+	var finite_safe := false
+	for probe in [[60.0, 1.0], [90.0, 2.0], [120.0, 5.0], [180.0, 10.0]]:
+		sim.set_plan(probe[0], probe[1], true)
+		sim._tick_plan_debounce(1.0)
+		if sim.deflect_ok and not sim.plan_clean_miss:
+			finite_safe = true
+			_check(sim.miss_label().ends_with("LD")
+				and not sim.verdict_label().contains("IMPACT")
+				and sim.miss_ld * sim.LD_KM > sim.cap_km,
+				"%.0f m/s at %d d lead clears Earth with a FINITE miss: %s / %s"
+				% [probe[1], int(probe[0]), sim.miss_label(), sim.verdict_label()])
+			break
+	_check(finite_safe,
+		"a finite-but-safe deflection exists between the capture disc and the scan gate")
+
 	sim.free()
 	print("----")
 	print("%d failure(s)" % fails)

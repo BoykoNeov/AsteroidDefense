@@ -11,6 +11,28 @@ license = "LicenseRef-BNCL-1.0"
 authors = ["Boyko Neov"]
 repository = "https://github.com/BoykoNeov/AsteroidDefense"
 
+# --- Optimize the physics even in dev builds ---------------------------------
+# Godot loads the *debug* DLL (`windows.debug.x86_64` in asteroid.gdextension) for
+# an editor Play and for any debug export — that is the profile the game actually
+# runs on, not a developer detail. Unoptimized, the core's numerical integration
+# is ~40x slower: building the real-field scenario takes ~400 s against ~10 s
+# optimized, which is not "slow", it is a build nobody can run.
+#
+# So the *math* is optimized in dev while `asteroid_gdext` itself stays at the dev
+# default — the binding is thin marshalling code worth keeping debuggable, and it
+# is not where any time goes. Overriding a profile does not change what is built,
+# only how fast it runs; `debug-assertions` stay on, so the core's internal asserts
+# still fire in a dev build.
+#
+# asteroid_core is named explicitly: it is a workspace member, and `"*"` covers
+# only non-workspace dependencies (anise, nalgebra, hifitime), so relying on the
+# glob alone would silently leave the hot crate at opt-level 0.
+[profile.dev.package.asteroid_core]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [workspace.dependencies]
 # Shared, version-pinned once here; member crates opt in via `.workspace = true`.
 # Versions are filled by `cargo add` (verified against the registry), not by hand.

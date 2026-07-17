@@ -816,14 +816,40 @@ impl MissionCore {
         Some(project_bplane(self.nominal_encounter?.b_vector, basis))
     }
 
-    /// The **deflected** b-vector projected into the display frame — `(ξ, ζ, s)` km.
-    /// `None` for no plan or a clean miss (there is no finite b-plane point when the
-    /// pass left the scan gate). Same unpinned-sign caveat as
-    /// [`nominal_b_point_km`](Self::nominal_b_point_km).
+    /// The **deflected** b-vector in the display frame — `(ξ, ζ, s)` km, at exactly
+    /// `|B| =` [`deflected_impact_parameter_m`](Self::deflected_impact_parameter_m)
+    /// from the origin. `None` for no plan or a clean miss (there is no finite
+    /// b-plane point once the pass has left the scan gate). Same unpinned-sign
+    /// caveat as [`nominal_b_point_km`](Self::nominal_b_point_km).
+    ///
+    /// **Why this one is rescaled and the nominal is not.** Each pass has its own
+    /// b-plane, perpendicular to *its own* `Ŝ`. The frame here is the nominal's, so
+    /// the nominal's `B` lies in it exactly (`B ⊥ Ŝ` by construction, `s = 0`) while
+    /// the deflected `B` — perpendicular to the *deflected* asymptote — does not,
+    /// and a raw projection would plot it at `√(|B|² − s²)`, slightly inside its own
+    /// stated `|B|`. The verdict is the scalar `|B|` against the capture radius, so
+    /// a mark drawn even slightly off that radius could sit inside the disc while
+    /// the panel reads MISS: the picture contradicting the physics, which is the
+    /// failure this whole view exists to end. `|B|` is pinned and the *direction* is
+    /// an unpinned display convention, so the honest render keeps the magnitude
+    /// exact and takes only the bearing from the projection.
+    ///
+    /// Measured, this is a guarantee rather than a visible change: a small
+    /// along-track nudge moves *where* the rock arrives enormously (years of
+    /// leverage) but barely rotates *how* it approaches, so the two asymptotes sit
+    /// within ~0.01–0.2° and the raw gap is under 0.01%. Being right by construction
+    /// beats being right by a coincidence nobody re-measures.
     pub fn deflected_b_point_km(&self) -> Option<Vector3<f64>> {
         let basis = self.encounter_basis()?;
         let enc = self.plan.as_ref()?.encounter?;
-        Some(project_bplane(enc.b_vector, basis))
+        let p = project_bplane(enc.b_vector, basis);
+        let transverse = Vector3::new(p.x, p.y, 0.0);
+        let r = transverse.norm();
+        if r < f64::EPSILON {
+            // B is (absurdly) along the nominal asymptote: no bearing to draw it on.
+            return None;
+        }
+        Some(transverse * (enc.impact_parameter / M_PER_KM / r))
     }
 
     /// The minimum along-track Δv (m/s) that lifts the b-plane perigee to
@@ -1688,6 +1714,33 @@ mod tests {
             far.z,
             far.z.abs() * (23.4_f64.to_radians()).sin()
         );
+
+        // BOTH marks must plot at exactly their own stated |B| — the property the
+        // whole view rests on, since "outside the dashed disc" and "the panel says
+        // MISS" are the same claim and a player sees them together. The nominal gets
+        // this free (B ⊥ its own Ŝ); the deflected B belongs to a *different*
+        // b-plane, so it is rescaled (see `deflected_b_point_km`) and this is what
+        // pins that. Asserted on the plotted radius — the ξ/ζ the view actually
+        // draws — not on the 3-vector's norm, which would pass either way.
+        mc.set_plan(mc.period_seconds(), -0.2).expect("plan solves");
+        for (point, b_m, who) in [
+            (mc.nominal_b_point_km(), mc.nominal_impact_parameter_m(), "nominal"),
+            (
+                mc.deflected_b_point_km(),
+                mc.deflected_impact_parameter_m(),
+                "deflected",
+            ),
+        ] {
+            let p = point.unwrap_or_else(|| panic!("{who}: no b-point"));
+            let b_km = b_m.unwrap_or_else(|| panic!("{who}: no |B|")) / M_PER_KM;
+            let plotted = (p.x * p.x + p.y * p.y).sqrt();
+            assert!(
+                (plotted - b_km).abs() / b_km < 1e-9,
+                "{who} b-point plots at {plotted:.3} km but its |B| is {b_km:.3} km — the \
+                 mark and the number a player reads together must be the same distance, \
+                 or the picture can put it inside the disc while the panel says MISS"
+            );
+        }
 
         // The sample span is the window the core defines, centred on impact.
         let (lo, hi) = mc.encounter_sample_span_tdb().expect("sample span");

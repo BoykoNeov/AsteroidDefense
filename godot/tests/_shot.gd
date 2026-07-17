@@ -79,8 +79,32 @@ func _run() -> void:
 	main.enc._half_ld = 1.2
 	await _settle(3)
 	await _shot("enc_4_zoomed_out")
+	main.enc._half_ld = 0.15
 
-	# 5. The planner beside it — the two panels must agree, and this is the pair a
+	# 5. THE LIVE MARKER, which only draws when the clock is inside the ±1.5 d
+	#    window — i.e. never, in any other shot or test here, since the campaign is
+	#    twelve years long. Commit first (the launch window has to still be open at
+	#    t=0), then scrub to just before impact: that also lights the BURNED state,
+	#    where the nominal cross goes dim and the deflected track becomes the live
+	#    one. Both branches are unreachable from a passive run.
+	Sim.set_plan(Sim.threat_period_d(), 0.2, true)
+	Sim._tick_plan_debounce(1.0)
+	Sim.try_commit()
+	# PAUSE before scrubbing: at warp the clock runs on through the settle frames,
+	# and the encounter is over in hours. The first attempt landed 0.53 d past
+	# closest approach, by which point the rock is ~1.3 LD out and off-plot — the
+	# gate behaving correctly, but not the branch being checked.
+	Sim.paused = true
+	Sim.jump(Sim.T_IMPACT)
+	await _settle(4)
+	await _shot("enc_6_live_marker_burned")
+	print("SHOT  marker: t=%.3f d (impact %.3f), committed=%s burned=%s, window=%s"
+		% [Sim.t, Sim.T_IMPACT, Sim.committed, Sim.burned(), Sim.encounter_span_days()])
+	Sim.paused = false
+	Sim.jump(0.0)
+	await _settle(2)
+
+	# 7. The planner beside it — the two panels must agree, and this is the pair a
 	#    player reads against each other.
 	main.enc.visible = false
 	main.planner.visible = true

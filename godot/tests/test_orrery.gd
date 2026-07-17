@@ -135,12 +135,15 @@ func _init() -> void:
 		% [polls, Time.get_ticks_msec() - t0])
 	_check(sim.mission_online, "the threat is online once the build lands")
 
-	# The comet, interceptor and b-plane view stay dark: each is gated on the real
-	# source that feeds it, and none of those exists yet. One flag for all four
-	# would have lit three lies.
-	_check(not sim.comet_online and not sim.interceptor_online
-		and not sim.encounter_online,
-		"comet/interceptor/encounter stay dormant on their own gates")
+	# The b-plane view lights WITH the threat (3C-2c): its geometry is the same
+	# `EncounterFrame` the scenario build produces, so it is real exactly when the
+	# threat is. The comet and interceptor stay dark — each is gated on the real
+	# source that feeds it, and neither has one yet. This is why there are four
+	# flags: one would light all four, and two of them would be lying.
+	_check(sim.encounter_online,
+		"the b-plane view lights with the threat — same frame, same propagation")
+	_check(not sim.comet_online and not sim.interceptor_online,
+		"comet/interceptor stay dormant on their own gates (no core behind either)")
 
 	# --- The threat is REAL: it arrives on Earth ----------------------------
 	# The core integrated it backward from an impact condition, so the arc must
@@ -206,10 +209,9 @@ func _init() -> void:
 		"the deflected track exists once a plan is solved")
 
 	# --- The verdict, and the clean-miss trap inside it ---------------------
-	# `deflected_perigee_m` returns -1 for a CLEAN MISS — the best outcome — as
-	# well as for no-plan. A verdict of `perigee > capture` alone therefore reads
-	# the best possible deflection as a catastrophic failure. These two cases pin
-	# both ends of that.
+	# The core reports -1 for a CLEAN MISS — the best outcome — as well as for
+	# no-plan. A bare `|B| > capture` verdict therefore reads the best possible
+	# deflection as a catastrophic failure. These two cases pin both ends of that.
 	sim.set_plan(600.0, 200.0, true)
 	sim._tick_plan_debounce(1.0)
 	_check(sim.deflect_ok,
@@ -227,9 +229,9 @@ func _init() -> void:
 		% [sim.DV_MIN, int(sim.LEAD_MIN), sim.miss_label()])
 
 	# The middle band, and the readout a winning player actually sees most: a
-	# FINITE perigee that still clears the capture disc. The two cases above pin
-	# the sentinel ends (perigee < cap, and the -1 clean miss); this is the
-	# `perigee_km > cap_km` half of the verdict, and the only case that pairs a
+	# FINITE |B| that still clears the capture disc. The two cases above pin
+	# the sentinel ends (|B| < cap, and the -1 clean miss); this is the
+	# `b_km > cap_km` half of the verdict, and the only case that pairs a
 	# real "%.2f LD" number with EARTH CLEAR. Swept rather than hardcoded: the band
 	# sits between the capture disc and the 500 000 km scan gate, and pinning one
 	# tuned (dv, lead) would turn a physics change into a mystery failure here.
@@ -247,6 +249,67 @@ func _init() -> void:
 			break
 	_check(finite_safe,
 		"a finite-but-safe deflection exists between the capture disc and the scan gate")
+
+	# --- The band the OLD verdict got wrong --------------------------------
+	# The verdict is `|B| > capture`: the un-focused asymptotic miss against the
+	# target enlarged for focusing (the core's own is_hit). It used to be
+	# `perigee > capture`, which is neither coherent pair and ~1.5x too strict,
+	# because the perigee is ALREADY focused — it pairs with R_E, never with the
+	# capture disc.
+	#
+	# This plan is where the two answers actually differ, so it is the one worth
+	# pinning: 0.2 m/s one period out puts |B| outside the disc (a real miss, with
+	# daylight to spare) while its perigee sits inside it. The old test printed
+	# SURFACE IMPACT over a deflection that works.
+	sim.set_plan(sim.threat_period_d(), 0.2, true)
+	sim._tick_plan_debounce(1.0)
+	var band_b: float = sim.miss_ld * sim.LD_KM
+	var band_p: float = sim.perigee_ld(true) * sim.LD_KM
+	_check(band_b > sim.cap_km and band_p < sim.cap_km,
+		"0.2 m/s at one period lead sits in the disagreement band: |B| %d km > capture "
+		% int(band_b) + "%d km > perigee %d km" % [int(sim.cap_km), int(band_p)])
+	_check(sim.deflect_ok and not sim.verdict_label().contains("IMPACT"),
+		"...and it is a MISS, not the impact the perigee-vs-capture bar called it (%s / %s)"
+		% [sim.miss_label(), sim.verdict_label()])
+	_check(band_p > sim.R_E,
+		"the other coherent pair agrees: perigee %d km clears R_E %d km"
+		% [int(band_p), int(sim.R_E)])
+
+	# --- The b-plane view reads the core (3C-2c) ---------------------------
+	var enc_nom: PackedVector3Array = sim.encounter_track(false)
+	var enc_defl: PackedVector3Array = sim.encounter_track(true)
+	_check(enc_nom.size() > 1000 and enc_defl.size() == enc_nom.size(),
+		"both encounter tracks are densely sampled (%d / %d pts)"
+		% [enc_nom.size(), enc_defl.size()])
+	# s = depth along the incoming asymptote: the window straddles the b-plane.
+	_check(enc_nom[0].z < 0.0 and enc_nom[enc_nom.size() - 1].z > 0.0,
+		"the nominal track runs inbound (s<0) to outbound (s>0)")
+
+	# The b-point is the operative mark, and |B| must be the number the verdict
+	# reads — the picture and the panel cannot be allowed to drift apart.
+	var bp: Vector3 = sim.encounter_b_point(false)
+	_check(bp != Vector3.ZERO
+		and absf(Vector2(bp.x, bp.y).length() / sim.LD_KM - sim.nominal_b_ld()) < 1e-3,
+		"the nominal b-point's plotted distance IS |B| (%.4f LD)" % sim.nominal_b_ld())
+	_check(sim.nominal_b_ld() * sim.LD_KM < sim.cap_km,
+		"the nominal b-point falls INSIDE the capture disc — it is the hit (%d < %d km)"
+		% [int(sim.nominal_b_ld() * sim.LD_KM), int(sim.cap_km)])
+	_check(absf(sim.encounter_v_inf_kms() - 7.63) < 0.5,
+		"v_inf is the hyperbolic excess ~7.63 km/s, not the config's 18 km/s at the "
+		+ "impact point (got %.2f)" % sim.encounter_v_inf_kms())
+
+	# The encounter window is the core's, centred on impact.
+	var esp: PackedFloat64Array = sim.encounter_span_days()
+	_check(esp.size() == 2 and absf((esp[0] + esp[1]) * 0.5 - sim.T_IMPACT) < 0.01
+		and absf((esp[1] - esp[0]) - 3.0) < 0.01,
+		"the encounter window is +/-1.5 d centred on impact")
+
+	# A clean miss has NO b-point. ZERO here is Earth's dead centre, so drawing it
+	# unconditionally would mark the best outcome as a bullseye.
+	sim.set_plan(600.0, 200.0, true)
+	sim._tick_plan_debounce(1.0)
+	_check(sim.plan_clean_miss and sim.encounter_b_point(true) == Vector3.ZERO,
+		"a clean miss reports NO deflected b-point (ZERO = Earth's centre, not a hit)")
 
 	sim.free()
 	print("----")

@@ -60,10 +60,14 @@ var comet_online := false
 ## trajectory no solver produced.
 var interceptor_online := false
 
-## The b-plane view is dormant until `EncounterFrame` crosses the binding (3C-2c).
-## It is the reason these flags are separate: `encounter.gd` still runs the old
-## f64 Kepler helpers, so lighting it with the threat would open a b-plane whose
-## geometry disagrees with the trajectory drawn behind it.
+## The b-plane view is live (3C-2c): `encounter.gd` reads the core's
+## `EncounterFrame` — the same propagation the planner's verdict comes from — so
+## the geometry on screen and the trajectory behind it are one thing. Set with
+## `mission_online`, since the frame is built with the scenario.
+##
+## It stays a separate flag because the four sources are still separate: the comet
+## and the interceptor have no core behind them yet, and lighting them from here
+## would be the lie this design exists to prevent.
 var encounter_online := false
 
 ## The real DE440 field, via the gdext binding. Null when the extension or the
@@ -136,14 +140,11 @@ const LEAD_MAX := 900.0
 const DV_MIN := 0.1
 const DV_MAX := 300.0
 const PAD_D := 2.0                     # minimum days between "now" and launch
-## Earth's equatorial radius, km — the display divisor for "capture = N R_E".
-##
-## Equatorial (6378), not mean (6371): the core computes the capture radius
-## against `EARTH_EQUATORIAL_RADIUS_M`, so normalising by anything else would
-## print a ratio the core's own tests disagree with. A 0.1% difference nobody can
-## see on screen, but there is no reason for the display to use a different Earth
-## than the physics.
-const R_E := 6378.137
+## Earth's radius, km — the disc the encounter view draws, and the display divisor
+## for "capture = N R_E". Read from the core at `_install_threat` (it is the very
+## `earth_radius` the capture disc was computed against), so the display and the
+## physics cannot use different Earths. The literal is only a pre-build fallback.
+var R_E := 6378.137
 
 var plan_lead_d := 180.0               # intercept lead before impact epoch, days
 var plan_dv_ms := 30.0                 # impulse magnitude, m/s
@@ -151,10 +152,12 @@ var plan_retro := true                 # true = retrograde (against velocity)
 var committed := false                 # launch scheduled
 var planner_open := false              # planner panel showing (preview tracks)
 
-var miss_ld := 0.0                     # projected post-burn perigee, LD (see miss_label)
+## The projected miss, LD — the deflected pass's **b-plane impact parameter**, not
+## its perigee. See `_solve_plan` for why that distinction is the verdict.
+var miss_ld := 0.0
 var dv_ms := 0.0                       # imparted delta-v, m/s (mirrors plan)
 var cap_km := 0.0                      # gravitational capture radius, km (from the core)
-var deflect_ok := false                # projected perigee clears the capture disc
+var deflect_ok := false                # projected |B| clears the capture disc
 
 ## A clean miss: the deflected pass left the core's scan gate entirely. This is
 ## the BEST outcome, and it has no finite perigee — the core reports -1. Never
@@ -383,10 +386,16 @@ func _install_threat() -> void:
 
 	# The capture radius: the bar the verdict is measured against, and the real
 	# one — Earth's focusing widens it to ~1.77 R_E at this encounter speed, so a
-	# "miss" inside it is a hit that Earth reels in.
+	# "miss" inside it is a hit that Earth reels in. It is the bar for the *impact
+	# parameter* specifically (see `_solve_plan`), and R_E is the Earth it was
+	# computed against — both read from the core rather than kept in step by hand.
 	cap_km = mission.capture_radius_m() / 1000.0
+	R_E = mission.earth_radius_m() / 1000.0
 
 	mission_online = true
+	# The b-plane frame is built with the scenario, so the close-up is live the
+	# moment the threat is. The comet and interceptor flags stay dark: still no core.
+	encounter_online = true
 	_build_events()
 	mission_ready.emit()
 	event_logged.emit(_stamp(t) + "  THREAT SOLUTION ACQUIRED - 2031-XK TRACKING")
@@ -594,17 +603,34 @@ func _solve_plan() -> void:
 		return
 
 	plan_clean_miss = mission.is_clean_miss()
-	var perigee_km: float = mission.deflected_perigee_m() / 1000.0
-	miss_ld = perigee_km / LD_KM
+	# The **impact parameter**, not the perigee — see below.
+	var b_km: float = mission.deflected_impact_parameter_m() / 1000.0
+	miss_ld = b_km / LD_KM
 
 	# THE verdict, and the one place it is decided.
 	#
-	# A clean miss reports perigee -1: the *success* case returns the same
-	# sentinel as "no plan". Testing `perigee > cap_km` alone would therefore read
-	# the best possible outcome as a catastrophic failure — a deflection that
-	# threw the rock clean out of the encounter would display as SURFACE IMPACT
-	# with a negative miss distance. The clean-miss check must come first.
-	deflect_ok = plan_clean_miss or perigee_km > cap_km
+	# Safe is `b > cap_km`: the b-plane impact parameter against the focused
+	# capture radius. That is the core's own `is_hit`, and the pairing matters.
+	# There are two coherent criteria and they are equivalent:
+	#
+	#     b > b_capture        the UN-focused asymptotic miss, against a target
+	#                          enlarged to account for focusing
+	#     perigee > R_E        the ALREADY-focused closest approach, against
+	#                          Earth's actual solid body
+	#
+	# This used to read `perigee_km > cap_km`, which is neither pair: it charges
+	# for gravitational focusing twice and demands ~1.5x more miss than physics
+	# does. Measured on a plan a player can dial in (0.2 m/s, one period of lead):
+	# b = 14,640 km clears the 11,311 km disc — a miss, by 2,941 km of real
+	# daylight — while its perigee of 9,319 km sits inside that disc, so the old
+	# test printed SURFACE IMPACT over a deflection that works. The two numbers are
+	# both "miss distances" in km, which is exactly why the mix-up survived.
+	#
+	# The clean-miss check still comes first, for the older trap: a clean miss
+	# reports -1, so the *success* case shares "no plan"'s sentinel, and a bare
+	# `b_km > cap_km` would read the best possible outcome as a catastrophic
+	# failure at a negative miss distance.
+	deflect_ok = plan_clean_miss or b_km > cap_km
 	if committed:
 		_rebuild_events()
 	plan_changed.emit()
@@ -617,12 +643,16 @@ func has_plan() -> bool:
 	return mission_online and mission.has_plan()
 
 
-## The projected miss, formatted — the single place a perigee becomes text.
+## The projected miss, formatted — the single place `miss_ld` becomes text.
 ## `with_km` adds the grouped kilometre figure for the planner's wide column.
 ##
-## Three panels print this. A clean miss carries no finite perigee (the core
-## reports -1), so it must never reach a "%.2f LD": centralising the formatting is
-## what stops one of the three sites quietly printing "-0.01 LD" as a real miss.
+## This is the impact parameter, which is what makes it comparable to `cap_km`
+## printed beside it (see `_solve_plan`): a player reads those two numbers against
+## each other, so they must be the pair the verdict actually compares.
+##
+## Three panels print this. A clean miss carries no finite |B| (the core reports
+## -1), so it must never reach a "%.2f LD": centralising the formatting is what
+## stops one of the three sites quietly printing "-0.01 LD" as a real miss.
 func miss_label(with_km: bool = false) -> String:
 	if plan_solving:
 		return "SOLVING..."
@@ -835,6 +865,83 @@ func orbit_points(el: Dictionary, count: int = 192) -> PackedVector3Array:
 		pts.append(ecl_to_godot(_kepler_pos_ecl(el, 0.0)))
 	el.m0 = saved
 	return pts
+
+
+# ---------------------------------------------- encounter (the b-plane view) ---
+# The close-up reads the core's `EncounterFrame` through here. As everywhere else,
+# this layer marshals and owns no geometry: points arrive already projected into
+# the core's b-plane display frame — `(xi, zeta, s)` km, `s` being depth along the
+# incoming asymptote — because the asymptote lives in the core and choosing the
+# frame is the only judgement involved.
+
+
+## An encounter track as `(xi, zeta, s)` km per sample, uniformly spaced over
+## `encounter_span_days()`.
+##
+## The nominal exists the moment the threat does — it is the incoming impact, and
+## it needs no plan. The deflected one is **empty** until the core has solved a
+## plan: empty, not zero-length, because a zeroed track would draw the asteroid
+## straight through Earth's centre and call it a deflection.
+func encounter_track(deflected: bool) -> PackedVector3Array:
+	if not encounter_online:
+		return PackedVector3Array()
+	return mission.encounter_deflected_track_km() if deflected \
+		else mission.encounter_nominal_track_km()
+
+
+## Where a pass's incoming asymptote pierces the b-plane — `(xi, zeta, s)` km, at
+## distance |B| from Earth's centre. **This is the point the verdict is about.**
+##
+## `Vector3.ZERO` means there is no such point (no plan, or a clean miss that left
+## the encounter). ZERO is Earth's dead centre in this frame — a perfect hit — so
+## callers must check rather than draw it.
+func encounter_b_point(deflected: bool) -> Vector3:
+	if not encounter_online:
+		return Vector3.ZERO
+	if deflected and (not has_plan() or plan_clean_miss):
+		return Vector3.ZERO
+	return mission.deflected_b_point_km() if deflected else mission.nominal_b_point_km()
+
+
+## The encounter window as `[first, last]` mission days — the arc the tracks cover
+## (the core's ±1.5 d around impact). Empty when the mission layer is dormant.
+func encounter_span_days() -> PackedFloat64Array:
+	var out := PackedFloat64Array()
+	if not encounter_online:
+		return out
+	var s: PackedFloat64Array = mission.encounter_sample_span_tdb()
+	if s.size() == 2:
+		out.push_back((s[0] - EPOCH0_TDB) / DAY_S)
+		out.push_back((s[1] - EPOCH0_TDB) / DAY_S)
+	return out
+
+
+## The encounter's hyperbolic excess speed, km/s. Not the 18 km/s the config names
+## — that is the speed at the impact point, deep in Earth's well; stripped of the
+## well it is ~7.63 km/s, and that is what sets the capture disc at 1.77 R_E.
+func encounter_v_inf_kms() -> float:
+	if not encounter_online:
+		return 0.0
+	return mission.encounter_v_inf_m_s() / 1000.0
+
+
+## The nominal pass's |B|, LD — the hit being undone, inside the capture disc by
+## construction. (The deflected pass's |B| is `miss_ld`; see `miss_label`.)
+func nominal_b_ld() -> float:
+	if not encounter_online:
+		return 0.0
+	return mission.nominal_impact_parameter_m() / 1000.0 / LD_KM
+
+
+## A pass's actual closest approach to Earth's centre, LD — reported alongside |B|
+## because "how close did it really come" is a fair question, but it is **not** the
+## verdict: the perigee is already focused, so it pairs with R_E, never with
+## `cap_km`. Negative when there is no such pass. See `_solve_plan`.
+func perigee_ld(deflected: bool) -> float:
+	if not encounter_online:
+		return -1.0
+	var m: float = mission.deflected_perigee_m() if deflected else mission.nominal_perigee_m()
+	return -1.0 if m < 0.0 else m / 1000.0 / LD_KM
 
 
 # ------------------------------------------------- encounter geometry (f64) ---

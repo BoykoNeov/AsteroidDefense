@@ -66,8 +66,13 @@ func _draw() -> void:
 	y += lh
 
 	# Miss and verdict both come from Sim's formatters, never from `miss_ld`
-	# directly: a clean miss has no finite perigee to print (the core reports -1),
-	# and it is the SUCCESS case. Formatting it here would re-open that trap.
+	# directly: a clean miss has no finite |B| to print (the core reports -1), and
+	# it is the SUCCESS case. Formatting it here would re-open that trap.
+	#
+	# PROJ MISS is the impact parameter and CAPTURE is the disc it is measured
+	# against — deliberately the pair the verdict compares, because a player reads
+	# these two lines against each other. Printing a perigee here beside a capture
+	# radius invites exactly the mix-up `Sim._solve_plan` documents.
 	_t(Vector2(x, y), "PROJ MISS", dim)
 	_t(Vector2(xv, y), Sim.miss_label(true), bright)
 	y += lh

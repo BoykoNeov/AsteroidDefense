@@ -52,12 +52,20 @@ func _draw() -> void:
 	_text(Vector2(MARGIN, y), "PDC/OS v2.6 - " + view_name, dim); y += lh * 1.4
 
 	# ---- mission clock (top-right) ----
+	# An "E-nnnn DAYS" countdown only means something when there is a threat to
+	# count down to. With the mission layer dormant it read "E-69001 DAYS" at the
+	# far end of the scrub — a countdown to an impact that is not being drawn.
+	# Show the epoch instead: that is what the clock is now.
 	var days_to := Sim.T_IMPACT - Sim.t
-	var clock := ("E-%04d DAYS" % int(ceil(days_to))) if days_to >= 0.0 \
-		else ("E+%04d DAYS" % int(-days_to))
+	var clock := Sim.date_string()
+	if Sim.mission_online:
+		clock = ("E-%04d DAYS" % int(ceil(days_to))) if days_to >= 0.0 \
+			else ("E+%04d DAYS" % int(-days_to))
 	var cx := w - MARGIN
 	_text_r(Vector2(cx, MARGIN + lh), clock, bright, _fs + 6)
-	_text_r(Vector2(cx, MARGIN + lh * 2.3), "MJD-REL %07.1f  %s" % [Sim.t, Sim.date_string()], mid)
+	_text_r(Vector2(cx, MARGIN + lh * 2.3), "TDB EPOCH  MJD-REL %+08.1f D" % Sim.t
+		if not Sim.mission_online
+		else "MJD-REL %07.1f  %s" % [Sim.t, Sim.date_string()], mid)
 	var warp_str: String = "WARP " + Sim.warp_label()
 	if Sim.paused:
 		if Sim.blink(2.0):

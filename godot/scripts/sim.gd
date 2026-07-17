@@ -177,8 +177,18 @@ func _process(delta: float) -> void:
 	for ev in _events:
 		var passed: bool = t >= ev.t
 		if passed and not ev.fired and t > prev:
-			event_logged.emit("E%+05d  %s" % [int(ev.t - T_IMPACT), ev.msg])
+			event_logged.emit(_stamp(ev.t) + "  " + ev.msg)
 		ev.fired = passed
+
+
+## Console timestamp. "E-nnnn" is days-to-impact — meaningful only when there is
+## an impact being tracked; with the mission layer dormant it stamped orrery
+## messages with a countdown to a threat that is not on screen. Then it is just
+## the date.
+func _stamp(t_days: float) -> String:
+	if mission_online:
+		return "E%+05d" % int(t_days - T_IMPACT)
+	return date_string(t_days)
 
 
 ## Flip the time direction (forward <-> reverse). Warp magnitude is unchanged.
@@ -327,14 +337,29 @@ func _elements(a: float, e: float, i: float, om: float, w: float, m0: float) -> 
 
 ## Default timeline: no mission on file. Impact happens unless a plan is
 ## committed (which swaps in the mission timeline via _rebuild_events).
+##
+## While the mission layer is dormant the threat events are NOT scheduled: a
+## console announcing "TRACKING 2031-XK - P(IMPACT)=1.000" over a display with no
+## threat on it is the loudest lie on the screen, and the event log is the one
+## surface a player reads as ground truth.
 func _build_events() -> void:
 	_events.clear()
-	var raw := [
-		[1.0, "TRACKING 2031-XK - EPHEMERIS UPDATED, P(IMPACT)=1.000"],
-		[20.0, "NO DEFLECTION PLAN ON FILE - [M] MISSION PLANNER"],
-		[T_IMPACT - 30.0, "FINAL WARNING - IMPACT E-030 D, NO MISSION COMMITTED"],
-		[T_IMPACT, "SURFACE IMPACT - NO DEFLECTION ATTEMPTED"],
-	]
+	var raw := []
+	if mission_online:
+		raw = [
+			[1.0, "TRACKING 2031-XK - EPHEMERIS UPDATED, P(IMPACT)=1.000"],
+			[20.0, "NO DEFLECTION PLAN ON FILE - [M] MISSION PLANNER"],
+			[T_IMPACT - 30.0, "FINAL WARNING - IMPACT E-030 D, NO MISSION COMMITTED"],
+			[T_IMPACT, "SURFACE IMPACT - NO DEFLECTION ATTEMPTED"],
+		]
+	elif bodies_online:
+		raw = [
+			[1.0, "DE440 EPHEMERIS MOUNTED - %d - %d" % [year_at(T_MIN), year_at(T_MAX)]],
+			[2.0, "SOLAR FIELD LIVE - %d BODIES - DRAG TIMELINE TO SCRUB" % planets.size()],
+			[3.0, "THREAT DB EMPTY - MISSION LAYER REBUILDING ON f64 CORE"],
+		]
+	else:
+		raw = [[1.0, "NO EPHEMERIS KERNEL - SOLAR FIELD OFFLINE"]]
 	for r in raw:
 		_events.append({"t": r[0], "msg": r[1], "fired": r[0] <= t})
 
@@ -762,10 +787,10 @@ func blink(hz: float = 2.0) -> bool:
 const J2000_UNIX := 946728000.0
 
 
-## Calendar readout for the current clock — a real date now, derived from the
-## real TDB instant rather than counting days from a made-up epoch.
-func date_string() -> String:
-	var date := Time.get_date_dict_from_unix_time(int(J2000_UNIX + tdb()))
+## Calendar readout — a real date now, derived from the real TDB instant rather
+## than counting days from a made-up epoch. Defaults to the current clock.
+func date_string(t_days: float = INF) -> String:
+	var date := Time.get_date_dict_from_unix_time(int(J2000_UNIX + tdb(t_days)))
 	return "%04d-%02d-%02d" % [date.year, date.month, date.day]
 
 

@@ -96,16 +96,17 @@ func _ready() -> void:
 	viewport.size_changed.connect(_sync_overlay_sizes)
 	_sync_overlay_sizes.call_deferred()
 
-	_focus_targets = [
-		["SUN", func() -> Vector3: return Vector3.ZERO, 32.0],
-		["EARTH", func() -> Vector3: return Sim.pos3d(Sim.earth_el, Sim.t), 3.0],
-		["2031-XK", func() -> Vector3: return Sim.pos3d(
-			Sim.ast_defl_el if Sim.burned() else Sim.ast_el, Sim.t), 1.6],
-		["C/2029K1", func() -> Vector3: return Sim.pos3d(Sim.comet_el, Sim.t), 2.4],
-		["ATLAS-1", func() -> Vector3:
-			return Sim.interceptor_pos(Sim.t) if Sim.interceptor_phase(Sim.t) == "CRUISE" \
-				else Sim.pos3d(Sim.earth_el, Sim.t), 1.6],
-	]
+	# The Sun is always focusable (it is the frame origin, not a lookup). Every
+	# other target is a real ephemeris body, so the list is built only when the
+	# field is up; the threat/comet/interceptor targets return in 3C-2b with the
+	# bodies themselves.
+	_focus_targets = [["SUN", func() -> Vector3: return Vector3.ZERO, 32.0]]
+	if Sim.bodies_online:
+		for el in Sim.planets:
+			var body: Dictionary = el
+			var dist: float = 3.0 if body.name == "EARTH" else maxf(2.0, float(body.vis_r) * 24.0)
+			_focus_targets.append([body.name,
+				func() -> Vector3: return Sim.pos3d(body, Sim.t), dist])
 	_apply_focus()
 
 
@@ -141,10 +142,15 @@ func _input(event: InputEvent) -> void:
 		tags.visible = false
 		hud.view_name = "HELIO PLOT 2D"
 	elif event.is_action_pressed("view_encounter"):
-		enc.visible = true
-		map2d.visible = false
-		tags.visible = false
-		hud.view_name = "ENCOUNTER B-PLANE"
+		# The b-plane view reads the threat's f64 encounter geometry, which is
+		# dormant until 3C-2b — say so rather than open an empty frame.
+		if not Sim.mission_online:
+			Sim.event_logged.emit("ENCOUNTER VIEW OFFLINE - REBUILDING ON REAL CORE")
+		else:
+			enc.visible = true
+			map2d.visible = false
+			tags.visible = false
+			hud.view_name = "ENCOUNTER B-PLANE"
 	elif event.is_action_pressed("focus_next"):
 		_focus_idx = (_focus_idx + 1) % _focus_targets.size()
 		_apply_focus()
@@ -153,8 +159,11 @@ func _input(event: InputEvent) -> void:
 	elif event.is_action_pressed("time_reset"):
 		Sim.jump(0.0)
 	elif event.is_action_pressed("plan_toggle"):
-		planner.visible = not planner.visible
-		Sim.planner_open = planner.visible
+		if not Sim.mission_online:
+			Sim.event_logged.emit("MISSION PLANNER OFFLINE - REBUILDING ON REAL CORE")
+		else:
+			planner.visible = not planner.visible
+			Sim.planner_open = planner.visible
 	elif planner.visible and event.is_action_pressed("plan_lead_up"):
 		Sim.adjust_lead(10.0)
 	elif planner.visible and event.is_action_pressed("plan_lead_down"):

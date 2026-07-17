@@ -63,11 +63,12 @@ func _draw() -> void:
 		if el.a > 2.0:
 			continue                          # Jupiter off-plot
 		_orbit_trace(el, center, s, dim if el.name == "EARTH" else faint)
-	_orbit_trace(Sim.ast_el, center, s, mid)
-	if Sim.burned():
-		_orbit_trace(Sim.ast_defl_el, center, s, dim, true)
-	elif Sim.planner_open or Sim.committed:
-		_orbit_trace(Sim.ast_defl_el, center, s, faint, true)
+	if Sim.mission_online:
+		_orbit_trace(Sim.ast_el, center, s, mid)
+		if Sim.burned():
+			_orbit_trace(Sim.ast_defl_el, center, s, dim, true)
+		elif Sim.planner_open or Sim.committed:
+			_orbit_trace(Sim.ast_defl_el, center, s, faint, true)
 
 	# Sun.
 	draw_circle(center, 4.0, bright)
@@ -84,7 +85,21 @@ func _draw() -> void:
 			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 1,
 			mid if el.name == "EARTH" else dim)
 
-	# Threat + range line to Earth.
+	# Threat, interceptor and the predicted-impact marker are dormant until 3C-2b
+	# rebuilds them on the real core (see the Sim module note).
+	if Sim.mission_online:
+		_draw_threat(center, s, t, bright, mid, dim, faint)
+
+	# Plot header.
+	draw_string(_font, Vector2(w * 0.5 - 120, 40),
+		"HELIOCENTRIC PLOT - ECLIPTIC N", HORIZONTAL_ALIGNMENT_LEFT, -1, _fs, dim)
+
+
+## Threat marker, its range line to Earth, the interceptor and the predicted
+## impact cross — everything that depends on the mission layer, lifted out of
+## _draw so the dormant case is one guarded call rather than five scattered ones.
+func _draw_threat(center: Vector2, s: float, t: float, bright: Color,
+		mid: Color, dim: Color, faint: Color) -> void:
 	var burned: bool = Sim.burned()
 	var p_e := _to_screen(Sim.pos_ecl(Sim.earth_el, t), center, s)
 	var el_act: Dictionary = Sim.ast_defl_el if burned else Sim.ast_el
@@ -106,7 +121,6 @@ func _draw() -> void:
 		draw_string(_font, p_n + Vector2(9, 12), "NOMINAL",
 			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, dim)
 
-	# Interceptor.
 	if Sim.interceptor_phase(t) == "CRUISE":
 		var p_i := _map_pos(Sim.interceptor_pos(t), center, s)
 		draw_line(p_i + Vector2(-6, 0), p_i + Vector2(6, 0), bright, 1.2)
@@ -114,15 +128,10 @@ func _draw() -> void:
 		draw_string(_font, p_i + Vector2(9, 4), "ATLAS-1",
 			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 1, bright)
 
-	# Predicted impact X.
 	if not burned and Sim.blink(2.2):
 		var p_x := _to_screen(Sim.pos_ecl(Sim.earth_el, Sim.T_IMPACT), center, s)
 		draw_line(p_x + Vector2(-7, -7), p_x + Vector2(7, 7), bright, 1.5)
 		draw_line(p_x + Vector2(-7, 7), p_x + Vector2(7, -7), bright, 1.5)
-
-	# Plot header.
-	draw_string(_font, Vector2(w * 0.5 - 120, 40),
-		"HELIOCENTRIC PLOT - ECLIPTIC N", HORIZONTAL_ALIGNMENT_LEFT, -1, _fs, dim)
 
 
 func _map_pos(scene_pos: Vector3, center: Vector2, s: float) -> Vector2:
@@ -131,14 +140,17 @@ func _map_pos(scene_pos: Vector3, center: Vector2, s: float) -> Vector2:
 	return _to_screen(ecl, center, s)
 
 
+## Orbit polyline for any body. Delegates the sampling to Sim.orbit_points so a
+## real ephemeris body traces its ACTUAL orbit (walked from the field) and a
+## Kepler body its analytic one — this used to poke `el.m0` directly, which only
+## a Kepler body has.
 func _orbit_trace(el: Dictionary, center: Vector2, s: float, col: Color,
 		dashed: bool = false) -> void:
 	var pts := PackedVector2Array()
-	var saved: float = el.m0
-	for k in 181:
-		el.m0 = TAU * k / 180.0
-		pts.append(_to_screen(Sim.pos_ecl(el, 0.0), center, s))
-	el.m0 = saved
+	for p in Sim.orbit_points(el, 180):
+		pts.append(_map_pos(p, center, s))
+	if pts.size() < 2:
+		return
 	if dashed:
 		for k in range(0, pts.size() - 1, 2):
 			draw_line(pts[k], pts[k + 1], col, 1.0)

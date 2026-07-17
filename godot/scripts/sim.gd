@@ -1,21 +1,65 @@
 extends Node
-## Central simulation state: mission clock, time warp, Keplerian bodies,
-## mission timeline events. This is DISPLAY-GRADE propagation (f32 Kepler)
-## used to stand up the visual layer; it will be replaced by the Rust f64
-## core (gdext binding) which hands Godot focus-relative residuals per
-## HANDOFF §7. Keep the API surface (positions per body per time) stable.
+## Central simulation state: the mission clock, time warp, the drawn bodies, and
+## the mission timeline.
+##
+## **The clock is real.** `t` is days from `EPOCH0_TDB`, a genuine TDB instant
+## taken from the Rust core's own `ImpactorConfig::default()` — not a fabricated
+## 2031 epoch. Every body position is a real DE440 ephemeris lookup through the
+## gdext binding (`Mission.body_position_ecl_au`), so what is drawn is what the
+## validated core says is there. The clock clamps to the *mounted kernel's*
+## coverage (`Mission.usable_span_tdb()`), because outside it every lookup fails.
+##
+## **The public API is deliberately unchanged**: `pos_ecl(body, t)`,
+## `pos3d(body, t)`, `orbit_points(body)` keep their old shapes, so the HUD, map,
+## tags and camera did not have to learn where positions come from. What changed
+## is what a *body* is: a Dictionary that names its source. An `"ephem"` body
+## carries a `naif_id` and is looked up in the real field; a `"kepler"` body
+## carries classical elements and is propagated analytically here. That dispatch
+## is the whole seam — see `pos_ecl`.
+##
+## **The mission layer is dormant** (`mission_online == false`) as of 3C-2a. The
+## threat, comet, planner, interceptor and b-plane view are switched off rather
+## than left running on placeholder Kepler, because they cannot come across
+## cleanly yet: their encounter math (`pos_ecl64` -> `geo_km` -> `close_approach`)
+## is f64 by design, and real body positions only cross the FFI as f32 Vector3s
+## (~18 km of slack at 1 AU — precisely what those helpers exist to avoid, see
+## HANDOFF §7). Feeding real Earth into them would quietly drop an f32 floor into
+## the b-plane; keeping a private Kepler Earth for them instead would mean two
+## Earths, with the threat riding the one nobody can see. Neither is honest. In
+## 3C-2b the threat comes from `asteroid_position_ecl_au` and its b-plane from the
+## core, so all that math stays inside Rust and only small residuals cross — and
+## it lands on the real timeline this clock already runs.
 
 signal event_logged(line: String)
 
 const AU := 10.0                       # Godot units per AU
 const AU_KM := 1.495978707e8
 const LD_KM := 384400.0                # lunar distance, km
+const DAY_S := 86400.0
 
-# Mission timeline (days from epoch). The impact epoch is fixed by the
+## Whether the deflection/threat layer is live. False until 3C-2b rebuilds it on
+## the real core (see the module note). Consumers check this before drawing or
+## reading anything threat-shaped; nothing fakes a number while it is false.
+var mission_online := false
+
+## The real DE440 field, via the gdext binding. Null when the extension or the
+## kernels are unavailable — `bodies_online` is the flag to check, not this.
+var mission = null
+var bodies_online := false
+var kernel_source := ""                # where the kernels were found (for the HUD)
+var kernel_error := ""                 # why they were not (for the HUD)
+
+# Mission timeline (days from EPOCH0_TDB). The impact epoch is fixed by the
 # threat; launch/intercept epochs come from the operator's plan ([M]).
-const T_IMPACT := 1200.0
-var T_LAUNCH := T_IMPACT - 420.0
-var T_INTERCEPT := T_IMPACT - 180.0
+var T_IMPACT := 4383.0                 # overwritten from the core at _ready
+var T_LAUNCH := 0.0
+var T_INTERCEPT := 0.0
+
+## Campaign start, seconds past J2000 — the real TDB instant `t = 0` means.
+## Read from the core (`ImpactorConfig::default().epoch0()`, i.e. impact minus
+## lead_years) so the drawn timeline cannot drift from the built one. The
+## fallback is only for a kernel-less run where nothing is drawn anyway.
+var EPOCH0_TDB := 883569600.0          # 2028-01-01 TDB, the core's default
 
 var t := 0.0                           # mission-elapsed time, days
 var paused := false
@@ -25,11 +69,14 @@ var time_dir := 1.0                    # +1 forward, -1 reverse (run time backwa
 # (decades, several comet passes) scrubs in seconds without endless key-holding.
 const WARP_STEPS: Array[float] = [0.1, 0.5, 2.0, 5.0, 15.0, 45.0, 120.0, 365.0, 1095.0, 3650.0]
 
-# Clock bounds, mission-elapsed days (epoch 2031-01-01). Wide enough to run well
-# before the campaign and far past it — a ~110-year window so long-period bodies
-# show several passes. The clock clamps here; it never wraps.
-const T_MIN := -3650.0                  # ~10 years before epoch
-const T_MAX := 40000.0                  # ~110 years after epoch
+# Clock bounds, days from EPOCH0_TDB — set at _ready from the mounted kernel's
+# usable span (de440s ~1850-2149, de441 ~1550-2650), never hardcoded. The clock
+# clamps here; it never wraps. This clamp is not cosmetic: past the coverage edge
+# every lookup fails and a failed lookup returns ZERO, which in this heliocentric
+# frame is the SUN's position — so an unclamped clock would not blank the
+# display, it would silently collapse every planet onto the Sun.
+var T_MIN := -3650.0
+var T_MAX := 40000.0
 
 var mono_font: SystemFont
 
@@ -71,11 +118,52 @@ func _ready() -> void:
 	mono_font.font_names = PackedStringArray(
 		["Consolas", "Cascadia Mono", "Courier New", "Lucida Console"])
 
+	_load_field()
 	_build_planets()
-	_build_threat()
-	_build_comet()
-	set_plan(plan_lead_d, plan_dv_ms, plan_retro)
 	_build_events()
+
+
+## Bring up the real DE440 field: find the kernels, load them, and adopt the
+## core's own campaign epochs and the mounted kernel's coverage window.
+##
+## Everything here is allowed to fail without taking the app down — a missing
+## extension or kernel leaves `bodies_online` false and `kernel_error` set, and
+## the HUD says so. What must NOT happen is a silent fallback to fabricated
+## bodies: this build draws the real field or admits it cannot.
+func _load_field() -> void:
+	if not ClassDB.class_exists("Mission"):
+		kernel_error = "GDExtension not loaded (build it: cargo build -p asteroid_gdext --release)"
+		return
+	mission = ClassDB.instantiate("Mission")
+
+	var k := Kernels.resolve()
+	if not k.ok:
+		kernel_error = k.error
+		return
+	if not mission.load_from(k.bsp, k.pca):
+		kernel_error = "kernel load failed (%s): %s" % [k.source, mission.last_error()]
+		return
+
+	kernel_source = k.source
+	bodies_online = true
+
+	# Anchor the clock on the core's real campaign, read cheaply — the impact
+	# epoch is a config input, not something the expensive build solves for.
+	EPOCH0_TDB = mission.default_epoch0_tdb_seconds()
+	T_IMPACT = (mission.default_impact_tdb_seconds() - EPOCH0_TDB) / DAY_S
+
+	# Clamp to what the mounted kernel actually serves, not to a guess.
+	var span: PackedFloat64Array = mission.usable_span_tdb()
+	if span.size() == 2:
+		T_MIN = (span[0] - EPOCH0_TDB) / DAY_S
+		T_MAX = (span[1] - EPOCH0_TDB) / DAY_S
+
+
+## Seconds past J2000 for a mission-elapsed time in days — the frame every
+## binding call speaks. `t` is a display convenience; this is the real instant.
+func tdb(t_days: float = INF) -> float:
+	var d := t if is_inf(t_days) else t_days
+	return EPOCH0_TDB + d * DAY_S
 
 
 func _process(delta: float) -> void:
@@ -116,28 +204,61 @@ func clock_frac() -> float:
 
 # ---------------------------------------------------------------- bodies ---
 
+## The drawn planets, sourced from the real DE440 field by NAIF id.
+##
+## Two ids are not the obvious ones, and both are pinned by a test in the binding
+## (`display_naif_ids_resolve_across_the_whole_usable_span`):
+##
+##   EARTH is **399**, never 3. Id 3 is the Earth-Moon *barycentre*, ~4671 km
+##   from the geocentre — an Earth-radius-scale error, the HANDOFF §5 footgun.
+##
+##   MARS is **4** (its barycentre), because de440s carries no Mars geocentre
+##   segment at all — 499 simply does not resolve. Harmless here, unlike Earth's
+##   case: Mars's moons are negligible, so its barycentre sits within a few km of
+##   the planet. The outer planets are barycentres for the same reason and are
+##   likewise fine at AU display scale.
+##
+## `a_au` is nominal, used only for display decisions (orbit-line detail, one
+## period's worth of sampling) — never for a position, which is always a lookup.
 func _build_planets() -> void:
-	# [name, a AU, e, i deg, Omega deg, varpi deg, L deg, vis radius]
+	# [name, NAIF id, nominal a AU, vis radius]
 	var raw := [
-		["MERCURY", 0.3871, 0.2056, 7.005, 48.331, 77.456, 252.251, 0.045],
-		["VENUS",   0.7233, 0.0068, 3.395, 76.680, 131.564, 181.980, 0.075],
-		["EARTH",   1.0000, 0.0167, 0.000, 0.000, 102.937, 100.464, 0.080],
-		["MARS",    1.5237, 0.0934, 1.850, 49.558, 336.060, 355.450, 0.060],
-		["JUPITER", 5.2026, 0.0484, 1.303, 100.556, 14.753, 34.404, 0.180],
-		["SATURN",  9.5549, 0.0539, 2.486, 113.715, 92.432, 49.954, 0.150],
-		["URANUS", 19.2184, 0.0473, 0.773, 74.006, 170.954, 313.238, 0.105],
-		["NEPTUNE", 30.110, 0.0086, 1.770, 131.784, 44.965, 304.880, 0.100],
+		["MERCURY", 199, 0.3871, 0.045],
+		["VENUS",   299, 0.7233, 0.075],
+		["EARTH",   399, 1.0000, 0.080],
+		["MARS",      4, 1.5237, 0.060],
+		["JUPITER",   5, 5.2026, 0.180],
+		["SATURN",    6, 9.5549, 0.150],
+		["URANUS",    7, 19.2184, 0.105],
+		["NEPTUNE",   8, 30.110, 0.100],
 	]
 	for r in raw:
-		var el := _elements(r[1], r[2], deg_to_rad(r[3]), deg_to_rad(r[4]),
-			deg_to_rad(r[5] - r[4]), deg_to_rad(r[6] - r[5]))
-		el.name = r[0]
-		el.vis_r = r[7]
-		el.kind = "planet"
-		planets.append(el)
+		var body := {
+			"name": r[0], "source": "ephem", "naif_id": r[1],
+			"a": r[2], "vis_r": r[3], "kind": "planet",
+		}
+		planets.append(body)
 		if r[0] == "EARTH":
-			earth_el = el
+			earth_el = body
 
+
+# --- DORMANT until 3C-2b -----------------------------------------------------
+# Nothing below is called while `mission_online` is false: _ready() no longer
+# builds the threat, the comet or a plan, so `ast_el` / `comet_el` /
+# `ast_defl_el` stay empty and every consumer gates on `mission_online`.
+#
+# Kept rather than deleted because it is the working reference for what 3C-2b has
+# to reproduce against the real core (the threat is *constructed from the impact
+# condition* so the tracks genuinely converge — that idea survives; only its
+# source changes to asteroid_position_ecl_au + a core-computed b-plane).
+#
+# Why it cannot simply be pointed at real Earth today: the elements below derive
+# from `pos_ecl(earth_el, T_IMPACT)`, so against real Earth the threat *would*
+# still converge on the drawn planet. The blocker is downstream — `close_approach`
+# (via pos_ecl64/geo_km) is deliberately f64, while real positions cross the FFI
+# only as f32 Vector3 (~18 km of slack at 1 AU). Wiring real Earth into that chain
+# would put an f32 floor under the b-plane and under the capture radius computed
+# right here — exactly the error those helpers exist to exclude (HANDOFF §7).
 
 func _build_threat() -> void:
 	# Designer impactor 2031-XK (matches the Rust-core scenario family:
@@ -409,7 +530,27 @@ static func solve_kepler(m: float, e: float) -> float:
 
 
 ## Heliocentric ecliptic position, AU, at mission time t_days.
+##
+## The dispatch seam: an `"ephem"` body is a real DE440 lookup through the
+## binding; anything else is propagated analytically below. Consumers call this
+## exactly as they always did and never learn which happened.
+##
+## An out-of-coverage or unresolved lookup comes back as ZERO — which in this
+## heliocentric frame is *the Sun's position*, not an obviously broken value. The
+## clock clamp to `[T_MIN, T_MAX]` is what keeps that from being reachable; the
+## binding-side test pins every drawn id across the whole span so it stays that
+## way.
 func pos_ecl(el: Dictionary, t_days: float) -> Vector3:
+	if el.get("source", "") == "ephem":
+		if not bodies_online:
+			return Vector3.ZERO
+		return mission.body_position_ecl_au(el.naif_id, tdb(t_days))
+	return _kepler_pos_ecl(el, t_days)
+
+
+## Analytic two-body position, AU — HANDOFF §5 Tier 0 (cosmetic context orbits,
+## never a hit/miss decision). Retained for bodies that have no ephemeris source.
+func _kepler_pos_ecl(el: Dictionary, t_days: float) -> Vector3:
 	var m: float = wrapf(el.m0 + el.n * t_days, -PI, PI)
 	var ecc := solve_kepler(m, el.e)
 	var nu := 2.0 * atan2(sqrt(1.0 + el.e) * sin(ecc * 0.5),
@@ -441,13 +582,35 @@ func pos3d(el: Dictionary, t_days: float) -> Vector3:
 
 
 ## Full-orbit polyline in scene units (for static orbit tracks).
+##
+## For a real body this walks one orbital period of the *actual* ephemeris rather
+## than drawing an idealised ellipse — so what is drawn is the orbit the core
+## flies, wobbles and all. Sampled once at build; planetary orbits do not visibly
+## precess over a display session, so it need not follow the clock.
+##
+## The period comes from the nominal `a` (Kepler's third law) purely to know how
+## far to sample; the points themselves are all real lookups.
 func orbit_points(el: Dictionary, count: int = 192) -> PackedVector3Array:
 	var pts := PackedVector3Array()
+	if el.get("source", "") == "ephem":
+		if not bodies_online:
+			return pts
+		var period_d: float = 365.25 * pow(float(el.a), 1.5)
+		# Sample from the campaign epoch, and clamp into coverage so a long-period
+		# outer planet near a span edge yields a short arc rather than a fan of
+		# ZEROs collapsing onto the Sun.
+		var t0: float = clampf(0.0, T_MIN, T_MAX)
+		var t1: float = clampf(t0 + period_d, T_MIN, T_MAX)
+		for k in count + 1:
+			var td: float = t0 + (t1 - t0) * float(k) / float(count)
+			pts.append(ecl_to_godot(pos_ecl(el, td)))
+		return pts
+
 	var saved: float = el.m0
 	for k in count + 1:
 		var m := TAU * float(k) / float(count)
 		el.m0 = m
-		pts.append(ecl_to_godot(pos_ecl(el, 0.0)))
+		pts.append(ecl_to_godot(_kepler_pos_ecl(el, 0.0)))
 	el.m0 = saved
 	return pts
 
@@ -592,8 +755,20 @@ func blink(hz: float = 2.0) -> bool:
 	return fmod(Time.get_ticks_msec() / 1000.0 * hz, 1.0) < 0.5
 
 
-## Calendar readout: epoch 2031-01-01 + t days (display only).
+## Unix seconds at the J2000 epoch (2000-01-01T12:00:00). The ~69 s TT-vs-UTC
+## offset is knowingly ignored: this drives a YYYY-MM-DD readout, where a minute
+## of slop cannot show. Anything that needs real time scales uses hifitime inside
+## the core, which is exactly why that lives there and not here.
+const J2000_UNIX := 946728000.0
+
+
+## Calendar readout for the current clock — a real date now, derived from the
+## real TDB instant rather than counting days from a made-up epoch.
 func date_string() -> String:
-	var days := int(t)
-	var date := Time.get_date_dict_from_unix_time(1924992000 + days * 86400)
+	var date := Time.get_date_dict_from_unix_time(int(J2000_UNIX + tdb()))
 	return "%04d-%02d-%02d" % [date.year, date.month, date.day]
+
+
+## Calendar year at a mission time, for axis labels.
+func year_at(t_days: float) -> int:
+	return Time.get_date_dict_from_unix_time(int(J2000_UNIX + tdb(t_days))).year

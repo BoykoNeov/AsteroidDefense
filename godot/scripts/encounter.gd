@@ -59,7 +59,14 @@ func _unhandled_input(event: InputEvent) -> void:
 
 # ------------------------------------------------------------- solutions ---
 
+## Solve the b-plane geometry for both tracks. Requires the mission layer: every
+## input here is threat-shaped, and while it is dormant `ast_el` is empty. main.gd
+## refuses to show this view in that state; the guard makes the dependency
+## explicit rather than incidental, since an empty dict would fail deep inside
+## close_approach with nothing pointing back here.
 func _build() -> void:
+	if not Sim.mission_online:
+		return
 	var ca_n: Dictionary = Sim.close_approach(Sim.ast_el)
 	var ca_d: Dictionary = Sim.close_approach(Sim.ast_defl_el)
 	var v: Vector3 = ca_n.v_kms

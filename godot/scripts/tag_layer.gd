@@ -23,6 +23,8 @@ func _process(_delta: float) -> void:
 func _draw() -> void:
 	if camera_rig == null or camera_rig.camera == null:
 		return
+	if not Sim.bodies_online:
+		return                            # nothing is drawn, so nothing to tag
 	var cam := camera_rig.camera
 	var t: float = Sim.t
 	var mid := Color(0.75, 0.75, 0.75)
@@ -35,6 +37,11 @@ func _draw() -> void:
 	# Moon tag only at close zoom — at system scale it overlaps EARTH's.
 	if camera_rig.distance < 10.0:
 		_tag_box(cam, Sim.moon_pos3d(t), "MOON", dim)
+
+	# Threat, comet, interceptor and impact-point tags are dormant until 3C-2b
+	# rebuilds them on the real core (see the Sim module note).
+	if not Sim.mission_online:
+		return
 
 	var burned: bool = Sim.burned()
 	if burned:

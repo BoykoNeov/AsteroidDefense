@@ -19,7 +19,7 @@ mod mission_core;
 
 use godot::prelude::*;
 
-use asteroid_core::scenario::ImpactorConfig;
+use asteroid_core::scenario::{ImpactorConfig, ScenarioError};
 use asteroid_core::{Epoch, OrbitalElements};
 use mission_core::MissionCore;
 
@@ -70,12 +70,56 @@ struct Mission {
 
 #[godot_api]
 impl Mission {
-    /// Load the DE440 kernels (env-var paths). Returns `true` on success; on
-    /// failure returns `false` and stores the reason in [`last_error`](Self::last_error)
-    /// (e.g. "environment variable ASTEROID_DE_KERNEL is not set"). Fast.
+    /// Load the DE440 kernels from the `ASTEROID_DE_KERNEL` /
+    /// `ASTEROID_PLANETARY_CONSTANTS` env vars. Returns `true` on success; on
+    /// failure returns `false` and stores the reason in
+    /// [`last_error`](Self::last_error). Fast.
+    ///
+    /// **A launched game usually has no such env vars** — they are a developer
+    /// shell convention, not persisted at user or machine level. The frontend
+    /// resolves paths itself and calls [`load_from`](Self::load_from); this
+    /// remains for headless tests and shell-launched runs.
     #[func]
     fn load(&mut self) -> bool {
-        match MissionCore::load() {
+        self.finish_load(MissionCore::load())
+    }
+
+    /// Load the DE kernels from two explicit filesystem paths (absolute, or
+    /// relative to the process CWD — *not* `res://` paths; globalize them first).
+    /// Returns `true` on success; `false` + [`last_error`](Self::last_error)
+    /// otherwise. This is the frontend's entry point.
+    #[func]
+    fn load_from(&mut self, bsp_path: GString, pca_path: GString) -> bool {
+        let r = MissionCore::load_from(&bsp_path.to_string(), &pca_path.to_string());
+        self.finish_load(r)
+    }
+
+    /// The kernel's usable coverage window as `[lo, hi]` seconds past J2000 — an
+    /// **empty** array if not loaded. Discovered from the mounted kernel, not
+    /// hardcoded (de440s ≈ 1850–2149, de441 ≈ 1550–2650), so the frontend clamps
+    /// its clock to real coverage. f64 rather than a `Vector2` because a TDB
+    /// second near 1e9 would lose ~64 s as f32.
+    ///
+    /// Clamping to this is not cosmetic: outside coverage every body lookup fails,
+    /// and a failed lookup returns `Vector3::ZERO` — which in this heliocentric
+    /// frame *is the Sun's position*. An unclamped clock does not blank the
+    /// display, it silently collapses every planet onto the Sun.
+    #[func]
+    fn usable_span_tdb(&self) -> PackedFloat64Array {
+        let mut arr = PackedFloat64Array::new();
+        if let Some((lo, hi)) = self.core.as_ref().map(|c| c.usable_span_tdb()) {
+            arr.push(lo);
+            arr.push(hi);
+        }
+        arr
+    }
+
+    /// Shared tail of [`load`](Self::load) / [`load_from`](Self::load_from): adopt
+    /// the core on success, or drop it and record why on failure. Kept in one
+    /// place so both entry points cannot drift on the error contract — a failed
+    /// load must always leave `core` empty, never a stale one from a prior load.
+    fn finish_load(&mut self, result: Result<MissionCore, ScenarioError>) -> bool {
+        match result {
             Ok(c) => {
                 self.core = Some(c);
                 self.error = GString::new();
@@ -167,6 +211,32 @@ impl Mission {
                     .ok()
             })
             .unwrap_or(-1.0)
+    }
+
+    /// The designer campaign's impact epoch, seconds past J2000 — **without**
+    /// building the scenario, and available before [`load`](Self::load).
+    ///
+    /// This is knowable cheaply because the impact epoch is a config *input*
+    /// (`ImpactorConfig::default()`), not something the build solves for: the
+    /// designer says when the rock arrives and the builder works backward to a
+    /// seed. So the frontend can anchor its clock on the real campaign timeline
+    /// without paying the multi-year back-propagation, and the real threat later
+    /// drops onto an already-correct timeline.
+    #[func]
+    fn default_impact_tdb_seconds(&self) -> f64 {
+        ImpactorConfig::default()
+            .impact_epoch
+            .tdb_seconds_past_j2000()
+    }
+
+    /// The designer campaign's start epoch (`impact − lead_years`), seconds past
+    /// J2000 — same cheap, pre-build contract as
+    /// [`default_impact_tdb_seconds`](Self::default_impact_tdb_seconds), and
+    /// derived through the same `ImpactorConfig::epoch0` the builder itself uses,
+    /// so the drawn campaign cannot drift from the built one.
+    #[func]
+    fn default_epoch0_tdb_seconds(&self) -> f64 {
+        ImpactorConfig::default().epoch0().tdb_seconds_past_j2000()
     }
 
     /// Heliocentric semi-major axis of the threat, m (0 if no scenario).

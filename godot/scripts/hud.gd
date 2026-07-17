@@ -67,6 +67,12 @@ func _draw() -> void:
 
 	# ---- target panel (left) ----
 	var py := h * 0.30
+	if not Sim.mission_online:
+		_offline_panels(Rect2(MARGIN, py, PANEL_W, 9.4 * lh + 14.0), lh, bright, mid, dim)
+		_console_block(w, h, lh, mid, bright, faint)
+		_help_line(w, h, dim)
+		_bezel(w, h, faint)
+		return
 	_panel(Rect2(MARGIN, py, PANEL_W, 9.4 * lh + 14.0), "TRK 001 - TARGET", bright)
 	var ty := py + lh + 8.0
 	var burned: bool = Sim.burned()
@@ -148,7 +154,41 @@ func _draw() -> void:
 		_text(Vector2(px + 12, iy), "%-8s %s" % [ln[0], ln[1]], mid)
 		iy += lh
 
-	# ---- console (bottom-left) ----
+	_console_block(w, h, lh, mid, bright, faint)
+	_help_line(w, h, dim)
+	_bezel(w, h, faint)
+
+
+# ------------------------------------------------------------------ panels ---
+
+## What the left/right panels say while the mission layer is dormant (3C-2a).
+##
+## Deliberately states the situation instead of showing zeroed-out target and
+## interceptor readouts: a panel reading "SMA 0.0000 AU / P(IMPACT) 0.000" looks
+## like a live instrument reporting a dead threat, which is a lie. Empty fields
+## are not neutral on an instrument panel — they read as measurements.
+func _offline_panels(rect: Rect2, lh: float, bright: Color, mid: Color, dim: Color) -> void:
+	_panel(rect, "TRK 001 - TARGET", bright)
+	var ty := rect.position.y + lh + 8.0
+	var x := rect.position.x + 12
+	for ln in [
+		"MISSION LAYER OFFLINE",
+		"",
+		"THREAT, PLANNER AND B-PLANE",
+		"ARE BEING REBUILT ON THE",
+		"VALIDATED f64 CORE.",
+		"",
+		"SOLAR FIELD IS LIVE:",
+		"REAL DE440 EPHEMERIS.",
+	]:
+		_text(Vector2(x, ty), ln, mid if ln.begins_with("REAL") or ln.begins_with("SOLAR") else dim)
+		ty += lh
+	if Sim.blink(1.4):
+		_text(Vector2(x, ty), "-- 3C-2b PENDING --", bright)
+
+
+func _console_block(w: float, h: float, lh: float, mid: Color, bright: Color,
+		faint: Color) -> void:
 	var rows: int = _console.size()
 	var cy := h - MARGIN - BOTTOM_RESERVE - (rows + 1) * lh
 	_text(Vector2(MARGIN, cy - 4), "-- EVENT LOG " + "-".repeat(38), faint)
@@ -163,12 +203,15 @@ func _draw() -> void:
 	if Sim.blink(2.5):
 		_text(Vector2(MARGIN + last_w + 4, cy + rows * lh), "_", bright)
 
-	# ---- help line (bottom-right, above the scrub strip) ----
+
+func _help_line(w: float, h: float, dim: Color) -> void:
 	_text_r(Vector2(w - MARGIN, h - MARGIN - BOTTOM_RESERVE),
 		"[SPC]HOLD [,/.]WARP [B]REV [J]JUMP [M]PLAN [F]FOCUS:%s [1]3D [2]MAP [3]ENC [T]PHOSPHOR" % camera_rig.focus_name,
 		dim, _fs - 2)
 
-	# ---- frame corners (screen bezel ticks) ----
+
+## Screen bezel ticks at the four frame corners.
+func _bezel(w: float, h: float, faint: Color) -> void:
 	var tick := 26.0
 	for corner in [Vector2(6, 6), Vector2(w - 6, 6), Vector2(6, h - 6), Vector2(w - 6, h - 6)]:
 		var sx: float = 1.0 if corner.x < w * 0.5 else -1.0

@@ -32,23 +32,32 @@ func _ready() -> void:
 	_build_starfield()
 	_build_grid()
 	_build_sun()
-	_build_planets()
+	if Sim.bodies_online:
+		_build_planets()
 	_build_belt()
-	_build_threat()
-	_build_comet()
-	_build_interceptor()
-	Sim.plan_changed.connect(_rebuild_plan_visuals)
-	_rebuild_plan_visuals()
+	# The threat, comet and interceptor are dormant until 3C-2b rebuilds them on
+	# the real core (see the Sim module note). Their nodes are never created, so
+	# nothing half-drawn or stale can leak into the scene.
+	if Sim.mission_online:
+		_build_threat()
+		_build_comet()
+		_build_interceptor()
+		Sim.plan_changed.connect(_rebuild_plan_visuals)
+		_rebuild_plan_visuals()
 
 
 func _process(_delta: float) -> void:
 	var t: float = Sim.t
-	for el in Sim.planets:
-		body_nodes[el.name].position = Sim.pos3d(el, t)
-	moon_node.position = Sim.moon_local(t)
+	if Sim.bodies_online:
+		for el in Sim.planets:
+			body_nodes[el.name].position = Sim.pos3d(el, t)
+		moon_node.position = Sim.moon_local(t)
 	# Rigid rotation at the belt's mean motion (~2.7 AU, T ~ 4.4 yr) —
 	# Kepler shear across the annulus is invisible at display speeds.
 	_belt.rotation.y = TAU * t / (4.4 * 365.25)
+
+	if not Sim.mission_online:
+		return
 
 	ast_nominal.position = Sim.pos3d(Sim.ast_el, t)
 	ast_nominal.rotate_y(0.01)

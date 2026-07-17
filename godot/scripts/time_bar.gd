@@ -62,21 +62,27 @@ func _draw() -> void:
 	# Baseline track.
 	draw_line(Vector2(x0, TRACK_Y), Vector2(x1, TRACK_Y), dim, 1.5)
 
-	# Year ticks (epoch 2031). A tick every ~decade keeps the long span readable.
-	var step_days := 3652.5             # 10 years
-	var d: float = ceil(Sim.T_MIN / step_days) * step_days
+	# Year ticks, on round calendar years read from the real clock. The span is
+	# whatever the mounted kernel covers (~300 yr for de440s, ~1100 for de441),
+	# so the step adapts — a fixed decade tick would print 30 labels into 110 of
+	# these across de441 and render the axis unreadable.
+	var step_years := _tick_step_years(span / 365.25)
+	var step_days := step_years * 365.25
+	var first_year := int(ceil(float(Sim.year_at(Sim.T_MIN)) / step_years) * step_years)
+	var d: float = Sim.T_MIN + (first_year - Sim.year_at(Sim.T_MIN)) * 365.25
 	while d <= Sim.T_MAX:
 		var tx: float = x0 + (d - Sim.T_MIN) / span * track_w
 		draw_line(Vector2(tx, TRACK_Y - 4.0), Vector2(tx, TRACK_Y + 4.0), faint, 1.0)
-		var yr := 2031 + int(round(d / 365.25))
-		_text_c(Vector2(tx, TRACK_Y + 18.0), str(yr), faint)
+		_text_c(Vector2(tx, TRACK_Y + 18.0), str(Sim.year_at(d)), faint)
 		d += step_days
 
-	# Mission-event markers (launch / intercept / impact) as labelled pips.
-	_marker(Sim.T_IMPACT, x0, track_w, span, "IMP", mid)
-	if Sim.committed:
-		_marker(Sim.T_LAUNCH, x0, track_w, span, "LCH", dim)
-		_marker(Sim.T_INTERCEPT, x0, track_w, span, "INT", dim)
+	# Mission-event pips are dormant with the mission layer (see the Sim module
+	# note) — an "IMP" pip with no threat on screen would be a label for nothing.
+	if Sim.mission_online:
+		_marker(Sim.T_IMPACT, x0, track_w, span, "IMP", mid)
+		if Sim.committed:
+			_marker(Sim.T_LAUNCH, x0, track_w, span, "LCH", dim)
+			_marker(Sim.T_INTERCEPT, x0, track_w, span, "INT", dim)
 
 	# Playhead at the current clock fraction.
 	var px: float = x0 + Sim.clock_frac() * track_w
@@ -92,6 +98,16 @@ func _draw() -> void:
 
 
 # ------------------------------------------------------------------ helpers ---
+
+## A round year interval giving roughly 8-14 labels across `span_years`, from a
+## 1-2-5 ladder so the labels land on years a human reads as round (2050, not
+## 2047). The kernel decides the span, so this cannot be a constant.
+func _tick_step_years(span_years: float) -> int:
+	for step in [1, 2, 5, 10, 20, 25, 50, 100, 200, 500]:
+		if span_years / float(step) <= 14.0:
+			return step
+	return 1000
+
 
 func _marker(t_days: float, x0: float, track_w: float, span: float,
 		tag: String, col: Color) -> void:

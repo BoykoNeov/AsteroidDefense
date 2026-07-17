@@ -1,17 +1,20 @@
 extends SceneTree
 ## Load gate + FFI checks for the Rust GDExtension binding:
 ##   godot --headless --path godot --script res://tests/test_gdext.gd
-## (set ASTEROID_DE_KERNEL / ASTEROID_PLANETARY_CONSTANTS for the Mission part).
 ##
 ## Runs in GAME context (not the editor tool context, where a non-tool
 ## GDExtension class instantiates as a placeholder and calls return null).
 ##
 ## Commit 1 — AsteroidCore.core_version() round-trips a string from Rust.
-## Commit 2 — Mission.load() + body_position_ecl_au(): real DE440 positions
+## Commit 2 — Mission.load_from() + body_position_ecl_au(): real DE440 positions
 ## cross the FFI as ecliptic-AU Vector3s (fast path; no scenario build here —
 ## the expensive required_dv-vs-curve.json check runs release-side in
-## `cargo test -p asteroid_gdext --release`). Skips the Mission part green when
-## kernels are absent, like the kernel-gated Rust/validation tests.
+## `cargo test -p asteroid_gdext --release`).
+## 3C-2a — kernels are found through Kernels.resolve(), the same resolver the
+## game uses, rather than through the env vars only a developer shell has. That
+## is deliberate: this gate previously passed (by skipping) on a machine where
+## the launched game could not find a kernel at all, which is precisely the break
+## it should have caught. Skips green only when no kernel exists anywhere.
 
 var fails := 0
 
@@ -36,13 +39,33 @@ func _init() -> void:
 	# --- Commit 2: the Mission scenario surface ---------------------------
 	var m = Mission.new()
 	print("build_profile = %s" % m.build_profile())
-	if not m.load():
-		print("SKIP  Mission.load() failed (no kernels?): %s" % m.last_error())
+
+	var k := Kernels.resolve()
+	if not k.ok:
+		print("SKIP  no kernels on this machine:\n%s" % k.error)
 		print("gdext gate: %s" % ("PASS" if fails == 0 else "FAIL (%d)" % fails))
 		quit(fails)
 		return
+	print("kernels via %s" % k.source)
+	_check(m.load_from(k.bsp, k.pca),
+		"Mission.load_from() succeeded (%s)" % m.last_error())
+	_check(m.is_loaded(), "ephemeris ready")
 
-	_check(m.is_loaded(), "Mission.load() succeeded, ephemeris ready")
+	# The clock clamps to this; an epoch outside it fails every body lookup, and
+	# a failed lookup returns ZERO — which is the SUN's position in this
+	# heliocentric frame. So an unclamped clock does not blank the display, it
+	# silently piles every planet onto the Sun. Discovered from the mounted
+	# kernel (de440s ~1850-2149, de441 ~1550-2650), never hardcoded.
+	var span: PackedFloat64Array = m.usable_span_tdb()
+	_check(span.size() == 2 and span[0] < 0.0 and span[1] > 0.0,
+		"usable_span_tdb() brackets J2000")
+	if span.size() == 2:
+		var yr := 365.25 * 86400.0
+		print("usable span = J2000%+.1f yr .. J2000%+.1f yr (%.0f yr wide)" %
+			[span[0] / yr, span[1] / yr, (span[1] - span[0]) / yr])
+		_check(m.body_position_ecl_au(399, span[0]) != Vector3.ZERO
+			and m.body_position_ecl_au(399, span[1]) != Vector3.ZERO,
+			"Earth resolves at BOTH span edges (not just mid-span)")
 
 	# Body positions come across as ecliptic-AU Vector3s. At J2000 (t=0), Earth
 	# is ~0.983 AU from the Sun and (crucially) essentially in the ecliptic plane

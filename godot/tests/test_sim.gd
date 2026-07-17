@@ -3,6 +3,19 @@ extends SceneTree
 ##   godot --headless --path godot --script res://tests/test_sim.gd
 ## Exercises elements_from_rv round-trip, impulse -> emergent miss,
 ## dv linearity, lead-time growth, and the capture-radius verdict.
+##
+## This covers the PLACEHOLDER Kepler mission layer, which is dormant in the
+## running app as of 3C-2a and which 3C-2b replaces with the real core (the
+## threat from asteroid_position_ecl_au, the b-plane from Rust). The code is kept
+## meanwhile as the reference for what 3C-2b must reproduce, so its test is kept
+## running rather than skipped — a skipped test reporting green would be worse
+## than none. Both go when the real threat lands.
+##
+## It supplies its own Kepler Earth: Sim.planets are real ephemeris bodies now,
+## and this math is deliberately f64 (pos_ecl64 -> geo_km -> close_approach),
+## which is precisely why real Earth cannot feed it — real positions cross the
+## FFI as f32 (~18 km at 1 AU). Wiring them in here would put an f32 floor under
+## the very capture radius this asserts on.
 
 var fails := 0
 
@@ -15,9 +28,20 @@ func _check(ok: bool, msg: String) -> void:
 		fails += 1
 
 
+## The analytic Earth this placeholder math was written against (the mean
+## elements Sim._build_planets used before the planets became real lookups).
+func _kepler_earth(sim: Variant) -> Dictionary:
+	var el: Dictionary = sim._elements(1.0000, 0.0167, deg_to_rad(0.0),
+		deg_to_rad(0.0), deg_to_rad(102.937 - 0.0), deg_to_rad(100.464 - 102.937))
+	el.name = "EARTH"
+	el.vis_r = 0.080
+	el.kind = "planet"
+	return el
+
+
 func _init() -> void:
 	var sim = load("res://scripts/sim.gd").new()
-	sim._build_planets()
+	sim.earth_el = _kepler_earth(sim)
 	sim._build_threat()
 
 	# 1. Designer threat actually hits: nominal CA inside the capture circle.
@@ -68,9 +92,13 @@ func _init() -> void:
 	_check(sim.deflect_ok and sim.miss_ld > 1.0, "100 m/s at 600 d lead clears Earth")
 
 	# 6. Launch-window cap: lead is clamped so launch stays in the future.
-	sim.t = 1100.0
+	#    Anchored to T_IMPACT rather than an absolute day, because the clock is
+	#    now the real campaign (impact ~4383 d after epoch0, not 1200) — a fixed
+	#    "t = 1100" would no longer be late enough to exercise the clamp at all,
+	#    and would pass without testing anything.
+	sim.t = sim.T_IMPACT - 100.0
 	sim.set_plan(600.0, 10.0, true)
-	print("t=1100: clamped lead %.0f d, launch at %.0f (t+%.0f)"
+	print("t=T_IMPACT-100: clamped lead %.0f d, launch at %.0f (t+%.0f)"
 		% [sim.plan_lead_d, sim.T_LAUNCH, sim.T_LAUNCH - sim.t])
 	_check(sim.T_LAUNCH >= sim.t + sim.PAD_D - 0.5, "late plan keeps launch >= now + pad")
 

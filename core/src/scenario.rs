@@ -99,6 +99,21 @@ pub struct ImpactorConfig {
     pub back_rtol: f64,
 }
 
+impl ImpactorConfig {
+    /// The campaign-start epoch this config implies: `impact_epoch − lead_years`.
+    ///
+    /// Both inputs are *given*, so this is knowable without
+    /// [`RealFieldScenario::build`] — worth having separately, because building
+    /// costs a multi-year back-propagation while a caller that only needs to
+    /// place the campaign on a timeline (the Godot frontend's clock) needs no
+    /// trajectory at all. `build_with` calls this too, so the two can never
+    /// disagree about when the campaign starts.
+    pub fn epoch0(&self) -> Epoch {
+        self.impact_epoch
+            .shifted_by_seconds(-self.lead_years * SECONDS_PER_YEAR)
+    }
+}
+
 impl Default for ImpactorConfig {
     fn default() -> Self {
         Self {
@@ -307,7 +322,7 @@ impl RealFieldScenario {
 
         // --- Back-propagate to the campaign start with a tight tolerance ------
         let lead_seconds = cfg.lead_years * SECONDS_PER_YEAR;
-        let epoch0 = cfg.impact_epoch.shifted_by_seconds(-lead_seconds);
+        let epoch0 = cfg.epoch0();
         let back = Dop853::new().with_rtol(cfg.back_rtol);
         let seed = back
             .step(&force, cfg.impact_epoch, &impact_state, -lead_seconds)

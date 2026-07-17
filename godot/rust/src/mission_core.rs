@@ -5,9 +5,16 @@
 //! epoch t* (for the solar-system display) and *how much along-track Δv clears
 //! the threat at this lead* (the headline number + planner). It deals only in
 //! plain Rust / nalgebra types, so it is unit-testable with `cargo test` — no
-//! running Godot — and it is the `Send` payload the 2C worker thread will build
-//! off Godot's main thread. The thin [`crate::Mission`] class marshals these to
-//! Godot types and never adds logic of its own.
+//! running Godot. The thin [`crate::Mission`] class marshals these to Godot types
+//! and never adds logic of its own.
+//!
+//! **Not `Send` today** (measured, not assumed): `RealFieldScenario` holds a
+//! `PointMassGravity` whose `Vec<Perturber>` owns `Box<dyn PerturberEphemeris>`,
+//! and that trait declares no `Send` bound — so a `MissionCore` cannot cross to a
+//! worker thread as written, and the expensive `build_scenario` must run wherever
+//! it is called. Moving it off Godot's main thread means adding `: Send` to the
+//! core `PerturberEphemeris` trait first; do not design threading around the
+//! assumption that this already works.
 //!
 //! **Two-phase, on purpose.** [`load`](MissionCore::load) reads the kernels
 //! (~ms) and immediately enables body-position queries; [`build_scenario`](
@@ -68,6 +75,59 @@ fn ecliptic_to_icrf(v: Vector3<f64>) -> Vector3<f64> {
     Vector3::new(v.x, c * v.y - s * v.z, s * v.y + c * v.z)
 }
 
+/// Discover the loaded kernel's usable coverage window by bisecting on whether
+/// Earth resolves — `(lo, hi)` seconds past J2000, inset by [`SPAN_MARGIN_S`].
+///
+/// Bisection rather than a hardcoded date pair because the mounted kernel decides
+/// the answer: de440s covers ~1850–2149, de441 ~1550–2650, and hardcoding the
+/// short span would silently cap a user who mounted the long one. Bisection
+/// rather than reading the SPK segment headers because coverage is only *useful*
+/// where a full geocenter lookup succeeds (SSB→EMB→Earth — all three segments),
+/// which is exactly what this probes; a segment table can advertise a span the
+/// dereferencing chain cannot actually serve.
+///
+/// ~40 lookups at ~µs each, once per load. Errors only if the kernel serves no
+/// epoch at all (a wrong or corrupt file), which is worth failing loudly on.
+fn discover_span(eph: &Ephemeris) -> Result<(f64, f64), ScenarioError> {
+    let resolves = |t: f64| -> bool {
+        eph.position_km(
+            Frame::from_ephem_j2000(399),
+            SUN_J2000,
+            Epoch::from_tdb_seconds_past_j2000(t).as_hifitime(),
+        )
+        .is_ok()
+    };
+
+    // A kernel that serves nothing anywhere is a load failure, not an empty span.
+    if !resolves(0.0) {
+        return Err(ScenarioError::Ephemeris(
+            "kernel resolves no Earth position at J2000 — wrong or corrupt file?".into(),
+        ));
+    }
+
+    // Walk each edge in from a bracket known to be outside coverage. J2000 is
+    // inside (checked above), so each bisection is well-posed.
+    let mut lo = (PROBE_LO_S, 0.0); // (fails, works)
+    while lo.1 - lo.0 > SPAN_MARGIN_S {
+        let mid = 0.5 * (lo.0 + lo.1);
+        if resolves(mid) {
+            lo.1 = mid
+        } else {
+            lo.0 = mid
+        }
+    }
+    let mut hi = (0.0, PROBE_HI_S); // (works, fails)
+    while hi.1 - hi.0 > SPAN_MARGIN_S {
+        let mid = 0.5 * (hi.0 + hi.1);
+        if resolves(mid) {
+            hi.0 = mid
+        } else {
+            hi.1 = mid
+        }
+    }
+    Ok((lo.1 + SPAN_MARGIN_S, hi.0 - SPAN_MARGIN_S))
+}
+
 /// One body in the orrery catalog: a pre-integrated, dense-output trajectory the
 /// display scrubs over. The `Clock` is built **once** (at [`MissionCore::
 /// add_synthetic_body`]) in the same validated Tier-1 field as the threat, so a
@@ -99,10 +159,28 @@ struct PlanState {
     perigee: Option<f64>,
 }
 
+/// A safety margin pulled in from each discovered coverage edge, seconds (1 day).
+/// The bisection lands within a day of the true edge; insetting by that much
+/// guarantees the reported span is *inside* coverage rather than straddling it,
+/// so a clock clamped to this span never asks for an epoch the kernel lacks.
+const SPAN_MARGIN_S: f64 = 86_400.0;
+
+/// Bisection bounds for span discovery, seconds past J2000 — years ~1000 and
+/// ~3000, comfortably outside any DE kernel's coverage (de440s ≈ 1850–2149;
+/// de441 ≈ 1550–2650), so the true edges are always bracketed.
+const PROBE_LO_S: f64 = -31_557_600_000.0;
+const PROBE_HI_S: f64 = 31_557_600_000.0;
+
 /// The loaded mission: always an ephemeris, optionally a built scenario, and —
 /// once built — the cached nominal trajectory and (optionally) a deflection plan.
 pub struct MissionCore {
     ephemeris: Arc<Ephemeris>,
+    /// The kernel's usable coverage window, `(lo, hi)` seconds past J2000,
+    /// discovered by bisection at load (see [`discover_span`]) rather than
+    /// hardcoded — the shipped kernel may be de440s (~1850–2149) or the long-span
+    /// de441 (~1550–2650), and the frontend clamps its clock to whatever is
+    /// actually mounted.
+    span: (f64, f64),
     scenario: Option<RealFieldScenario>,
     /// The nominal (un-deflected) trajectory, cloned **once** at build time so
     /// per-frame position/track reads are cheap `Clock` queries. Rebuilding a
@@ -121,26 +199,50 @@ pub struct MissionCore {
 
 impl MissionCore {
     /// Read the DE440 kernels named by `ASTEROID_DE_KERNEL` (the `.bsp`) and
-    /// `ASTEROID_PLANETARY_CONSTANTS` (the `.pca`) and hold them. Fast (~ms):
-    /// enables [`body_position_ecl_au`](Self::body_position_ecl_au) immediately;
-    /// the scenario is built separately. The env-var convention matches the core
-    /// tests and the `curve`/viewer binaries.
+    /// `ASTEROID_PLANETARY_CONSTANTS` (the `.pca`) and hold them. The env-var
+    /// convention matches the core tests and the `curve`/viewer binaries — all of
+    /// which run from a developer shell.
+    ///
+    /// **A launched Godot game generally has neither variable set** (they are not
+    /// persisted at user or machine level), so the frontend resolves paths itself
+    /// and calls [`load_from`](Self::load_from). This stays as the shell/test
+    /// entry point.
     pub fn load() -> Result<Self, ScenarioError> {
         let bsp = std::env::var("ASTEROID_DE_KERNEL")
             .map_err(|_| ScenarioError::MissingKernelEnv("ASTEROID_DE_KERNEL"))?;
         let pca = std::env::var("ASTEROID_PLANETARY_CONSTANTS")
             .map_err(|_| ScenarioError::MissingKernelEnv("ASTEROID_PLANETARY_CONSTANTS"))?;
-        let eph = Ephemeris::load(&bsp)
+        Self::load_from(&bsp, &pca)
+    }
+
+    /// Read the DE kernels at two explicit paths — the entry point for any caller
+    /// that resolves paths itself rather than through the environment (the Godot
+    /// frontend, which cannot rely on env vars reaching a double-clicked game).
+    ///
+    /// Fast (~ms plus a short span bisection): enables
+    /// [`body_position_ecl_au`](Self::body_position_ecl_au) immediately; the
+    /// scenario is built separately.
+    pub fn load_from(bsp: &str, pca: &str) -> Result<Self, ScenarioError> {
+        let eph = Ephemeris::load(bsp)
             .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?
-            .with_constants(&pca)
+            .with_constants(pca)
             .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
+        let span = discover_span(&eph)?;
         Ok(Self {
             ephemeris: Arc::new(eph),
+            span,
             scenario: None,
             nominal_clock: None,
             plan: None,
             bodies: Vec::new(),
         })
+    }
+
+    /// The loaded kernel's usable coverage window, `(lo, hi)` seconds past J2000.
+    /// The frontend clamps its clock to this — outside it every body lookup fails,
+    /// and a failed lookup is indistinguishable from "at the Sun" downstream.
+    pub fn usable_span_tdb(&self) -> (f64, f64) {
+        self.span
     }
 
     /// Build the designer impactor + campaign over the already-loaded ephemeris
@@ -528,6 +630,104 @@ mod tests {
         assert!((pole.x).abs() < 1e-12);
         assert!((pole.y - eps.sin()).abs() < 1e-12);
         assert!((pole.z - eps.cos()).abs() < 1e-12);
+    }
+
+    /// Kernel-gated. Every NAIF id the orrery display draws must resolve at
+    /// **both edges** of the usable span, not just mid-span — a failed lookup
+    /// returns `None`, which the binding maps to `Vector3::ZERO`, and ZERO is the
+    /// *Sun's* position in this heliocentric frame. So a body that falls out of
+    /// coverage does not render as visibly broken; it renders silently sitting on
+    /// the Sun. This test is what stands between that and a shipped display.
+    ///
+    /// Two id choices are pinned here because the obvious guess is wrong:
+    /// **Earth is 399, never 3** (3 is the Earth–Moon barycenter — the ~4671 km
+    /// footgun of HANDOFF §5), and **Mars is 4, not 499** (de440s carries no Mars
+    /// *geocenter* segment at all; the barycenter is all there is, and it sits
+    /// within a few km of the planet, so it is harmless here — unlike Earth's).
+    #[test]
+    fn display_naif_ids_resolve_across_the_whole_usable_span() {
+        if !have_kernels() {
+            eprintln!("skipping display_naif_ids_*: no DE kernel");
+            return;
+        }
+        let mc = MissionCore::load().expect("load kernels");
+        let (span_lo, span_hi) = mc.usable_span_tdb();
+
+        // The exact id list the orrery draws, with the heliocentric distance band
+        // each must land in (AU) anywhere in the span. Bands are wide enough for
+        // the real eccentric excursion, tight enough to catch a wrong body.
+        let bodies: [(i32, &str, f64, f64); 8] = [
+            (199, "MERCURY", 0.30, 0.48),
+            (299, "VENUS", 0.71, 0.74),
+            (399, "EARTH", 0.98, 1.02),
+            (4, "MARS", 1.38, 1.68),
+            (5, "JUPITER", 4.94, 5.46),
+            (6, "SATURN", 8.99, 10.10),
+            (7, "URANUS", 18.28, 20.10),
+            (8, "NEPTUNE", 29.79, 30.33),
+        ];
+
+        for t in [span_lo, 0.0, span_hi] {
+            for (id, name, lo, hi) in bodies {
+                let p = mc.body_position_ecl_au(id, t).unwrap_or_else(|| {
+                    panic!(
+                        "{name} (NAIF {id}) does not resolve at TDB {t:.0} — it would render \
+                         silently at the Sun, not visibly missing"
+                    )
+                });
+                assert!(
+                    (lo..=hi).contains(&p.norm()),
+                    "{name} (NAIF {id}) at TDB {t:.0}: {:.3} AU outside [{lo}, {hi}]",
+                    p.norm()
+                );
+                assert_ne!(p, Vector3::zeros(), "{name} returned the Sun's position");
+            }
+        }
+
+        // Mars has no geocenter segment in de440s — pinned so a future "tidy-up"
+        // to 499 (matching Earth's 399) fails loudly here instead of silently at
+        // the Sun. If a mounted kernel ever gains it, prefer it and update this.
+        assert!(
+            mc.body_position_ecl_au(499, 0.0).is_none(),
+            "this kernel resolves Mars 499 — prefer the geocenter over the \
+             barycenter in the display and update this test"
+        );
+    }
+
+    /// Kernel-gated. The discovered span must be genuinely usable at both edges
+    /// and genuinely exhausted just outside them — the property the frontend's
+    /// clock clamp relies on. Asserts the *shape* (a sane multi-century window
+    /// bracketing J2000), not hardcoded dates, since the mounted kernel decides
+    /// them: de440s ≈ 1850–2149, de441 ≈ 1550–2650.
+    #[test]
+    fn discovered_span_is_usable_inside_and_exhausted_outside() {
+        if !have_kernels() {
+            eprintln!("skipping discovered_span_*: no DE kernel");
+            return;
+        }
+        let mc = MissionCore::load().expect("load kernels");
+        let (lo, hi) = mc.usable_span_tdb();
+        let year = 365.25 * 86_400.0;
+
+        assert!(lo < 0.0 && hi > 0.0, "span should bracket J2000");
+        assert!(
+            (hi - lo) / year > 100.0,
+            "span {:.0} yr implausibly short for a DE kernel",
+            (hi - lo) / year
+        );
+        // Inside at both edges…
+        assert!(mc.body_position_ecl_au(399, lo).is_some(), "span lo unusable");
+        assert!(mc.body_position_ecl_au(399, hi).is_some(), "span hi unusable");
+        // …and exhausted a year out, so the span is the real edge, not a guess
+        // that happens to be conservative by decades.
+        assert!(
+            mc.body_position_ecl_au(399, lo - year).is_none(),
+            "a year below the span still resolves — discovery under-reports coverage"
+        );
+        assert!(
+            mc.body_position_ecl_au(399, hi + year).is_none(),
+            "a year above the span still resolves — discovery under-reports coverage"
+        );
     }
 
     /// Kernel-gated (release-run for speed). Loads the real DE440 kernels and

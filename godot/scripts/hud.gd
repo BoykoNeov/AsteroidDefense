@@ -179,20 +179,32 @@ func _offline_panels(rect: Rect2, lh: float, bright: Color, mid: Color, dim: Col
 	_panel(rect, "TRK 001 - TARGET", bright)
 	var ty := rect.position.y + lh + 8.0
 	var x := rect.position.x + 12
-	for ln in [
+	var lines := [
 		"MISSION LAYER OFFLINE",
 		"",
 		"THREAT, PLANNER AND B-PLANE",
 		"ARE BEING REBUILT ON THE",
 		"VALIDATED f64 CORE.",
 		"",
-		"SOLAR FIELD IS LIVE:",
-		"REAL DE440 EPHEMERIS.",
-	]:
-		_text(Vector2(x, ty), ln, mid if ln.begins_with("REAL") or ln.begins_with("SOLAR") else dim)
+	]
+	# The field is a separate subsystem from the mission layer and fails
+	# separately. This panel used to state "SOLAR FIELD IS LIVE" unconditionally,
+	# which was flatly false on a machine with no kernel — the same lie as the
+	# threat countdown, one panel over. Report what is actually up.
+	if Sim.bodies_online:
+		lines.append("SOLAR FIELD IS LIVE:")
+		lines.append("REAL DE440 EPHEMERIS.")
+	else:
+		lines.append("SOLAR FIELD OFFLINE:")
+		lines.append("NO EPHEMERIS KERNEL FOUND.")
+		lines.append("SEE BOOT LOG FOR PATHS.")
+	for ln in lines:
+		_text(Vector2(x, ty), ln, mid if ln.begins_with("REAL") or ln.begins_with("SOLAR")
+			or ln.begins_with("NO ") else dim)
 		ty += lh
 	if Sim.blink(1.4):
-		_text(Vector2(x, ty), "-- 3C-2b PENDING --", bright)
+		_text(Vector2(x, ty), "-- 3C-2b PENDING --" if Sim.bodies_online
+			else "-- DEGRADED --", bright)
 
 
 func _console_block(w: float, h: float, lh: float, mid: Color, bright: Color,

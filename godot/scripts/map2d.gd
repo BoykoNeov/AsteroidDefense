@@ -58,6 +58,15 @@ func _draw() -> void:
 		draw_line(center, center + Vector2(cos(a0), sin(a0)) * 1.85 * s,
 			Color(1, 1, 1, alpha), 2.0)
 
+	# Without a field there are no positions to plot, and drawing anyway would be
+	# the worst version of it: pos_ecl returns ZERO, _to_screen(ZERO) is the plot
+	# centre, so every planet marker and label would stack neatly on the Sun and
+	# read as a real (catastrophic) plot rather than as missing data.
+	if not Sim.bodies_online:
+		draw_string(_font, center + Vector2(-96, 40), "NO EPHEMERIS - FIELD OFFLINE",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs, mid)
+		return
+
 	# Orbit traces.
 	for el in Sim.planets:
 		if el.a > 2.0:

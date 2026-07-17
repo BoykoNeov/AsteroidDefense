@@ -225,6 +225,26 @@ In pure two-body, **energy, angular momentum, and the Laplace–Runge–Lenz vec
 
 **Pin μ, AU, frame, and time scale identically on both sides.** Most "my Rust is wrong" panics are actually one side using a Wikipedia μ and the other using JPL's. Pull the same GM and DE values through ANISE on the Rust side — and configure the Python oracle from the same constants — to kill this entire class of phantom failure.
 
+### The gotcha that makes the whole suite lie (read this before trusting a green run)
+
+**`cargo test` without `ASTEROID_DE_KERNEL` + `ASTEROID_PLANETARY_CONSTANTS` set silently skips every kernel-gated test and reports them as passed.** Roughly half this project's physics tests are kernel-gated. They open with `if !have_kernels() { eprintln!("skipping…"); return; }` — deliberate, so a kernel-less CI stays green (kernels are 32 MB–646 MB and are not in the repo). The trap is not the skip; it is that **the skip is invisible**:
+
+- The `eprintln!` notice is **swallowed by cargo's output capture**, which only releases stderr for *failing* tests. A passing skip prints nothing. `--nocapture` shows it; nobody runs `--nocapture` on a green suite.
+- What you see is `test result: ok. 13 passed; 0 failed`. That is indistinguishable from a real pass.
+- **The runtime is the only tell.** Kernel-less: `13 passed … finished in 0.02s`. Kernels mounted: `13 passed … finished in 69.01s`. Real DE440 integration cannot happen in 20 ms. If a physics suite finishes in under a second, **it did nothing**.
+
+This bit for real on 2026-07-17 and cost the session's whole verification story twice over: a `deflected_b_point_km` fix was "confirmed" by a test that never executed, and `frame_from_arcs_matches_frame_from` — the *only* proof that splitting `frame_from` didn't change its output — had never once run. Both were genuinely green when re-run properly, but that was luck, not verification. Note the shape of the failure: the machine **had** the kernels, sitting in the conventional directory. Only the env vars were unset.
+
+Before believing a green Rust run:
+
+```sh
+export ASTEROID_DE_KERNEL=<...>/kernels/de440s.bsp
+export ASTEROID_PLANETARY_CONSTANTS=<...>/kernels/pck11.pca
+cargo test --release          # then CHECK THE RUNTIME, not just the count
+```
+
+The GDScript suites do **not** share this hazard: `Kernels.resolve()` (`godot/scripts/kernels.gd`) falls back from env → `user://kernels.cfg` → conventional dirs, so `test_orrery` runs real physics either way. That asymmetry is itself the hint at the fix — the Rust test harness has no such resolver, and giving it one (env, else the conventional dir) would close the "I have the kernels but didn't point at them" hole while preserving skip-green-offline for CI that genuinely lacks them. **Open, deliberately not done** as part of the 3C-2c batch.
+
 ---
 
 ## 7. Known hard problems (design for these from day one)

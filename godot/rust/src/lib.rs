@@ -17,11 +17,13 @@
 
 mod mission_core;
 
+use std::sync::mpsc;
+
 use godot::prelude::*;
 
 use asteroid_core::scenario::{ImpactorConfig, ScenarioError};
 use asteroid_core::{Epoch, OrbitalElements};
-use mission_core::MissionCore;
+use mission_core::{BuiltScenario, MissionCore};
 
 /// Metres per astronomical unit — synthetic-body semi-major axes reach the SI
 /// core as AU from GDScript.
@@ -64,6 +66,10 @@ impl AsteroidCore {
 #[class(base = RefCounted, init)]
 struct Mission {
     core: Option<MissionCore>,
+    /// The in-flight background scenario build, if any — see
+    /// [`begin_build_scenario`](Mission::begin_build_scenario). `Some` exactly while
+    /// a worker is running, so it doubles as the "is building" flag.
+    build: Option<mpsc::Receiver<Result<BuiltScenario, String>>>,
     error: GString,
     base: Base<RefCounted>,
 }
@@ -133,25 +139,126 @@ impl Mission {
         }
     }
 
-    /// Build the designer impactor + campaign (the expensive multi-year
-    /// back-propagation). Must be called after [`load`](Self::load). Returns
-    /// `true` on success; `false` + [`last_error`](Self::last_error) otherwise.
+    /// Start building the designer impactor + campaign **on a worker thread**, and
+    /// return immediately. Returns `true` if a build was started; `false` +
+    /// [`last_error`](Self::last_error) if one is already in flight or the kernels
+    /// are not loaded. Drive it with [`poll_build`](Self::poll_build).
+    ///
+    /// There is deliberately **no blocking form of this**. The build is ~10 s of
+    /// integration, so calling it inline would freeze Godot's main thread — and the
+    /// display it would freeze is a *working* one, since the orrery has been drawing
+    /// real planets from the fast `load()` since 3C-2a. A synchronous entry point
+    /// here would exist only to be misused.
+    ///
+    /// The worker gets a clone of the `Arc<Ephemeris>`, not this object: the core
+    /// stays here answering `body_position_ecl_au` every frame while the scenario
+    /// builds behind it. Nothing about `Mission` (a `RefCounted`) crosses the
+    /// thread boundary — only a plain `Arc` out and a `BuiltScenario` back.
     #[func]
-    fn build_scenario(&mut self) -> bool {
-        let Some(core) = self.core.as_mut() else {
-            self.error = "load() must succeed before build_scenario()".into();
+    fn begin_build_scenario(&mut self) -> bool {
+        if self.build.is_some() {
+            self.error = "a scenario build is already in flight".into();
+            return false;
+        }
+        let Some(core) = self.core.as_ref() else {
+            self.error = "load() must succeed before begin_build_scenario()".into();
             return false;
         };
-        match core.build_scenario(&ImpactorConfig::default()) {
-            Ok(()) => {
-                self.error = GString::new();
-                true
+        let eph = core.ephemeris_arc();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            // The error is flattened to a String on this side of the channel: only
+            // the message ever reaches the HUD, and a plain String is unambiguously
+            // safe to send.
+            let built =
+                BuiltScenario::build(eph, &ImpactorConfig::default()).map_err(|e| e.to_string());
+            // A closed channel means the game quit mid-build. Dropping the result is
+            // the right response; `send`'s Err must not become a panic on a detached
+            // thread.
+            let _ = tx.send(built);
+        });
+        self.build = Some(rx);
+        self.error = GString::new();
+        true
+    }
+
+    /// Whether a background scenario build is currently in flight.
+    #[func]
+    fn is_building(&self) -> bool {
+        self.build.is_some()
+    }
+
+    /// Pump the background build: install the scenario if it has landed. Returns
+    /// `true` while the build is **still running**, `false` once it is finished —
+    /// at which point [`is_ready`](Self::is_ready) says whether it succeeded and
+    /// [`last_error`](Self::last_error) says why if it did not.
+    ///
+    /// Non-blocking, so it is safe to call every frame. Cheap: a `try_recv` on an
+    /// empty channel.
+    #[func]
+    fn poll_build(&mut self) -> bool {
+        let Some(rx) = self.build.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Ok(Ok(built)) => {
+                self.build = None;
+                match self.core.as_mut() {
+                    Some(core) => {
+                        core.install(built);
+                        self.error = GString::new();
+                    }
+                    // The kernels were dropped (a failed re-load) while the build
+                    // ran, so there is nothing to install it into. Say so rather
+                    // than discard it silently and read as "still not ready".
+                    None => {
+                        self.error =
+                            "the scenario finished building but the kernels are no longer loaded"
+                                .into()
+                    }
+                }
+                false
             }
-            Err(e) => {
-                self.error = e.to_string().as_str().into();
+            Ok(Err(message)) => {
+                self.build = None;
+                self.error = message.as_str().into();
+                false
+            }
+            // The worker panicked and took the sender with it. A build that dies
+            // without a word must not leave the frontend polling forever.
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.build = None;
+                self.error = "the scenario build thread died without reporting".into();
                 false
             }
         }
+    }
+
+    /// The nominal encounter's focused capture radius, m (`-1.0` if no scenario) —
+    /// the radius of Earth's effective collision disc in the b-plane.
+    ///
+    /// The honest bar for a deflection verdict: a plan is safe when the deflected
+    /// perigee clears **this**, not Earth's solid radius (focusing pulls a track
+    /// that would geometrically miss onto the surface) and not only when
+    /// [`is_clean_miss`](Self::is_clean_miss), which is a much wider bar a safe
+    /// plan need not reach.
+    #[func]
+    fn capture_radius_m(&self) -> f64 {
+        self.core
+            .as_ref()
+            .and_then(|c| c.capture_radius_m())
+            .unwrap_or(-1.0)
+    }
+
+    /// The nominal (un-deflected) b-plane perigee, m (`-1.0` if no scenario) — the
+    /// hit being undone, which by construction sits inside the capture radius.
+    #[func]
+    fn nominal_perigee_m(&self) -> f64 {
+        self.core
+            .as_ref()
+            .and_then(|c| c.nominal_perigee_m())
+            .unwrap_or(-1.0)
     }
 
     /// Whether the kernels are loaded (body positions available).

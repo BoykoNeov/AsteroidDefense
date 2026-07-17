@@ -43,6 +43,7 @@ use anise::prelude::Frame;
 use nalgebra::Vector3;
 
 use asteroid_core::ephemeris::Ephemeris;
+use asteroid_core::geometry::BPlaneEncounter;
 use asteroid_core::scenario::{ImpactorConfig, RealFieldScenario, ScenarioError};
 use asteroid_core::{
     along_track_unit, Clock, DvSolveTol, EphemerisPerturber, Epoch, OrbitalElements, StateVector,
@@ -179,6 +180,52 @@ const SPAN_MARGIN_S: f64 = 86_400.0;
 const PROBE_LO_S: f64 = -31_557_600_000.0;
 const PROBE_HI_S: f64 = 31_557_600_000.0;
 
+/// A finished scenario and everything fixed at build time, ready to be handed to a
+/// [`MissionCore`] — the unit of work that crosses back from a worker thread.
+///
+/// Exists because the ~10 s build must not run on the render thread, and neither
+/// must it take the `MissionCore` with it: that core is serving planet positions
+/// every frame, so it stays put and receives this when it lands (see the module
+/// note). `RealFieldScenario` is `Send` (pinned by an assertion in the core) and
+/// `BPlaneEncounter` is `Copy`, so this whole struct moves between threads freely.
+///
+/// Everything expensive and *invariant* is computed here, on the worker, once:
+/// the back-propagated seed, the nominal trajectory, and the nominal encounter
+/// scan. None of the three can change for a given scenario, so no display read and
+/// no planner nudge should ever recompute one.
+pub struct BuiltScenario {
+    scenario: RealFieldScenario,
+    /// The nominal trajectory, cloned out of the scenario's own (now warm) cache.
+    nominal_clock: Clock,
+    /// The nominal encounter — the hit being undone. Scanned here rather than on
+    /// demand: it is what [`MissionCore::capture_radius_m`] reports, and a full-span
+    /// scan is not something a planner readout can pay for.
+    nominal_encounter: BPlaneEncounter,
+}
+
+impl BuiltScenario {
+    /// Design the impactor, back-propagate the seed, fly the nominal, and scan the
+    /// encounter it produces — **~10 s of work**, and the whole reason this takes an
+    /// `Arc<Ephemeris>` rather than `&MissionCore`: it is meant to be called on a
+    /// worker thread, from a clone of the almanac, while the core it will eventually
+    /// feed keeps drawing the solar system.
+    pub fn build(eph: Arc<Ephemeris>, cfg: &ImpactorConfig) -> Result<Self, ScenarioError> {
+        let scenario = RealFieldScenario::build_with(cfg, eph)?;
+        // `build_with` already verified its round-trip through `deflection()`, so the
+        // scenario's nominal cache is warm and both of these are cheap reads of work
+        // already done — not a third propagation.
+        let (nominal_clock, nominal_encounter) = {
+            let ds = scenario.deflection()?;
+            (ds.nominal().clone(), scenario.nominal_hit(&ds)?)
+        };
+        Ok(Self {
+            scenario,
+            nominal_clock,
+            nominal_encounter,
+        })
+    }
+}
+
 /// The loaded mission: always an ephemeris, optionally a built scenario, and —
 /// once built — the cached nominal trajectory and (optionally) a deflection plan.
 pub struct MissionCore {
@@ -195,6 +242,11 @@ pub struct MissionCore {
     /// `DeflectionScenario` re-propagates the whole multi-year nominal
     /// (`deflection.rs`), so we never do that on a display read.
     nominal_clock: Option<Clock>,
+    /// The nominal encounter, scanned once at build time (see [`BuiltScenario`]).
+    /// Fixed for the scenario's life — it is the hit the whole mission exists to
+    /// undo — and the source of the capture radius every verdict is measured
+    /// against.
+    nominal_encounter: Option<BPlaneEncounter>,
     /// The current deflection plan, recomputed only on [`set_plan`](Self::set_plan)
     /// and read cheaply thereafter.
     plan: Option<PlanState>,
@@ -241,6 +293,7 @@ impl MissionCore {
             span,
             scenario: None,
             nominal_clock: None,
+            nominal_encounter: None,
             plan: None,
             bodies: Vec::new(),
         })
@@ -253,20 +306,60 @@ impl MissionCore {
         self.span
     }
 
-    /// Build the designer impactor + campaign over the already-loaded ephemeris
-    /// (the **expensive** multi-year back-propagation). Enables the deflection
-    /// solver ([`required_dv_along_track`](Self::required_dv_along_track)).
-    pub fn build_scenario(&mut self, cfg: &ImpactorConfig) -> Result<(), ScenarioError> {
-        let scenario = RealFieldScenario::build_with(cfg, Arc::clone(&self.ephemeris))?;
-        // Cache the nominal trajectory once so display reads never re-propagate it.
-        // (`deflection()` builds a fresh `DeflectionScenario`, which propagates the
-        // full nominal; we pay that here at build time, not per frame.)
-        let nominal_clock = scenario.deflection()?.nominal().clone();
-        self.scenario = Some(scenario);
-        self.nominal_clock = Some(nominal_clock);
+    /// The loaded almanac, shared. Cloning the `Arc` is how a worker thread gets a
+    /// field to build against **without taking this core with it** — the core stays
+    /// on the main thread answering `body_position_ecl_au` for the orrery while the
+    /// build runs. See [`BuiltScenario::build`].
+    pub fn ephemeris_arc(&self) -> Arc<Ephemeris> {
+        Arc::clone(&self.ephemeris)
+    }
+
+    /// Adopt a scenario built elsewhere (a worker thread; see [`BuiltScenario`]).
+    /// Cheap — every expensive thing already happened off-thread.
+    pub fn install(&mut self, built: BuiltScenario) {
+        self.nominal_clock = Some(built.nominal_clock);
+        self.nominal_encounter = Some(built.nominal_encounter);
+        self.scenario = Some(built.scenario);
         self.plan = None; // a new scenario invalidates any prior plan
         self.bodies.clear(); // …and any orrery bodies flown in the old field
+    }
+
+    /// Build the designer impactor + campaign over the already-loaded ephemeris and
+    /// install it — the **blocking** form, ~10 s. Fine for tests and shell tools;
+    /// a frontend builds through [`BuiltScenario::build`] on a worker and
+    /// [`install`](Self::install)s the result, or it freezes for those 10 s.
+    ///
+    /// `dead_code`-allowed because the tests below are its only caller: the `Mission`
+    /// class exposes no blocking build, precisely so a 10 s main-thread stall cannot
+    /// be reached from GDScript. Kept because "build and install, synchronously" is
+    /// the natural shape for a test or a shell tool, and writing the two steps out
+    /// by hand at each call site would be worse.
+    #[allow(dead_code)]
+    pub fn build_scenario(&mut self, cfg: &ImpactorConfig) -> Result<(), ScenarioError> {
+        let built = BuiltScenario::build(self.ephemeris_arc(), cfg)?;
+        self.install(built);
         Ok(())
+    }
+
+    /// The nominal encounter's gravitationally-focused capture radius, m — the
+    /// radius of Earth's effective collision disc in the b-plane. `None` before a
+    /// scenario is installed.
+    ///
+    /// This is the number a deflection verdict must be measured against: a plan is
+    /// safe when the deflected perigee clears *this*, not when it clears Earth's
+    /// solid radius (focusing bends a track that would geometrically miss onto the
+    /// surface), and not merely when
+    /// [`is_clean_miss`](Self::is_clean_miss) — leaving the scan gate is a far
+    /// wider bar that a genuinely safe plan need not reach.
+    pub fn capture_radius_m(&self) -> Option<f64> {
+        self.nominal_encounter.map(|e| e.capture_radius)
+    }
+
+    /// The nominal (un-deflected) b-plane perigee, m — the hit being undone, which
+    /// by construction sits inside the capture radius. `None` before a scenario is
+    /// installed.
+    pub fn nominal_perigee_m(&self) -> Option<f64> {
+        self.nominal_encounter.map(|e| e.perigee)
     }
 
     /// Whether the (expensive) scenario has been built.
@@ -873,6 +966,76 @@ mod tests {
         assert!(
             track.iter().all(|p| (0.2..=4.0).contains(&p.norm())),
             "every track point should sit at a plausible heliocentric distance"
+        );
+    }
+
+    /// Kernel-gated (release-run). The capture radius is the bar every deflection
+    /// verdict is measured against, so it has to mean what the planner claims it
+    /// means: the nominal is a **hit** (perigee inside the focused disc), and the
+    /// disc is the *focused* one, not solid Earth.
+    ///
+    /// The expected value is derived, not observed — which is the point, since a
+    /// band fitted to whatever the code printed would ratify a bug. `v_rel_kms = 18`
+    /// is the relative speed at the **impact point**, 3000 km from the geocentre and
+    /// deep in Earth's well — *not* the speed at infinity. So:
+    ///
+    /// ```text
+    ///   ε      = v²/2 − μ⊕/r   = 162 − 398600/3000 = 29.13 km²/s²
+    ///   v_inf  = √(2ε)                             =  7.63 km/s
+    ///   b_cap  = R⊕·√(1 + (v_esc/v_inf)²)          =  1.773 R⊕  ≈ 11 300 km
+    /// ```
+    ///
+    /// (This is also exactly why the scenario module requires `v_rel ≥ ~15 km/s`:
+    /// escape speed at 3000 km is 16.3 km/s, so a slower seed would not be
+    /// hyperbolic there and the b-plane reduction would have nothing to reduce.)
+    ///
+    /// The band is tight around that derivation: 1.0 would mean focusing was
+    /// dropped, and a materially different figure would mean `v_inf` — and with it
+    /// every miss distance the planner reports — is not what we think it is.
+    /// Without this, `capture_radius_m` is a number the frontend merely trusts.
+    #[test]
+    fn capture_radius_is_a_focused_disc_the_nominal_hit_falls_inside() {
+        if !have_kernels() {
+            eprintln!("skipping capture_radius_is_a_focused_disc_*: no DE kernel");
+            return;
+        }
+        let mut mc = MissionCore::load().expect("load kernels");
+        assert_eq!(
+            mc.capture_radius_m(),
+            None,
+            "no capture radius before build"
+        );
+        assert_eq!(mc.nominal_perigee_m(), None);
+
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+
+        let capture = mc.capture_radius_m().expect("capture radius after build");
+        let perigee = mc.nominal_perigee_m().expect("nominal perigee after build");
+        let r_earth = asteroid_core::geometry::EARTH_EQUATORIAL_RADIUS_M;
+
+        // Focusing widens the collision cross-section well beyond the solid body:
+        // v_inf ≈ 7.6 km/s against an 11.2 km/s escape speed, so the disc is ~1.77 R⊕
+        // (see the derivation above). A real N-body encounter will not land exactly
+        // on the two-body figure, hence a band rather than an equality.
+        assert!(
+            capture > r_earth,
+            "capture radius {capture:.4e} m is not larger than R⊕ {r_earth:.4e} m — \
+             gravitational focusing is missing"
+        );
+        assert!(
+            (1.70..1.85).contains(&(capture / r_earth)),
+            "capture radius is {:.3} R⊕, expected ~1.773 from v_inf ≈ 7.63 km/s — \
+             either focusing is wrong or the encounter speed is not what the config says",
+            capture / r_earth
+        );
+
+        // The whole scenario is a designed hit: the nominal must fall inside the
+        // disc, or there is no impact for the player to deflect.
+        assert!(
+            perigee < capture,
+            "nominal perigee {perigee:.4e} m is outside the capture radius \
+             {capture:.4e} m — the nominal is not a hit"
         );
     }
 

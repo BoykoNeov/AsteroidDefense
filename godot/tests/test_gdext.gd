@@ -101,5 +101,77 @@ func _init() -> void:
 	_check(m.catalog_span_tdb(0).is_empty(),
 		"catalog_span on empty catalog returns an empty array")
 
+	# --- 3C-2b: the scenario builds on a worker, not on the main thread --------
+	# The build is ~10 s of integration. It is threaded because those 10 s would
+	# otherwise be 10 s of frozen display — and the display being frozen is a
+	# *working* one, drawing real planets since 3C-2a. So the property under test
+	# is not "it builds" (the release-side Rust tests cover that) but "it builds
+	# without blocking the caller", which only Godot can answer.
+	_check(not m.is_ready(), "no scenario before the build starts")
+	_check(m.capture_radius_m() < 0.0, "capture radius unavailable before a build")
+
+	var t0_begin := Time.get_ticks_msec()
+	_check(m.begin_build_scenario(),
+		"begin_build_scenario() started a build (%s)" % m.last_error())
+	var begin_ms := Time.get_ticks_msec() - t0_begin
+	# The decisive assertion: begin_ returned in milliseconds while ~10 s of work
+	# is still to come. If this ever creeps up, the build has moved back onto the
+	# calling thread and the boot freeze is back.
+	_check(begin_ms < 1000,
+		"begin_build_scenario() returned in %d ms without waiting for the build" % begin_ms)
+	_check(m.is_building(), "a build is in flight")
+	_check(not m.begin_build_scenario(),
+		"a second concurrent build is refused rather than racing the first")
+
+	# Poll to completion the way the frontend will, counting the polls that saw
+	# work still in progress. Zero such polls would mean something blocked.
+	var polls := 0
+	var t0_build := Time.get_ticks_msec()
+	while m.poll_build():
+		polls += 1
+		OS.delay_msec(20)
+	var build_ms := Time.get_ticks_msec() - t0_build
+	_check(polls > 0,
+		"poll_build() saw the build running rather than blocking (%d polls, %d ms)"
+		% [polls, build_ms])
+	_check(not m.is_building(), "the build is no longer in flight once it lands")
+	_check(m.is_ready(), "scenario installed after the build (%s)" % m.last_error())
+
+	# The capture radius: the bar a deflection verdict is measured against. ~1.77 R⊕
+	# here (v_inf ≈ 7.6 km/s), so ~11 300 km — see the Rust-side test for the
+	# derivation. Bounds are wide enough to be a smoke test, not a duplicate of it.
+	var cap: float = m.capture_radius_m()
+	_check(cap > 6.4e6 and cap < 1.4e7,
+		"capture radius is a focused disc (%.0f km, %.2f R-earth)" % [cap / 1000.0, cap / 6.3781e6])
+	var nom_p: float = m.nominal_perigee_m()
+	_check(nom_p >= 0.0 and nom_p < cap,
+		"nominal perigee %.0f km falls inside the capture disc (it is a hit)" % (nom_p / 1000.0))
+
+	# The threat is on top of Earth at the impact epoch — one assertion that
+	# exercises the whole threat frame chain across the FFI.
+	var t_imp: float = m.impact_tdb_seconds()
+	var ast: Vector3 = m.asteroid_position_ecl_au(t_imp)
+	var earth_imp: Vector3 = m.body_position_ecl_au(399, t_imp)
+	# Reported in km, not AU: GDScript's format has no %e/%g, so a ~1e-5 AU gap
+	# formats as "0.00" — a passing check whose message says nothing.
+	var gap_km: float = (ast - earth_imp).length() * 1.495978707e8
+	_check(ast != Vector3.ZERO and (ast - earth_imp).length() < 1.0e-3,
+		"threat coincides with Earth at impact (gap %.0f km, inside the %.0f km capture disc)"
+		% [gap_km, cap / 1000.0])
+
+	# The planner nudge: this is what the core's nominal cache bought. It re-flew
+	# the whole 12-year cruise per call before (~11 s); now it re-propagates only
+	# the post-deflection arc. The threshold is far above the ~1 s observed and far
+	# below the regression, so it fails loudly if the cache is ever lost.
+	var t0_plan := Time.get_ticks_msec()
+	_check(m.set_plan(m.period_seconds(), 0.1), "set_plan() succeeded (%s)" % m.last_error())
+	var plan_ms := Time.get_ticks_msec() - t0_plan
+	_check(plan_ms < 5000,
+		"set_plan() took %d ms (~11 000 before the nominal cache landed)" % plan_ms)
+	_check(m.has_plan(), "a plan is set")
+	# Exactly one of the two carries the outcome: a finite perigee XOR a clean miss.
+	_check(m.is_clean_miss() != (m.deflected_perigee_m() >= 0.0),
+		"clean-miss and finite-perigee are mutually exclusive with a plan set")
+
 	print("gdext gate: %s" % ("PASS" if fails == 0 else "FAIL (%d)" % fails))
 	quit(fails)

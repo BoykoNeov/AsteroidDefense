@@ -50,7 +50,7 @@ pub use integrator::{propagate_fixed, DenseSegment, Dop853, Integrator, Integrat
 pub use perturber_field::{tier1_perturber_field, EphemerisPerturber, TIER1_PERTURBER_FRAMES};
 pub use propagator::{KeplerPropagator, Propagator, PropagatorError};
 pub use scenario::{
-    EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError, SweepPoint,
+    DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError, SweepPoint,
     ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES,
 };
 pub use state::StateVector;

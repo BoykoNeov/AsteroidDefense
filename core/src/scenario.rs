@@ -256,6 +256,12 @@ pub struct EncounterFrame {
     pub nominal: Vec<Vector3<f64>>,
     /// Deflected asteroid position relative to Earth's geocentre, m — the impulse
     /// is applied at `deflection_epoch`; window samples all lie after it.
+    ///
+    /// **Empty when there is no deflection at all** — i.e.
+    /// [`frame_from_arcs`](RealFieldScenario::frame_from_arcs) was called with
+    /// `deflected: None`, the pre-plan picture whose only story is the nominal
+    /// track spearing the disc. Empty is not the same as zero-length: a consumer
+    /// draws *nothing*, not a point at the geocentre.
     pub deflected: Vec<Vector3<f64>>,
     /// Earth's solid-body radius, m (the disc to draw).
     pub earth_radius: f64,
@@ -265,8 +271,41 @@ pub struct EncounterFrame {
     /// Nominal b-plane perigee, m (≤ `capture_radius`: the hit being undone).
     pub nominal_perigee: f64,
     /// Deflected b-plane perigee, m, or `None` if the deflected pass left the scan
-    /// gate entirely (a miss so wide it is off any sensible frame).
+    /// gate entirely (a miss so wide it is off any sensible frame) — **or if there
+    /// is no deflection**, which `deflected.is_empty()` is what distinguishes.
+    ///
+    /// The *best* outcome and the *absent* one therefore share a `None`, exactly as
+    /// they share a `-1` at the Godot binding's FFI boundary. That collision is
+    /// deliberate (there is genuinely no finite perigee in either case) and it is a
+    /// trap: a consumer that wants the difference must ask for it, and one that
+    /// treats `None` as failure reports a threat thrown clear of Earth as a hit.
     pub deflected_perigee: Option<f64>,
+}
+
+/// An already-flown deflected arc: the [`Clock`] and the [`BPlaneEncounter`] that
+/// came out of the **same** [`DeflectionScenario::deflected_trajectory`] call.
+///
+/// The pair is one value on purpose. [`frame_from`](RealFieldScenario::frame_from)
+/// guarantees that the deflected track it draws and the perigee that annotates it
+/// come from a single propagation and so cannot disagree; it can guarantee that
+/// because it does the propagation itself. Once that propagation moves out to the
+/// caller — which is the whole point of
+/// [`frame_from_arcs`](RealFieldScenario::frame_from_arcs), so a renderer holding a
+/// freshly-flown arc does not fly it a second time — the guarantee is only as
+/// strong as the caller keeping the two halves together. This type is what
+/// "together" looks like: build it from one `deflected_trajectory` return and there
+/// is no seam at which a track can acquire a foreign perigee.
+#[derive(Debug, Clone, Copy)]
+pub struct DeflectedArc<'a> {
+    /// The post-impulse trajectory, covering `[deflection_epoch, span_end]`.
+    pub clock: &'a Clock,
+    /// The encounter that same propagation produced. `None` means the deflected
+    /// pass left the scan gate — a miss so wide it is off any sensible frame, which
+    /// is a *success*, not a missing value.
+    pub encounter: Option<BPlaneEncounter>,
+    /// The epoch the impulse was applied at. Samples earlier than this read the
+    /// nominal track, since the impulse has not happened yet.
+    pub deflection_epoch: Epoch,
 }
 
 impl RealFieldScenario {
@@ -623,15 +662,59 @@ impl RealFieldScenario {
     ) -> Result<EncounterFrame, ScenarioError> {
         // One propagation gives both the deflected track (the clock) and its
         // b-plane perigee, so the drawing and the number agree by construction.
-        let (clock, deflected_enc) = ds.deflected_trajectory(deflection_epoch, delta_v)?;
+        let (clock, encounter) = ds.deflected_trajectory(deflection_epoch, delta_v)?;
+        self.frame_from_arcs(
+            ds.nominal(),
+            nominal_enc,
+            Some(DeflectedArc {
+                clock: &clock,
+                encounter,
+                deflection_epoch,
+            }),
+            half_window_seconds,
+            n_samples,
+        )
+    }
 
+    /// Sample an encounter frame from trajectories that have **already been flown**
+    /// — the half of [`frame_from`](Self::frame_from) that does no propagation, and
+    /// therefore the one a caller who already holds the arcs should use.
+    ///
+    /// `frame_from` is the convenience: it flies the deflected arc and delegates
+    /// here. But a caller that has *just* flown that arc for its own purposes — the
+    /// Godot binding's planner keeps the post-impulse `Clock` to answer position
+    /// queries from — would pay for a second identical propagation by calling it.
+    /// That is not a hypothetical cost: at this scenario's scale it is ~0.85 s
+    /// against a ~0.35 s input debounce, i.e. the same "re-flying an arc nothing
+    /// asked to be re-flown" defect the nominal cache exists to prevent, moved one
+    /// level out.
+    ///
+    /// Pass `deflected: None` for the **pre-plan** picture: the nominal track and
+    /// the numbers that annotate it, with no deflection anywhere. The resulting
+    /// frame's `deflected` is *empty* (see the field docs — empty, not zero-length),
+    /// and this path does no propagation whatsoever, only sampling — which is what
+    /// lets a display show the incoming impact the instant the scenario is built,
+    /// long before any plan exists.
+    ///
+    /// `nominal_clock` must be this scenario's nominal (from
+    /// [`DeflectionScenario::nominal`], or the cached clone of it) and `nominal_enc`
+    /// the encounter it produces ([`nominal_hit`](Self::nominal_hit)); they share
+    /// this scenario's Earth source, which is what makes the geocentric transform
+    /// below consistent with the b-plane numbers reported alongside it.
+    pub fn frame_from_arcs(
+        &self,
+        nominal_clock: &Clock,
+        nominal_enc: BPlaneEncounter,
+        deflected: Option<DeflectedArc<'_>>,
+        half_window_seconds: f64,
+        n_samples: usize,
+    ) -> Result<EncounterFrame, ScenarioError> {
         let n = n_samples.max(2);
         let center = self.impact_epoch.tdb_seconds_past_j2000();
-        let t_defl = deflection_epoch.tdb_seconds_past_j2000();
 
         let mut sample_seconds = Vec::with_capacity(n);
         let mut nominal = Vec::with_capacity(n);
-        let mut deflected = Vec::with_capacity(n);
+        let mut deflected_track = Vec::with_capacity(if deflected.is_some() { n } else { 0 });
 
         for i in 0..n {
             let frac = i as f64 / (n - 1) as f64;
@@ -644,39 +727,42 @@ impl RealFieldScenario {
                 .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?
                 .position;
 
-            let ast_nom = ds
-                .nominal()
+            let ast_nom = nominal_clock
                 .state_at(epoch)
                 .map_err(|e| ScenarioError::Integration(e.to_string()))?
                 .position;
 
-            // Before the deflection epoch the asteroid is still on the nominal
-            // track (the impulse has not happened yet); after it, read the
-            // post-deflection clock. For the animation's near-impact window this
-            // is always the post-deflection branch, but the guard keeps the helper
-            // honest for a window that reaches back across the nudge.
-            let ast_defl = if t < t_defl {
-                ast_nom
-            } else {
-                clock
-                    .state_at(epoch)
-                    .map_err(|e| ScenarioError::Integration(e.to_string()))?
-                    .position
-            };
+            if let Some(arc) = deflected {
+                // Before the deflection epoch the asteroid is still on the nominal
+                // track (the impulse has not happened yet); after it, read the
+                // post-deflection clock. For the animation's near-impact window this
+                // is always the post-deflection branch, but the guard keeps the
+                // helper honest for a window that reaches back across the nudge —
+                // and the arc's clock does not even *cover* the earlier epochs, so
+                // without it this would be a lookup failure, not a wrong answer.
+                let ast_defl = if t < arc.deflection_epoch.tdb_seconds_past_j2000() {
+                    ast_nom
+                } else {
+                    arc.clock
+                        .state_at(epoch)
+                        .map_err(|e| ScenarioError::Integration(e.to_string()))?
+                        .position
+                };
+                deflected_track.push(ast_defl - earth_pos);
+            }
 
             sample_seconds.push(t);
             nominal.push(ast_nom - earth_pos);
-            deflected.push(ast_defl - earth_pos);
         }
 
         Ok(EncounterFrame {
             sample_seconds,
             nominal,
-            deflected,
+            deflected: deflected_track,
             earth_radius: self.earth_radius,
             capture_radius: nominal_enc.capture_radius,
             nominal_perigee: nominal_enc.perigee,
-            deflected_perigee: deflected_enc.map(|e| e.perigee),
+            deflected_perigee: deflected.and_then(|a| a.encounter).map(|e| e.perigee),
         })
     }
 }
@@ -981,5 +1067,115 @@ mod tests {
             defl_min,
             defl_perigee
         );
+    }
+
+    /// The propagate/sample split must be a pure refactor, and the no-propagation
+    /// half must actually not propagate.
+    ///
+    /// Two halves, and the first is the one with teeth: `frame_from_arcs` fed the
+    /// arc that `frame_from` would have flown itself must return a **bit-identical**
+    /// frame. Exact equality, not a tolerance — both walk the same epochs through
+    /// the same dense output, so any difference at all means the split changed the
+    /// physics rather than relocating it, and a tolerance would wave exactly that
+    /// through. This is the assertion that lets the binding stop calling
+    /// `frame_from` without anyone having to trust that the two agree.
+    ///
+    /// The second half pins the pre-plan picture (`deflected: None`): the nominal
+    /// track and its numbers survive, the deflected track comes back **empty**
+    /// rather than zeroed, and the perigee is `None`. An empty deflected track is
+    /// how a renderer knows to draw nothing; a zero-length one would put a marker on
+    /// Earth's centre, which is the "ZERO is a real place" failure this project
+    /// keeps re-learning — here it would draw the asteroid at the geocentre, i.e. a
+    /// direct hit, as the picture of *no plan yet*.
+    ///
+    /// Kernel-gated, like its neighbour.
+    #[test]
+    fn frame_from_arcs_matches_frame_from_and_draws_nothing_without_a_plan() {
+        if std::env::var("ASTEROID_DE_KERNEL").is_err()
+            || std::env::var("ASTEROID_PLANETARY_CONSTANTS").is_err()
+        {
+            eprintln!("skipping frame_from_arcs_matches_frame_from…: no DE kernel");
+            return;
+        }
+
+        let cfg = ImpactorConfig::default();
+        let sc = RealFieldScenario::build(&cfg).expect("scenario builds");
+        let ds = sc.deflection().expect("deflection scenario");
+        let nominal_enc = sc.nominal_hit(&ds).expect("nominal is a hit");
+
+        let deflection_epoch = sc.impact_epoch().shifted_by_seconds(-sc.period_seconds);
+        let seed = ds
+            .nominal()
+            .state_at(deflection_epoch)
+            .expect("nominal state");
+        let dv = 0.2 * along_track_unit(seed).expect("nominal has a heading");
+
+        let half_window = ENCOUNTER_HALF_WINDOW_SECONDS;
+        let n = ENCOUNTER_SAMPLES;
+
+        // The convenience path: it flies the arc internally.
+        let via_frame_from = sc
+            .frame_from(&ds, nominal_enc, deflection_epoch, dv, half_window, n)
+            .expect("frame_from");
+
+        // The split path: fly the arc here (as the binding's planner does for its
+        // own reasons) and hand the *pair* over — no second propagation.
+        let (clock, encounter) = ds
+            .deflected_trajectory(deflection_epoch, dv)
+            .expect("deflected trajectory");
+        let via_arcs = sc
+            .frame_from_arcs(
+                ds.nominal(),
+                nominal_enc,
+                Some(DeflectedArc {
+                    clock: &clock,
+                    encounter,
+                    deflection_epoch,
+                }),
+                half_window,
+                n,
+            )
+            .expect("frame_from_arcs");
+
+        assert_eq!(
+            via_arcs.sample_seconds, via_frame_from.sample_seconds,
+            "split changed the sample epochs"
+        );
+        assert_eq!(
+            via_arcs.nominal, via_frame_from.nominal,
+            "split changed the nominal track"
+        );
+        assert_eq!(
+            via_arcs.deflected, via_frame_from.deflected,
+            "split changed the deflected track"
+        );
+        assert_eq!(
+            via_arcs.deflected_perigee, via_frame_from.deflected_perigee,
+            "split changed the reported deflected perigee"
+        );
+        assert_eq!(via_arcs.nominal_perigee, via_frame_from.nominal_perigee);
+        assert_eq!(via_arcs.capture_radius, via_frame_from.capture_radius);
+        assert_eq!(via_arcs.earth_radius, via_frame_from.earth_radius);
+
+        // The pre-plan picture: nominal only, no propagation at all.
+        let pre_plan = sc
+            .frame_from_arcs(ds.nominal(), nominal_enc, None, half_window, n)
+            .expect("frame_from_arcs with no deflection");
+
+        assert!(
+            pre_plan.deflected.is_empty(),
+            "no plan must leave the deflected track EMPTY, got {} points",
+            pre_plan.deflected.len()
+        );
+        assert_eq!(
+            pre_plan.deflected_perigee, None,
+            "no plan means no deflected perigee"
+        );
+        assert_eq!(
+            pre_plan.nominal, via_frame_from.nominal,
+            "the nominal track must not depend on whether a plan exists"
+        );
+        assert_eq!(pre_plan.nominal_perigee, via_frame_from.nominal_perigee);
+        assert_eq!(pre_plan.capture_radius, via_frame_from.capture_radius);
     }
 }

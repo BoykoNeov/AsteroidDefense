@@ -57,6 +57,11 @@ var _b_nom := Vector3.ZERO
 var _b_defl := Vector3.ZERO
 var _span := PackedFloat64Array()
 
+## Whether the live-asteroid contact went on screen this frame. Set by
+## _draw_marker, read by _draw_legend a few calls later — draw order, not cached
+## state, so it cannot go stale.
+var _marker_live := false
+
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -182,14 +187,27 @@ func _draw_legend(w: float, mid: Color, dim: Color) -> void:
 	_cross(Vector2(x + 6, y - 4), 4.0, mid)
 	draw_string(_font, Vector2(x + 18, y), "NOMINAL - THE IMPACT",
 		HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, mid)
+	var row := 1.0
 	if not _defl.is_empty():
-		_diamond(Vector2(x + 6, y + lh - 4), 4.0, mid)
-		draw_string(_font, Vector2(x + 18, y + lh), "DEFLECTED - PLANNED",
+		_diamond(Vector2(x + 6, y + row * lh - 4), 4.0, mid)
+		draw_string(_font, Vector2(x + 18, y + row * lh), "DEFLECTED - PLANNED",
 			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, mid)
-	draw_string(_font, Vector2(x, y + 2 * lh),
-		"MARKS = ASYMPTOTE THROUGH THIS PLANE",
+		row += 1.0
+	# Only while the rock is actually on the plot. A legend entry for a glyph that
+	# is not on screen — which is the case for all but 3 days of a 12-year campaign
+	# — teaches the reader to look for something that is not there.
+	if _marker_live:
+		_contact(Vector2(x + 6, y + row * lh - 4), 4.0, mid)
+		draw_string(_font, Vector2(x + 18, y + row * lh), "2031-XK - POSITION NOW",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, mid)
+		row += 1.0
+	# "MARKS" means the diamonds and the cross. Saying it unqualified while the
+	# ringed dot is on screen would make the legend describe it wrongly: the rock is
+	# a position, not an asymptote crossing.
+	draw_string(_font, Vector2(x, y + row * lh),
+		"X / DIAMOND = ASYMPTOTE THRU THIS PLANE",
 		HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, dim)
-	draw_string(_font, Vector2(x, y + 3 * lh),
+	draw_string(_font, Vector2(x, y + (row + 1.0) * lh),
 		"LINES = TRACK (BENDS - CONTEXT ONLY)",
 		HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, dim)
 
@@ -260,7 +278,17 @@ func _draw_b_points(center: Vector2, ppl: float, bright: Color, mid: Color,
 ## always, and it must be *absent* — the same gate `threat_active` applies to the
 ## orrery. Clamping the clock onto the nearest end of the track instead would park
 ## a marker at the frame edge and call it the asteroid's position.
+##
+## Drawn as a ringed dot, NOT the diamond the b-points use, because it is a
+## different kind of thing: the b-points are where an asymptote pierces this plane,
+## while this is the rock's actual position right now. Sharing a glyph would make
+## the legend's "MARKS = ASYMPTOTE THROUGH THIS PLANE" a lie for one of them — and
+## a picture quietly asserting something untrue is the failure this view exists to
+## end. The difference is visible on screen too: at closest approach the rock sits
+## at its perigee, *inside* its own b-point, which is the entire lesson of the
+## verdict bug this view exposed.
 func _draw_marker(center: Vector2, ppl: float, bright: Color, mid: Color) -> void:
+	_marker_live = false
 	if _span.size() != 2 or _nom.is_empty():
 		return
 	var t: float = Sim.t
@@ -278,7 +306,8 @@ func _draw_marker(center: Vector2, ppl: float, bright: Color, mid: Color) -> voi
 	var p := _plot(center, ppl, p3)
 	if not _on_plot(p):
 		return
-	_diamond(p, 7.0, bright if Sim.blink(2.2) else mid)
+	_marker_live = true
+	_contact(p, 4.0, bright if Sim.blink(2.2) else mid)
 	draw_string(_font, p + Vector2(11, 5), "2031-XK  CA %+.2f D" % (t - Sim.T_IMPACT),
 		HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 1, mid)
 
@@ -396,6 +425,14 @@ func _diamond(p: Vector2, r: float, col: Color) -> void:
 	draw_polyline(PackedVector2Array([
 		p + Vector2(0, -r), p + Vector2(r, 0), p + Vector2(0, r),
 		p + Vector2(-r, 0), p + Vector2(0, -r)]), col, 1.2)
+
+
+## A radar contact: filled dot inside a ring. Reserved for the live asteroid, so
+## "a thing that is there right now" never wears the same glyph as "where a line
+## crosses this plane" (see _draw_marker).
+func _contact(p: Vector2, r: float, col: Color) -> void:
+	draw_circle(p, r * 0.55, col)
+	draw_arc(p, r * 1.7, 0.0, TAU, 20, col, 1.2)
 
 
 func _cross(p: Vector2, r: float, col: Color) -> void:

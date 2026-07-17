@@ -498,3 +498,30 @@ especially**; advisor flagged it will likely need a tweak once seen.
 (impulse phase vs encounter geometry), absorbed by the LSQ fit — not a bug, but
 watch curve smoothness. **Next:** run the GUI to validate B2 visuals; then remaining
 task-10 polish or the next HANDOFF task. See [[git-workflow]] for commit/push cadence.
+
+**Phase 2 — Godot mission-planner UX DONE (2026-07-14, placeholder physics).**
+The scripted deflection in `godot/scripts/sim.gd` is now an interactive mission:
+`[M]` opens a planner panel (`planner.gd`, drawn like the HUD panels; keys
+LEFT/RIGHT lead ±10 d, -/= dv ×0.8/×1.25, V retro/prograde, ENTER commit,
+handled centrally in `main.gd`). **The old display-exaggerated `da/a` hack is
+gone**: `set_plan` applies the impulse to the actual heliocentric Kepler state
+at the intercept epoch (f64 `pos_ecl64`/`vel_ecl64` central-diff dt=0.002 d →
+`elements_from_rv` rv→coe) so the miss is emergent; verified by headless
+`godot --headless --script res://tests/test_sim.gd` (rv→coe round-trip 3.6 km
+over 1200 d; 10 m/s @ 180 d lead → 1.01 LD; linear in dv; grows with lead;
+capture-radius verdict; launch-window clamp). Key sim state: `T_LAUNCH/
+T_INTERCEPT` now vars from the plan (cruise = clamp(lead,60,240)); `committed/
+locked()/burned()` gate everything (all views switched from `t>=T_INTERCEPT` to
+`Sim.burned()`); uncommitted timeline ends in SURFACE IMPACT events; plan edits
+locked once in flight ("PLAN LOCKED" log); `plan_changed` signal rebuilds
+solar-system deflected-orbit/transfer-arc meshes + encounter view cache;
+planner-open/committed shows dim planned-track previews in 3D, map2d, and
+b-plane view ("PLAN B x.xx LD" marker). Interceptor phase gained "STANDBY".
+**Verified live via gdai-mcp** (play_scene + simulate_input + screenshots):
+draft→edit→commit→launch→burn→[DEFLECTED]/P(IMPACT) 0.000→lock-refusal all
+correct on screen. **Editor gotchas:** new `class_name` file needs
+`EditorInterface.get_resource_filesystem().scan()` (editor script) before the
+next play; new input actions in project.godot need syncing into the editor's
+in-memory ProjectSettings (same mechanism) or simulate_input rejects the action
+names. Headless test leaks 2 ObjectDB instances (events dicts) — cosmetic.
+**Still placeholder**: real physics arrives with the GDExtension core binding.

@@ -14,6 +14,16 @@ Each file is one fact with YAML frontmatter (`name`, `description`,
   locked spec lives (`../HANDOFF.md`), the license, and the current phase.
 - [`git-workflow.md`](git-workflow.md) — when the assistant updates memory/docs
   and commits/pushes.
+- [`godot-mcp-script-cache.md`](godot-mcp-script-cache.md) — Godot editor caches
+  `.gd` resources edited externally; the running game reads disk.
+- [`godot-phase2-scaffold.md`](godot-phase2-scaffold.md) — Phase-2 Godot project
+  scaffold: `godot/` root, gdai-mcp wiring, the precision=single decision.
+- [`godot-visual-layer.md`](godot-visual-layer.md) — the retro-CRT visual shell
+  (3D orrery, 2D radar, HUD, boot); its b-plane section is superseded by the
+  gdext binding, kept for history.
+- [`gdext-binding.md`](gdext-binding.md) — the Phase-2 GDExtension binding of the
+  Rust core into Godot: the real DE440 orrery, the deflection planner, the
+  b-plane encounter view, and the traps found building them.
 
 These are working notes, not authoritative documentation. The authoritative spec
 is [`../HANDOFF.md`](../HANDOFF.md); the public summary is

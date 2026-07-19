@@ -349,6 +349,37 @@ func _init() -> void:
 	_check(sim.plan_clean_miss and sim.encounter_b_point(true) == Vector3.ZERO,
 		"a clean miss reports NO deflected b-point (ZERO = Earth's centre, not a hit)")
 
+	# --- The CA snap on the DEFLECTED branch, which is the hard one ----------
+	# Everything above ran before any burn, so it only ever exercised the nominal
+	# track. The branch that actually ships once a player commits is the deflected
+	# one, and its closest approach is time-shifted ~0.53 d off the nominal — which
+	# is precisely why `deflected_is_live` exists as one shared rule. Left untested,
+	# a broken deflected selection would keep this suite green while the marker
+	# silently stopped appearing in the only situation a player reaches it in.
+	# The band plan (not the clean miss above) because a clean miss leaves the
+	# deflected track EMPTY — there would be nothing to argmin.
+	sim.set_plan(sim.threat_period_d(), 0.2, true)
+	sim._tick_plan_debounce(1.0)
+	sim.try_commit()
+	sim.jump(sim.T_IMPACT)
+	var defl_trk: PackedVector3Array = sim.encounter_track(true)
+	_check(sim.committed and sim.burned() and not defl_trk.is_empty()
+		and sim.deflected_is_live(defl_trk.is_empty()),
+		"after the burn is flown, the DEFLECTED track is the live one")
+	var ca_defl: float = sim.encounter_ca_day()
+	_check(not is_nan(ca_defl) and absf(ca_defl - sim.T_IMPACT) < 1.5,
+		"the CA snap follows the deflected track into the window (CA %+.3f d)"
+		% (ca_defl - sim.T_IMPACT))
+	# And it is the DEFLECTED closest approach, not the nominal one wearing its
+	# name: the deflected perigee is thousands of km wider, so the two minima
+	# cannot coincide. Ties them to different tracks, not just to "some track".
+	var min_defl := INF
+	for p in defl_trk:
+		min_defl = minf(min_defl, p.length())
+	_check(min_defl > min_r * 1.5,
+		"it minimises the deflected track, not the nominal (%d vs %d km)"
+		% [int(min_defl), int(min_r)])
+
 	sim.free()
 	print("----")
 	print("%d failure(s)" % fails)

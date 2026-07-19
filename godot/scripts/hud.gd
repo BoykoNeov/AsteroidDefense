@@ -262,9 +262,15 @@ func _console_block(w: float, h: float, lh: float, mid: Color, bright: Color,
 
 
 func _help_line(w: float, h: float, dim: Color) -> void:
-	_text_r(Vector2(w - MARGIN, h - MARGIN - BOTTOM_RESERVE),
-		"[SPC]HOLD [,/.]WARP [B]REV [J]JUMP [M]PLAN [F]FOCUS:%s [1]3D [2]MAP [3]ENC [T]PHOSPHOR" % camera_rig.focus_name,
-		dim, _fs - 2)
+	var line := "[SPC]HOLD [,/.]WARP [B]REV [J]JUMP [M]PLAN [F]FOCUS:%s" % camera_rig.focus_name
+	# [C] only binds while the encounter view is up, so it is only advertised
+	# there — a key listed everywhere that works in one place is its own small lie,
+	# and an unlisted key in the one view that needs it is why the closest-approach
+	# marker was effectively unreachable in the first place.
+	if view_name == "ENCOUNTER B-PLANE":
+		line += " [C]CLOSEST APPR"
+	line += " [1]3D [2]MAP [3]ENC [T]PHOSPHOR"
+	_text_r(Vector2(w - MARGIN, h - MARGIN - BOTTOM_RESERVE), line, dim, _fs - 2)
 
 
 ## Screen bezel ticks at the four frame corners.

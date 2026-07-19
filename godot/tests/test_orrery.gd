@@ -304,6 +304,44 @@ func _init() -> void:
 		and absf((esp[1] - esp[0]) - 3.0) < 0.01,
 		"the encounter window is +/-1.5 d centred on impact")
 
+	# --- The closest-approach snap lands where it claims ---------------------
+	# `encounter_ca_day` argmins the core's own track. Two things must hold, and
+	# ONE comparison settles both: the minimum sample range must equal the core's
+	# reported perigee. If it does, the b-plane frame really is Earth-centred (so
+	# |p| is geocentric distance and the argmin really is closest approach); if it
+	# does not, either the track never spans perigee or the origin is not where the
+	# view assumes — and in that case the snap would park the clock at a confidently
+	# wrong instant, which is worse than the manual scrub it replaces.
+	var ca_day: float = sim.encounter_ca_day()
+	_check(not is_nan(ca_day) and absf(ca_day - sim.T_IMPACT) < 1.5,
+		"the CA snap lands inside the +/-1.5 d window (CA %+.3f d)" % (ca_day - sim.T_IMPACT))
+	var ca_trk: PackedVector3Array = sim.encounter_track(false)
+	var min_r := INF
+	for p in ca_trk:
+		min_r = minf(min_r, p.length())
+	var perigee_km: float = sim.perigee_ld(false) * sim.LD_KM
+	# The band is DERIVED, not guessed. A sampled minimum can never beat the true
+	# perigee, and it can never be worse than a half-sample-step of travel past it:
+	#   ca_r_max = sqrt(r_p^2 + (v_p * dt/2)^2)
+	# with v_p from vis-viva at perigee (v_inf^2 + 2*mu/r_p). Here that is ~18 km/s
+	# and dt/2 ~93 s, so the rock moves ~1700 km through the turn between samples
+	# and the sampled minimum legitimately reads ~3260 km against a 3000 km perigee.
+	# A guessed 1% band failed on exactly that — the sampling floor, not an error.
+	# The band still discriminates what it is here to discriminate: a frame whose
+	# origin was not Earth's centre would miss by an Earth radius or an AU, not 8%.
+	const MU_E := 398600.4418  # km^3/s^2
+	var dt_half: float = (esp[1] - esp[0]) * sim.DAY_S / float(ca_trk.size() - 1) * 0.5
+	var v_p: float = sqrt(pow(sim.encounter_v_inf_kms(), 2.0) + 2.0 * MU_E / perigee_km)
+	var ca_r_max: float = sqrt(perigee_km * perigee_km + pow(v_p * dt_half, 2.0))
+	_check(perigee_km > 0.0 and min_r >= perigee_km - 1.0 and min_r <= ca_r_max,
+		"the track's minimum range IS the perigee, to the sampling floor "
+		+ "(%d km in [%d, %d]) — the frame is Earth-centred and the argmin is CA"
+		% [int(min_r), int(perigee_km), int(ca_r_max)])
+	# Before the burn the nominal track is the live one; the snap must agree with
+	# what `_draw_marker` will draw, or it parks the clock where there is no marker.
+	_check(not sim.deflected_is_live(sim.encounter_track(true).is_empty()),
+		"with no burn flown, the nominal track is the live one")
+
 	# A clean miss has NO b-point. ZERO here is Earth's dead centre, so drawing it
 	# unconditionally would mark the best outcome as a bullseye.
 	sim.set_plan(600.0, 200.0, true)

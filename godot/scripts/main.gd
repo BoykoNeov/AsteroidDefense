@@ -153,6 +153,8 @@ func _input(event: InputEvent) -> void:
 			map2d.visible = false
 			tags.visible = false
 			hud.view_name = "ENCOUNTER B-PLANE"
+	elif enc.visible and event.is_action_pressed("encounter_ca_jump"):
+		_jump_to_closest_approach()
 	elif event.is_action_pressed("focus_next"):
 		_focus_idx = (_focus_idx + 1) % _focus_targets.size()
 		_apply_focus()
@@ -178,6 +180,28 @@ func _input(event: InputEvent) -> void:
 		Sim.toggle_burn_dir()
 	elif planner.visible and event.is_action_pressed("plan_commit"):
 		Sim.try_commit()
+
+
+## Park the clock on the live asteroid at its closest approach — the one moment
+## the encounter view's radar contact is on screen.
+##
+## Reaching that by hand was a three-step ritual: pause, then scrub into a ±1.5 d
+## window inside a twelve-year campaign, because any warp step overshoots closest
+## approach by ~0.53 d and the marker is correctly absent everywhere else. The
+## view's most informative instant was effectively unreachable, so this makes it
+## one key.
+##
+## **Pausing is not a convenience here, it is the point.** Jumping while the clock
+## runs walks straight back out of the window at the next warp step, which looks
+## exactly like the marker failing to appear.
+func _jump_to_closest_approach() -> void:
+	var day := Sim.encounter_ca_day()
+	if is_nan(day):
+		Sim.event_logged.emit("NO ENCOUNTER TRACK - CANNOT SLEW TO CLOSEST APPROACH")
+		return
+	Sim.paused = true
+	Sim.jump(day)
+	Sim.event_logged.emit("CLOCK HOLD AT CLOSEST APPROACH - CA %+.2f D" % (day - Sim.T_IMPACT))
 
 
 func _apply_focus() -> void:

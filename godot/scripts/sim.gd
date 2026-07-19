@@ -925,6 +925,58 @@ func encounter_v_inf_kms() -> float:
 	return mission.encounter_v_inf_m_s() / 1000.0
 
 
+## Whether the *deflected* track is the one that is real right now.
+##
+## The single rule for "which pass is happening", because two places need it and
+## they must not drift: the encounter view draws the live marker on this track,
+## and `encounter_ca_day` snaps the clock to that same track's closest approach.
+## Disagreement between them is not a cosmetic bug — the deflected closest
+## approach is time-shifted about half a day off the nominal one, so a snap
+## computed on the wrong track lands outside the ±1.5 d window and the marker
+## silently fails to appear, which is the exact complaint this snap exists to fix.
+##
+## Before the burn the deflected track has not happened yet; after it, an empty
+## deflected track means the core has no plan to draw.
+func deflected_is_live(deflected_track_empty: bool) -> bool:
+	return burned() and not deflected_track_empty
+
+
+## The mission day of the active track's closest approach to Earth — the one
+## instant the live marker is guaranteed to be on-plot and at its most
+## interesting (the rock sits at perigee, *inside* its own b-point).
+##
+## NAN when there is no track to search. Callers jump to it; see `main.gd`.
+##
+## This is an argmin over a polyline the core produced, in the core's own
+## Earth-centred b-plane display frame — the same category of operation as the
+## interpolation `encounter.gd` already does along that polyline, and emphatically
+## not a re-derivation of the encounter. GDScript still owns zero orbital
+## mechanics here. Resolution is the sample spacing (~185 s over the ±1.5 d
+## window), which is below the `CA %+.2f D` readout's own 864 s precision, so
+## plumbing the core's bisected CA epoch out through four signatures would buy
+## accuracy nothing on screen can show.
+##
+## `test_encounter_ca` pins the result against the core's reported perigee: if
+## the minimum sample range matches, the frame really is Earth-centred and this
+## really is the closest approach.
+func encounter_ca_day() -> float:
+	var span := encounter_span_days()
+	if span.size() != 2:
+		return NAN
+	var trk := encounter_track(deflected_is_live(encounter_track(true).is_empty()))
+	if trk.size() < 2:
+		return NAN
+	var best := 0
+	var best_r: float = trk[0].length()
+	for i in range(1, trk.size()):
+		var r: float = trk[i].length()
+		if r < best_r:
+			best_r = r
+			best = i
+	# Samples are uniform over the span — the inverse of the marker's own mapping.
+	return span[0] + (span[1] - span[0]) * float(best) / float(trk.size() - 1)
+
+
 ## The nominal pass's |B|, LD — the hit being undone, inside the capture disc by
 ## construction. (The deflected pass's |B| is `miss_ld`; see `miss_label`.)
 func nominal_b_ld() -> float:

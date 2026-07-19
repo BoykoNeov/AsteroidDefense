@@ -295,7 +295,9 @@ func _draw_marker(center: Vector2, ppl: float, bright: Color, mid: Color) -> voi
 	if t < _span[0] or t > _span[1]:
 		return
 	# The track that is real at this moment: the deflected one only after the burn.
-	var trk: PackedVector3Array = _defl if (Sim.burned() and not _defl.is_empty()) else _nom
+	# Through Sim's rule, not a local copy of it — `Sim.encounter_ca_day` snaps the
+	# clock using the same call, and a snap aimed at the other track lands off-plot.
+	var trk: PackedVector3Array = _defl if Sim.deflected_is_live(_defl.is_empty()) else _nom
 	# Samples are uniform over the span, so the clock maps straight to an index.
 	# This interpolates a polyline the core produced — a drawing operation, not a
 	# propagation; at ~185 s spacing the segments are far below a pixel here.

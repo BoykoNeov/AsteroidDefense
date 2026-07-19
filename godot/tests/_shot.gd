@@ -90,16 +90,20 @@ func _run() -> void:
 	Sim.set_plan(Sim.threat_period_d(), 0.2, true)
 	Sim._tick_plan_debounce(1.0)
 	Sim.try_commit()
-	# PAUSE before scrubbing: at warp the clock runs on through the settle frames,
-	# and the encounter is over in hours. The first attempt landed 0.53 d past
-	# closest approach, by which point the rock is ~1.3 LD out and off-plot — the
-	# gate behaving correctly, but not the branch being checked.
-	Sim.paused = true
-	Sim.jump(Sim.T_IMPACT)
+	# This used to hand-code the ritual — pause, then jump to T_IMPACT — because
+	# reaching the marker took both steps and a warp step overshoots closest
+	# approach by 0.53 d, by which point the rock is ~1.3 LD out and off-plot (the
+	# gate behaving correctly, but not the branch being checked). That ritual is
+	# now the [C] key, so the harness drives *that* instead: it verifies the shipped
+	# path rather than a private re-implementation of it, and if the snap ever stops
+	# landing in the window, this shot goes empty and says so.
+	main._jump_to_closest_approach()
 	await _settle(4)
 	await _shot("enc_6_live_marker_burned")
-	print("SHOT  marker: t=%.3f d (impact %.3f), committed=%s burned=%s, window=%s"
-		% [Sim.t, Sim.T_IMPACT, Sim.committed, Sim.burned(), Sim.encounter_span_days()])
+	print("SHOT  marker: t=%.3f d (impact %.3f, CA %+.3f d), committed=%s burned=%s, window=%s"
+		% [Sim.t, Sim.T_IMPACT, Sim.t - Sim.T_IMPACT, Sim.committed, Sim.burned(),
+			Sim.encounter_span_days()])
+	print("SHOT  marker live on screen: %s" % main.enc._marker_live)
 	Sim.paused = false
 	Sim.jump(0.0)
 	await _settle(2)

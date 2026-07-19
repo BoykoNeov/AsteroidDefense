@@ -301,16 +301,17 @@ mod tests {
         }
     }
 
-    /// Task-0.5 spike, gated on a real DE kernel. Set `ASTEROID_DE_KERNEL` to a
-    /// local `de440s.bsp` (or DE440/441) to run it; the test skips (passes)
-    /// when the env var is unset so the suite stays green offline in CI.
+    /// Task-0.5 spike, gated on a real DE kernel resolved by
+    /// [`kernels::resolve_for_test`](crate::kernels::resolve_for_test) — the
+    /// environment, else a conventional directory. Skips (passes) when no pair
+    /// resolves so the suite stays green offline in CI; set
+    /// `ASTEROID_REQUIRE_KERNELS` to make that skip a hard failure instead.
     #[test]
     fn geocenter_is_reconstructed_not_emb() {
-        let Ok(kernel) = std::env::var("ASTEROID_DE_KERNEL") else {
-            eprintln!("ASTEROID_DE_KERNEL unset — skipping geocenter spike test");
+        let Some(k) = crate::kernels::resolve_for_test("the geocenter spike test") else {
             return;
         };
-        let eph = Ephemeris::load(&kernel).expect("load kernel");
+        let eph = Ephemeris::load(&k.bsp).expect("load kernel");
         // A known epoch well inside the de440s span (1849–2150).
         let epoch = Epoch::from_gregorian(2020, 1, 1, 0, 0, 0, 0, TimeScale::TDB);
         let check = verify_geocenter_reconstruction(&eph, epoch).expect("geocenter check");
@@ -330,14 +331,14 @@ mod tests {
     /// speed (~29.8 km/s about the SSB), not garbage or zero. Pins the velocity
     /// half of [`state_km_s`] the close-approach detector's `v_rel` rides on —
     /// a silently-dropped or wrong-units velocity would fail this band. Skips
-    /// (passes) when `ASTEROID_DE_KERNEL` is unset so CI stays green offline.
+    /// (passes) when no kernel pair resolves so CI stays green offline; set
+    /// `ASTEROID_REQUIRE_KERNELS` to turn that skip into a failure.
     #[test]
     fn geocenter_velocity_is_earth_orbital_speed() {
-        let Ok(kernel) = std::env::var("ASTEROID_DE_KERNEL") else {
-            eprintln!("ASTEROID_DE_KERNEL unset — skipping geocenter velocity test");
+        let Some(k) = crate::kernels::resolve_for_test("the geocenter velocity test") else {
             return;
         };
-        let eph = Ephemeris::load(&kernel).expect("load kernel");
+        let eph = Ephemeris::load(&k.bsp).expect("load kernel");
         let epoch = Epoch::from_gregorian(2020, 1, 1, 0, 0, 0, 0, TimeScale::TDB);
         let (_r, v_km_s) = eph.geocenter_state_ssb_km(epoch).expect("geocenter state");
         let speed = v_km_s.norm();

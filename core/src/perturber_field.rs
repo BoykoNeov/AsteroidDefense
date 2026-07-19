@@ -220,17 +220,14 @@ mod tests {
     /// when either is unset so CI stays green offline.
     #[test]
     fn tier1_field_builds_from_a_real_kernel() {
-        let (Ok(bsp), Ok(pca)) = (
-            std::env::var("ASTEROID_DE_KERNEL"),
-            std::env::var("ASTEROID_PLANETARY_CONSTANTS"),
-        ) else {
-            eprintln!("ASTEROID_DE_KERNEL / ASTEROID_PLANETARY_CONSTANTS unset — skipping");
+        let Some(k) = crate::kernels::resolve_for_test("the Tier-1 field build") else {
             return;
         };
+        let (bsp, pca) = k.as_strs();
         let eph = Arc::new(
-            Ephemeris::load(&bsp)
+            Ephemeris::load(bsp)
                 .expect("load DE kernel")
-                .with_constants(&pca)
+                .with_constants(pca)
                 .expect("load constants"),
         );
 

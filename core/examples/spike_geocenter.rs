@@ -16,7 +16,7 @@ use asteroid_core::ephemeris::{verify_geocenter_reconstruction, Ephemeris};
 fn main() {
     let kernel = std::env::args()
         .nth(1)
-        .or_else(|| std::env::var("ASTEROID_DE_KERNEL").ok())
+        .or_else(|| asteroid_core::kernels::resolve().map(|k| k.bsp.display().to_string()))
         .unwrap_or_else(|| {
             eprintln!("usage: spike_geocenter <de440s.bsp>  (or set ASTEROID_DE_KERNEL)");
             std::process::exit(2);

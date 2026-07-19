@@ -26,6 +26,7 @@ pub mod epoch;
 pub mod forces;
 pub mod geometry;
 pub mod integrator;
+pub mod kernels;
 pub mod perturber_field;
 pub mod propagator;
 pub mod scenario;

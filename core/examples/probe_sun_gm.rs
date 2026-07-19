@@ -17,7 +17,7 @@ use asteroid_core::ephemeris::Ephemeris;
 fn main() {
     let pca = std::env::args()
         .nth(1)
-        .or_else(|| std::env::var("ASTEROID_PLANETARY_CONSTANTS").ok())
+        .or_else(|| asteroid_core::kernels::resolve().map(|k| k.pca.display().to_string()))
         .unwrap_or_else(|| {
             eprintln!("usage: probe_sun_gm <pck11.pca>  (or set ASTEROID_PLANETARY_CONSTANTS)");
             std::process::exit(2);

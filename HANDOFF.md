@@ -235,15 +235,22 @@ In pure two-body, **energy, angular momentum, and the Laplace–Runge–Lenz vec
 
 This bit for real on 2026-07-17 and cost the session's whole verification story twice over: a `deflected_b_point_km` fix was "confirmed" by a test that never executed, and `frame_from_arcs_matches_frame_from` — the *only* proof that splitting `frame_from` didn't change its output — had never once run. Both were genuinely green when re-run properly, but that was luck, not verification. Note the shape of the failure: the machine **had** the kernels, sitting in the conventional directory. Only the env vars were unset.
 
-Before believing a green Rust run:
+#### Fixed 2026-07-19 — `core::kernels`, and how to run the suite now
+
+The GDScript suites never shared this hazard: `Kernels.resolve()` (`godot/scripts/kernels.gd`) falls back from env → `user://kernels.cfg` → conventional dirs, so `test_orrery` runs real physics either way. That asymmetry was the hint at the fix. `core/src/kernels.rs` is now the Rust mirror of it, and every kernel-gated site in the workspace (core, `validation`, the gdext binding, the examples) goes through it:
 
 ```sh
-export ASTEROID_DE_KERNEL=<...>/kernels/de440s.bsp
-export ASTEROID_PLANETARY_CONSTANTS=<...>/kernels/pck11.pca
-cargo test --release          # then CHECK THE RUNTIME, not just the count
+ASTEROID_REQUIRE_KERNELS=1 cargo test --workspace --release   # green here MEANS it ran
 ```
 
-The GDScript suites do **not** share this hazard: `Kernels.resolve()` (`godot/scripts/kernels.gd`) falls back from env → `user://kernels.cfg` → conventional dirs, so `test_orrery` runs real physics either way. That asymmetry is itself the hint at the fix — the Rust test harness has no such resolver, and giving it one (env, else the conventional dir) would close the "I have the kernels but didn't point at them" hole while preserving skip-green-offline for CI that genuinely lacks them. **Open, deliberately not done** as part of the 3C-2c batch.
+Two distinct failures needed two distinct fixes, and this is the part worth keeping straight:
+
+- **`kernels::resolve()`** — env → conventional dirs, both-or-nothing — cures *"I have the kernels but didn't point at them"*. That was the actual 2026-07-17 failure. Env vars are no longer needed on a machine that has the kernels in `../temp/AsteroidDefense/kernels` (or `<repo>/kernels`, or beside the exe).
+- **`ASTEROID_REQUIRE_KERNELS`** turns "nothing resolved" from a silent skip into a **panic** naming the test that would have lied and every path searched. Resolution alone would have cured only *this* box *today*: a fresh clone, a CI container, or a renamed directory puts the silent-green failure straight back. Unset, the skip is still green — offline CI is preserved on purpose.
+
+**The gate was proved by bypassing it**, not by watching it pass: with `../temp/AsteroidDefense/kernels` renamed away, `ASTEROID_REQUIRE_KERNELS=1` makes the kernel-gated tests **FAIL** loudly, and unset it reproduces the original lie exactly — *the same* `81 passed` / `13 passed`, but `0.09s` and `0.00s` instead of `18.03s` and `56.38s`. The counts are indistinguishable; the clock is the whole signal. That bypass is also what confirmed `tier1_field_matches_assist` genuinely runs in 0.05 s (it fails the moment the kernels vanish) rather than being one more silent skip.
+
+`user://kernels.cfg` is deliberately *not* read by the Rust side — `user://` resolves through Godot's own per-platform app-data path, and reconstructing that in Rust to read a file the frontend wrote would be a guess that rots silently. The directory scan covers the same case, and callers that know better still pass explicit paths (`MissionCore::load_from`).
 
 ---
 

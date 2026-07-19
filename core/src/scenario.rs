@@ -135,9 +135,12 @@ impl Default for ImpactorConfig {
 /// every consumer (binary, egui app, gdext binding) surfaces one error type.
 #[derive(Debug)]
 pub enum ScenarioError {
-    /// A required kernel-path env var was unset (`ASTEROID_DE_KERNEL` /
-    /// `ASTEROID_PLANETARY_CONSTANTS`).
-    MissingKernelEnv(&'static str),
+    /// No DE kernel pair could be resolved — neither the environment nor any
+    /// conventional directory had one. Carries
+    /// [`kernels::not_found_message`](crate::kernels::not_found_message): every
+    /// place searched plus how to fix it, because "kernels not found" alone
+    /// sends the reader hunting through source for the search order.
+    KernelsNotFound(String),
     /// Loading the DE kernel or its planetary constants failed.
     Ephemeris(String),
     /// A backward/forward integration failed.
@@ -156,10 +159,10 @@ pub enum ScenarioError {
 impl fmt::Display for ScenarioError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ScenarioError::MissingKernelEnv(v) => {
+            ScenarioError::KernelsNotFound(detail) => {
                 write!(
                     f,
-                    "environment variable {v} is not set (kernel path required)"
+                    "no DE kernel pair could be resolved\n{detail}"
                 )
             }
             ScenarioError::Ephemeris(m) => write!(f, "ephemeris load failed: {m}"),
@@ -312,18 +315,18 @@ impl RealFieldScenario {
     /// Load the DE440 field, design the impactor per `cfg`, back-propagate the
     /// seed, and verify the nominal reproduces a hit.
     ///
-    /// Kernel paths come from `ASTEROID_DE_KERNEL` (the `.bsp`) and
-    /// `ASTEROID_PLANETARY_CONSTANTS` (the `.pca`), matching the core test/env
-    /// convention.
+    /// Kernel paths come from [`kernels::resolve`](crate::kernels::resolve):
+    /// `ASTEROID_DE_KERNEL` + `ASTEROID_PLANETARY_CONSTANTS` if exported, else a
+    /// conventional directory. A caller that resolves paths itself (the Godot
+    /// frontend, which cannot rely on a launched game inheriting either
+    /// variable) uses [`build_with`](Self::build_with) instead.
     pub fn build(cfg: &ImpactorConfig) -> Result<Self, ScenarioError> {
-        let bsp = std::env::var("ASTEROID_DE_KERNEL")
-            .map_err(|_| ScenarioError::MissingKernelEnv("ASTEROID_DE_KERNEL"))?;
-        let pca = std::env::var("ASTEROID_PLANETARY_CONSTANTS")
-            .map_err(|_| ScenarioError::MissingKernelEnv("ASTEROID_PLANETARY_CONSTANTS"))?;
+        let k = crate::kernels::resolve()
+            .ok_or_else(|| ScenarioError::KernelsNotFound(crate::kernels::not_found_message()))?;
 
-        let eph = Ephemeris::load(&bsp)
+        let eph = Ephemeris::load(&k.bsp)
             .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?
-            .with_constants(&pca)
+            .with_constants(&k.pca)
             .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
         Self::build_with(cfg, Arc::new(eph))
     }
@@ -820,10 +823,7 @@ mod tests {
     /// Kernel-gated; skips (does not fail) with no kernel.
     #[test]
     fn nominal_is_cached_identically_and_deflection_stops_re_flying_it() {
-        if std::env::var("ASTEROID_DE_KERNEL").is_err()
-            || std::env::var("ASTEROID_PLANETARY_CONSTANTS").is_err()
-        {
-            eprintln!("skipping nominal_is_cached_identically_*: no DE kernel");
+        if crate::kernels::resolve_for_test("nominal_is_cached_identically_*").is_none() {
             return;
         }
 
@@ -889,10 +889,7 @@ mod tests {
     /// `ASTEROID_PLANETARY_CONSTANTS`; skips (does not fail) when they are unset.
     #[test]
     fn propagate_free_matches_direct_step_in_the_field() {
-        if std::env::var("ASTEROID_DE_KERNEL").is_err()
-            || std::env::var("ASTEROID_PLANETARY_CONSTANTS").is_err()
-        {
-            eprintln!("skipping propagate_free_matches_direct_step_in_the_field: no DE kernel");
+        if crate::kernels::resolve_for_test("propagate_free_matches_direct_step_in_the_field").is_none() {
             return;
         }
 
@@ -981,10 +978,7 @@ mod tests {
     /// pinned in the crate's own unit tests.
     #[test]
     fn encounter_frame_track_agrees_with_reported_perigee() {
-        if std::env::var("ASTEROID_DE_KERNEL").is_err()
-            || std::env::var("ASTEROID_PLANETARY_CONSTANTS").is_err()
-        {
-            eprintln!("skipping encounter_frame_track_agrees_with_reported_perigee: no DE kernel");
+        if crate::kernels::resolve_for_test("encounter_frame_track_agrees_with_reported_perigee").is_none() {
             return;
         }
 
@@ -1091,10 +1085,7 @@ mod tests {
     /// Kernel-gated, like its neighbour.
     #[test]
     fn frame_from_arcs_matches_frame_from_and_draws_nothing_without_a_plan() {
-        if std::env::var("ASTEROID_DE_KERNEL").is_err()
-            || std::env::var("ASTEROID_PLANETARY_CONSTANTS").is_err()
-        {
-            eprintln!("skipping frame_from_arcs_matches_frame_from…: no DE kernel");
+        if crate::kernels::resolve_for_test("frame_from_arcs_matches_frame_from…").is_none() {
             return;
         }
 

@@ -43,7 +43,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let bsp = args
         .next()
-        .or_else(|| std::env::var("ASTEROID_DE_KERNEL").ok())
+        .or_else(|| asteroid_core::kernels::resolve().map(|k| k.bsp.display().to_string()))
         .unwrap_or_else(|| {
             eprintln!(
                 "usage: probe_perturbers <de440s.bsp> <pck11.pca>  \
@@ -53,7 +53,7 @@ fn main() {
         });
     let pca = args
         .next()
-        .or_else(|| std::env::var("ASTEROID_PLANETARY_CONSTANTS").ok())
+        .or_else(|| asteroid_core::kernels::resolve().map(|k| k.pca.display().to_string()))
         .unwrap_or_else(|| {
             eprintln!("missing planetary-constants (.pca) path");
             std::process::exit(2);

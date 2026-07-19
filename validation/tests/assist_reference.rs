@@ -182,20 +182,18 @@ fn build_comparison_field(eph: &Arc<Ephemeris>, fixture: &Fixture) -> PointMassG
     PointMassGravity::new(perturbers)
 }
 
-/// Load the ephemeris from the gated env vars, or `None` (skip) if either is
-/// unset. Shared by the tests below.
+/// Load the ephemeris through the shared resolver (environment, else a
+/// conventional directory), or `None` — skip, green — when no pair resolves.
+/// Shared by the tests below. `ASTEROID_REQUIRE_KERNELS` turns that skip into a
+/// hard failure, which is the only way a reader of a green log can tell these
+/// ASSIST comparisons actually ran.
 fn gated_ephemeris() -> Option<Arc<Ephemeris>> {
-    let (Ok(bsp), Ok(pca)) = (
-        std::env::var("ASTEROID_DE_KERNEL"),
-        std::env::var("ASTEROID_PLANETARY_CONSTANTS"),
-    ) else {
-        eprintln!("ASTEROID_DE_KERNEL / ASTEROID_PLANETARY_CONSTANTS unset — skipping");
-        return None;
-    };
+    let k = asteroid_core::kernels::resolve_for_test("the ASSIST reference comparison")?;
+    let (bsp, pca) = k.as_strs();
     Some(Arc::new(
-        Ephemeris::load(&bsp)
+        Ephemeris::load(bsp)
             .expect("load DE kernel")
-            .with_constants(&pca)
+            .with_constants(pca)
             .expect("load planetary constants"),
     ))
 }

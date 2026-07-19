@@ -367,21 +367,22 @@ pub struct MissionCore {
 }
 
 impl MissionCore {
-    /// Read the DE440 kernels named by `ASTEROID_DE_KERNEL` (the `.bsp`) and
-    /// `ASTEROID_PLANETARY_CONSTANTS` (the `.pca`) and hold them. The env-var
-    /// convention matches the core tests and the `curve`/viewer binaries — all of
-    /// which run from a developer shell.
+    /// Resolve the DE440 kernels through
+    /// [`asteroid_core::kernels::resolve`] — `ASTEROID_DE_KERNEL` +
+    /// `ASTEROID_PLANETARY_CONSTANTS` if exported, else a conventional directory
+    /// — and hold them. Matches the core tests and the `curve`/viewer binaries,
+    /// all of which run from a developer shell.
     ///
     /// **A launched Godot game generally has neither variable set** (they are not
     /// persisted at user or machine level), so the frontend resolves paths itself
     /// and calls [`load_from`](Self::load_from). This stays as the shell/test
     /// entry point.
     pub fn load() -> Result<Self, ScenarioError> {
-        let bsp = std::env::var("ASTEROID_DE_KERNEL")
-            .map_err(|_| ScenarioError::MissingKernelEnv("ASTEROID_DE_KERNEL"))?;
-        let pca = std::env::var("ASTEROID_PLANETARY_CONSTANTS")
-            .map_err(|_| ScenarioError::MissingKernelEnv("ASTEROID_PLANETARY_CONSTANTS"))?;
-        Self::load_from(&bsp, &pca)
+        let k = asteroid_core::kernels::resolve().ok_or_else(|| {
+            ScenarioError::KernelsNotFound(asteroid_core::kernels::not_found_message())
+        })?;
+        let (bsp, pca) = k.as_strs();
+        Self::load_from(bsp, pca)
     }
 
     /// Read the DE kernels at two explicit paths — the entry point for any caller
@@ -1003,9 +1004,12 @@ impl MissionCore {
 mod tests {
     use super::*;
 
+    /// Whether the binding's kernel-gated tests can run. Goes through the shared
+    /// resolver rather than reading the environment, so a developer who *has* the
+    /// kernels but has not exported the variables runs the real suite instead of
+    /// a green shell of it — and `ASTEROID_REQUIRE_KERNELS` makes the skip loud.
     fn have_kernels() -> bool {
-        std::env::var("ASTEROID_DE_KERNEL").is_ok()
-            && std::env::var("ASTEROID_PLANETARY_CONSTANTS").is_ok()
+        asteroid_core::kernels::resolve_for_test("the MissionCore kernel-gated tests").is_some()
     }
 
     /// Metres per AU — for authoring synthetic-body semi-major axes in SI.

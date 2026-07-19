@@ -134,17 +134,17 @@ fn kepler_propagator_matches_hapsira() {
 
 /// Gated cross-check that the fixture's μ really is what ANISE resolves for the
 /// Sun (HANDOFF §6, "pull GM through ANISE") — the pin the whole comparison
-/// rests on. Runs only when `ASTEROID_PLANETARY_CONSTANTS` points at a local
-/// `.pca` (e.g. `pck11.pca`); skips green otherwise so CI stays offline, mirroring
-/// the DE-kernel-gated ephemeris test in `core`.
+/// rests on. Runs whenever the shared resolver finds a kernel pair (environment,
+/// else a conventional directory); skips green otherwise so CI stays offline,
+/// mirroring the DE-kernel-gated ephemeris tests in `core`. Set
+/// `ASTEROID_REQUIRE_KERNELS` to make that skip fail loudly instead.
 #[test]
 fn sun_gm_matches_fixture() {
-    let Ok(pca) = std::env::var("ASTEROID_PLANETARY_CONSTANTS") else {
-        eprintln!("ASTEROID_PLANETARY_CONSTANTS unset — skipping Sun GM pin check");
+    let Some(k) = asteroid_core::kernels::resolve_for_test("the Sun GM pin check") else {
         return;
     };
     let fixture = load();
-    let eph = Ephemeris::load(&pca).expect("load planetary constants");
+    let eph = Ephemeris::load(&k.pca).expect("load planetary constants");
     let anise_mu = eph.sun_gm_m3_s2().expect("resolve Sun GM");
 
     let rel = (anise_mu - fixture.mu_m3_s2).abs() / fixture.mu_m3_s2;

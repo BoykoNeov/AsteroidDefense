@@ -262,7 +262,7 @@ func _console_block(w: float, h: float, lh: float, mid: Color, bright: Color,
 
 
 func _help_line(w: float, h: float, dim: Color) -> void:
-	var line := "[SPC]HOLD [,/.]WARP [B]REV [J]JUMP [M]PLAN [F]FOCUS:%s" % camera_rig.focus_name
+	var line := "[SPC]HOLD [,/.]WARP [B]REV [J]JUMP [M]PLAN [P]FORCES [F]FOCUS:%s" % camera_rig.focus_name
 	# [C] only binds while the encounter view is up, so it is only advertised
 	# there — a key listed everywhere that works in one place is its own small lie,
 	# and an unlisted key in the one view that needs it is why the closest-approach

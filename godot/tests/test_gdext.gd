@@ -109,6 +109,11 @@ func _init() -> void:
 	# without blocking the caller", which only Godot can answer.
 	_check(not m.is_ready(), "no scenario before the build starts")
 	_check(m.capture_radius_m() < 0.0, "capture radius unavailable before a build")
+	# The Tier-2 preview rides the scenario build too, so before it there are no
+	# shifts and every term reads the -1 "unavailable" sentinel (never 0).
+	_check(not m.has_tier2_preview(), "no Tier-2 preview before a build")
+	_check(m.tier2_shifted_perigee_m("relativity") < 0.0,
+		"Tier-2 shift unavailable before a build (-1 sentinel, not 0)")
 
 	var t0_begin := Time.get_ticks_msec()
 	_check(m.begin_build_scenario(),
@@ -146,6 +151,44 @@ func _init() -> void:
 	var nom_p: float = m.nominal_perigee_m()
 	_check(nom_p >= 0.0 and nom_p < cap,
 		"nominal perigee %.0f km falls inside the capture disc (it is a hit)" % (nom_p / 1000.0))
+
+	# --- Tier-2 preview: the on-demand force-model shifts across the FFI --------
+	# The preview is DELIBERATELY not part of the build — it is ~64 s that would
+	# delay the threat solution, so it is measured on demand when the menu opens.
+	# Right after the build there are no shifts yet.
+	_check(not m.has_tier2_preview(),
+		"no Tier-2 preview right after the build (it is off the critical path)")
+	_check(m.tier2_shifted_perigee_m("relativity") < 0.0,
+		"Tier-2 shift unavailable until the menu measures it (-1, not 0)")
+
+	# Drive the measurement exactly as the frontend does: begin + poll to landing.
+	# This is the ~64 s (four ~16 s propagations) the menu costs.
+	_check(m.begin_tier2_preview(),
+		"begin_tier2_preview() started the measurement (%s)" % m.last_error())
+	_check(m.is_measuring_tier2(), "a Tier-2 measurement is in flight")
+	_check(not m.begin_tier2_preview(),
+		"a second concurrent Tier-2 measurement is refused rather than racing")
+	var t2_polls := 0
+	while m.poll_tier2_preview():
+		t2_polls += 1
+		OS.delay_msec(20)
+	_check(t2_polls > 0,
+		"poll_tier2_preview() saw the measurement running rather than blocking (%d polls)" % t2_polls)
+	_check(not m.is_measuring_tier2(), "measurement no longer in flight once it lands")
+	_check(m.has_tier2_preview(), "Tier-2 preview measured on demand")
+
+	# Each always-available term must be a real perigee that actually moved off the
+	# baseline; the belt must be UNAVAILABLE (this load armed no small-body kernel),
+	# reported as -1, not a 0 km "does nothing".
+	for term in ["relativity", "yarkovsky", "srp"]:
+		var shifted: float = m.tier2_shifted_perigee_m(term)
+		var shift_km: float = (nom_p - shifted) / 1000.0
+		_check(shifted >= 0.0 and absf(nom_p - shifted) > 1.0,
+			"Tier-2 '%s' shifted the perigee %+.2f km off baseline" % [term, shift_km])
+	_check(m.tier2_shifted_perigee_m("belt") < 0.0,
+		"Tier-2 belt is UNAVAILABLE without the small-body kernel (-1, not 0)")
+	_check(m.tier2_shifted_perigee_m("no-such-term") < 0.0,
+		"an unknown Tier-2 term is unavailable, not a silent 0")
 
 	# The threat is on top of Earth at the impact epoch — one assertion that
 	# exercises the whole threat frame chain across the FFI.

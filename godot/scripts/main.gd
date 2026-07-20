@@ -18,6 +18,7 @@ var tags: TagLayer
 var map2d: Map2D
 var enc: EncounterView
 var planner: PlannerPanel
+var tier2_panel: Tier2Panel
 var boot: BootScreen
 var time_bar: TimeBar
 
@@ -82,6 +83,10 @@ func _ready() -> void:
 	planner = PlannerPanel.new()
 	planner.name = "Planner"
 	viewport.add_child(planner)
+
+	tier2_panel = Tier2Panel.new()
+	tier2_panel.name = "Tier2Panel"
+	viewport.add_child(tier2_panel)
 
 	boot = BootScreen.new()
 	boot.name = "Boot"
@@ -180,6 +185,27 @@ func _input(event: InputEvent) -> void:
 		Sim.toggle_burn_dir()
 	elif planner.visible and event.is_action_pressed("plan_commit"):
 		Sim.try_commit()
+	elif event.is_action_pressed("tier2_toggle"):
+		# Gated on `mission_online` for the same reason the planner is: the four
+		# shifts ride the scenario build, so there is nothing to show until the
+		# threat solution lands.
+		if not Sim.mission_online:
+			Sim.event_logged.emit("FORCE-MODEL MENU OFFLINE - AWAITING THREAT SOLUTION")
+		else:
+			tier2_panel.visible = not tier2_panel.visible
+			Sim.tier2_panel_open = tier2_panel.visible
+			# Opening the menu is what pays for the ~2 min measurement — on demand,
+			# off the build path. A no-op once the shifts are cached.
+			if tier2_panel.visible:
+				Sim.request_tier2_preview()
+	elif tier2_panel.visible and event.is_action_pressed("tier2_term_gr"):
+		Sim.toggle_tier2("relativity")
+	elif tier2_panel.visible and event.is_action_pressed("tier2_term_yark"):
+		Sim.toggle_tier2("yarkovsky")
+	elif tier2_panel.visible and event.is_action_pressed("tier2_term_belt"):
+		Sim.toggle_tier2("belt")
+	elif tier2_panel.visible and event.is_action_pressed("tier2_term_srp"):
+		Sim.toggle_tier2("srp")
 
 
 ## Park the clock on the live asteroid at its closest approach — the one moment
@@ -211,7 +237,7 @@ func _apply_focus() -> void:
 
 func _sync_overlay_sizes() -> void:
 	var vs := Vector2(viewport.size)
-	for c: Control in [map2d, enc, tags, hud, planner, boot]:
+	for c: Control in [map2d, enc, tags, hud, planner, tier2_panel, boot]:
 		if is_instance_valid(c):
 			c.position = Vector2.ZERO
 			c.size = vs

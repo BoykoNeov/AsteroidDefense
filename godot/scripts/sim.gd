@@ -171,6 +171,36 @@ const PAD_D := 2.0                     # minimum days between "now" and launch
 ## physics cannot use different Earths. The literal is only a pre-build fallback.
 var R_E := 6378.137
 
+## Tier-2 physics menu ([P]): the four force terms whose b-plane shift the core
+## measured once at build time (`Mission.has_tier2_preview`). Each entry is an
+## on/off toggle — flipped by [G]/[Y]/[A]/[S] — and when ON the panel reveals that
+## term's isolated perigee shift. Off by default so switching a term on is the act
+## that *shows* its contribution (the "toggle to show the shift" the panel is for).
+## The numbers are precomputed and fixed per scenario, so a toggle reads instantly.
+## The four terms in panel order: [menu key, core id, display name]. The id is the
+## string the core keys `tier2_shifted_perigee_m` on, so this table is the single
+## place the frontend names them.
+const TIER2_TERMS := [
+	["G", "relativity", "GR (1PN RELATIVITY)"],
+	["Y", "yarkovsky", "YARKOVSKY (A2)"],
+	["A", "belt", "MAIN-BELT (16x SB441)"],
+	["S", "srp", "SOLAR RAD. PRESSURE"],
+]
+var tier2_ready := false                # the core has measured the four shifts
+var tier2_measuring := false            # the on-demand ~2 min measurement is running
+var tier2_panel_open := false           # the physics panel is showing
+var tier2_on := {                       # per-term reveal state (mnemonic keys)
+	"relativity": false,
+	"yarkovsky": false,
+	"belt": false,
+	"srp": false,
+}
+## The nominal (un-deflected) b-plane perigee, km — the baseline every Tier-2 shift
+## is measured against (`shift = nominal − shifted`). Read from the core at
+## `_install_threat`, same source as `cap_km`, so the menu and the encounter view
+## quote one perigee.
+var nom_perigee_km := 0.0
+
 var plan_lead_d := 180.0               # intercept lead before impact epoch, days
 var plan_dv_ms := 30.0                 # impulse magnitude, m/s
 var plan_retro := true                 # true = retrograde (against velocity)
@@ -272,9 +302,11 @@ func tdb(t_days: float = INF) -> float:
 
 
 func _process(delta: float) -> void:
-	# Both of these run while paused: a paused clock does not mean a paused build,
-	# and an operator who pauses mid-edit still wants their verdict solved.
+	# These all run while paused: a paused clock does not mean a paused build, an
+	# operator who pauses mid-edit still wants their verdict solved, and the Tier-2
+	# measurement (kicked from the menu) must land whatever the clock is doing.
 	_poll_build()
+	_poll_tier2_preview()
 	_tick_plan_debounce(delta)
 
 	if paused:
@@ -426,6 +458,12 @@ func _install_threat() -> void:
 	# computed against — both read from the core rather than kept in step by hand.
 	cap_km = mission.capture_radius_m() / 1000.0
 	R_E = mission.earth_radius_m() / 1000.0
+	nom_perigee_km = mission.nominal_perigee_m() / 1000.0
+	# The Tier-2 shifts are NOT measured with the build — that ~64 s would delay this
+	# very threat solution. They are measured on demand when the operator opens the
+	# force-model menu (`request_tier2_preview`), so `tier2_ready` starts false.
+	tier2_ready = false
+	tier2_measuring = false
 
 	mission_online = true
 	# The b-plane frame is built with the scenario, so the close-up is live the
@@ -834,6 +872,66 @@ func _plan_edit_blocked() -> bool:
 		event_logged.emit("PLAN LOCKED - INTERCEPTOR IN FLIGHT")
 		return true
 	return false
+
+
+## Kick off the on-demand Tier-2 shift measurement — the ~2 min (four ~16 s
+## propagations) that fills the force-model menu. Called when the panel opens.
+## Off the build critical path by design: the threat solution never waits on it.
+## A no-op if the threat is not up yet, the shifts are already measured, or a
+## measurement is already running.
+func request_tier2_preview() -> void:
+	if not mission_online or tier2_ready or tier2_measuring:
+		return
+	if mission.begin_tier2_preview():
+		tier2_measuring = true
+		event_logged.emit(_stamp(t) + "  MEASURING TIER-2 FORCE SHIFTS - ~2 MIN, STAND BY")
+
+
+## Pump the on-demand measurement each frame; adopt the shifts when the worker
+## lands them. Mirrors `_poll_build`.
+func _poll_tier2_preview() -> void:
+	if not tier2_measuring:
+		return
+	# poll_tier2_preview returns true while running, false once landed.
+	if not mission.poll_tier2_preview():
+		tier2_measuring = false
+		tier2_ready = mission.has_tier2_preview()
+		if tier2_ready:
+			event_logged.emit(_stamp(t) + "  TIER-2 FORCE SHIFTS READY - GR/YARK/BELT/SRP")
+		else:
+			event_logged.emit(_stamp(t) + "  TIER-2 MEASUREMENT FAILED - " + str(mission.last_error()))
+
+
+## Flip one Tier-2 term's reveal state. `term` is a core id
+## ("relativity"/"yarkovsky"/"belt"/"srp"). Switching a term ON that the core could
+## not measure (the belt with no small-body kernel mounted) is called out rather
+## than silently revealing nothing.
+func toggle_tier2(term: String) -> void:
+	if not tier2_on.has(term):
+		return
+	tier2_on[term] = not tier2_on[term]
+	if tier2_on[term] and not tier2_available(term):
+		event_logged.emit("%s SHIFT UNAVAILABLE - NO SMALL-BODY KERNEL" % term.to_upper())
+
+
+## Whether the core has a measured shift for this term. False for the belt when the
+## small-body kernel was never mounted — the shift is genuinely unknown there, and
+## the panel must say so rather than draw a 0 km that reads as "does nothing". The
+## core returns its -1 sentinel for that case; a real perigee is never negative.
+func tier2_available(term: String) -> bool:
+	if not mission_online or not tier2_ready:
+		return false
+	return mission.tier2_shifted_perigee_m(term) >= 0.0
+
+
+## The isolated b-plane perigee SHIFT for one term, km — `nominal − shifted`.
+## Signed: positive means the term pulls the perigee inward (closer to Earth's
+## centre), negative means it eases the pass outward. `NAN` when the term is
+## unavailable, so callers gate on `tier2_available` before formatting.
+func tier2_shift_km(term: String) -> float:
+	if not tier2_available(term):
+		return NAN
+	return nom_perigee_km - mission.tier2_shifted_perigee_m(term) / 1000.0
 
 
 func try_commit() -> void:

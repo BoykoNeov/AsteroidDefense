@@ -48,8 +48,8 @@ use asteroid_core::ephemeris::Ephemeris;
 use asteroid_core::horizons::Neo;
 use asteroid_core::geometry::BPlaneEncounter;
 use asteroid_core::scenario::{
-    DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError,
-    ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES,
+    DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError, SrpParams,
+    Tier2Config, ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES,
 };
 use asteroid_core::{
     along_track_unit, Clock, DvSolveTol, EphemerisPerturber, Epoch, OrbitalElements, StateVector,
@@ -503,6 +503,41 @@ pub fn mount_small_bodies(
         .map_err(|e| ScenarioError::Ephemeris(e.to_string()))
 }
 
+/// The shipping Yarkovsky `A2` the Tier-2 preview toggles on (m/s² at 1 AU) — a
+/// physically plausible sub-km value, deliberately **un-amplified** (matches the
+/// core `tier2_terms_…_shift_it_on` measurement test). A larger value would inflate
+/// the displayed shift into the display-grade lie this project keeps catching.
+pub const PREVIEW_YARKOVSKY_A2: f64 = 1.0e-13;
+
+/// The four single-term Tier-2 b-plane perigees, measured on demand when the
+/// frontend opens the force-model menu ([`measure_tier2_shifts`]).
+///
+/// Each is the nominal perigee the **fixed shipping seed** reaches when *one*
+/// Tier-2 term is switched on and the rest left off — the honest measurement of how
+/// far that single piece of physics moves the predicted impact (HANDOFF §5/§6),
+/// computed via [`RealFieldScenario::nominal_encounter_with`] (seed fixed, only the
+/// forward field changed; never a rebuild, which would re-design the seed through
+/// the term and hide the shift). The frontend shows the shift as
+/// `nominal_perigee − this`; the sign says which way (inward = smaller perigee =
+/// pulled closer to Earth).
+///
+/// Each measurement is a full ~16 s propagation, so all four together are the ~64 s
+/// this preview costs — paid **once**, off-thread, only when the flag is set.
+#[derive(Debug, Clone, Copy)]
+pub struct Tier2Shifts {
+    /// Nominal perigee with 1PN relativity alone on, m.
+    pub relativity_perigee_m: f64,
+    /// Nominal perigee with Yarkovsky ([`PREVIEW_YARKOVSKY_A2`]) alone on, m.
+    pub yarkovsky_perigee_m: f64,
+    /// Nominal perigee with the sb441 belt alone on, m — **`None` when the
+    /// small-body kernel was not mounted**. The belt shift is then genuinely
+    /// *unavailable*, not zero: reporting 0 would read as "the belt does nothing,"
+    /// the same display-grade lie in miniature.
+    pub belt_perigee_m: Option<f64>,
+    /// Nominal perigee with SRP ([`SrpParams::sub_km_rock`]) alone on, m.
+    pub srp_perigee_m: f64,
+}
+
 /// A finished scenario and everything fixed at build time, ready to be handed to a
 /// [`MissionCore`] — the unit of work that crosses back from a worker thread.
 ///
@@ -603,6 +638,67 @@ impl BuiltScenario {
     }
 }
 
+/// Measure the four single-term Tier-2 b-plane shifts off a built scenario
+/// (HANDOFF §5). Each term is re-flown in isolation on the **fixed shipping seed**
+/// via [`RealFieldScenario::nominal_encounter_with`] — the honest "how far does this
+/// piece of physics move the impact" measurement, never a rebuild that would
+/// reproduce the hit by construction.
+///
+/// `&RealFieldScenario` rather than `&BuiltScenario` so the frontend can call it on
+/// a **worker thread holding an `Arc` clone** of the exact scenario the threat was
+/// flown in (the render thread keeps reading the same scenario meanwhile — the
+/// reason it is `Sync`). ~16 s per term, ~64 s total.
+///
+/// The belt is measured only when `small_bodies_mounted`: `compose_force` fails
+/// loud if asked for the sb441 perturbers without the kernel, so its perigee is
+/// left `None` (genuinely unavailable, **not** zero — see
+/// [`Tier2Shifts::belt_perigee_m`]) otherwise. Every other term is a hard
+/// measurement: a perturbed nominal that finds no close approach is a real surprise
+/// for a shift this small, so it errors rather than returning a sentinel.
+pub fn measure_tier2_shifts(
+    scenario: &RealFieldScenario,
+    small_bodies_mounted: bool,
+) -> Result<Tier2Shifts, ScenarioError> {
+    let measure = |cfg: &Tier2Config| -> Result<f64, ScenarioError> {
+        scenario
+            .nominal_encounter_with(cfg)?
+            .map(|e| e.perigee)
+            .ok_or_else(|| {
+                ScenarioError::Integration(
+                    "Tier-2 preview: a perturbed nominal found no close approach".into(),
+                )
+            })
+    };
+
+    let relativity_perigee_m = measure(&Tier2Config {
+        relativity: true,
+        ..Tier2Config::default()
+    })?;
+    let yarkovsky_perigee_m = measure(&Tier2Config {
+        yarkovsky_a2: Some(PREVIEW_YARKOVSKY_A2),
+        ..Tier2Config::default()
+    })?;
+    let srp_perigee_m = measure(&Tier2Config {
+        srp: Some(SrpParams::sub_km_rock()),
+        ..Tier2Config::default()
+    })?;
+    let belt_perigee_m = if small_bodies_mounted {
+        Some(measure(&Tier2Config {
+            asteroid_perturbers: true,
+            ..Tier2Config::default()
+        })?)
+    } else {
+        None
+    };
+
+    Ok(Tier2Shifts {
+        relativity_perigee_m,
+        yarkovsky_perigee_m,
+        belt_perigee_m,
+        srp_perigee_m,
+    })
+}
+
 /// The loaded mission: always an ephemeris, optionally a built scenario, and —
 /// once built — the cached nominal trajectory and (optionally) a deflection plan.
 pub struct MissionCore {
@@ -633,7 +729,12 @@ pub struct MissionCore {
     /// de441 (~1550–2650), and the frontend clamps its clock to whatever is
     /// actually mounted.
     span: (f64, f64),
-    scenario: Option<RealFieldScenario>,
+    /// The built scenario, behind an `Arc` so the Tier-2 preview worker can hold a
+    /// clone and measure shifts off the *exact* scenario the threat was flown in,
+    /// while the render thread keeps reading it every frame. `RealFieldScenario` is
+    /// `Sync` (pinned by a core gate test) and every post-build method takes `&self`
+    /// with `OnceLock` interior mutability, so the shared read needs no lock.
+    scenario: Option<Arc<RealFieldScenario>>,
     /// The nominal (un-deflected) trajectory, cloned **once** at build time so
     /// per-frame position/track reads are cheap `Clock` queries. Rebuilding a
     /// `DeflectionScenario` re-propagates the whole multi-year nominal
@@ -647,6 +748,12 @@ pub struct MissionCore {
     /// The pre-plan encounter picture, sampled once at build time (see
     /// [`BuiltScenario`]). The nominal track never changes, so neither does this.
     nominal_frame: Option<EncounterFrame>,
+    /// The four single-term Tier-2 shifts, present only after the on-demand preview
+    /// has landed ([`adopt_tier2_shifts`](Self::adopt_tier2_shifts)). `None` means
+    /// the frontend never opened the menu (or a new scenario was just installed);
+    /// belt-within-`Some` may still be `None` when the small-body kernel is absent
+    /// (see [`Tier2Shifts`]).
+    tier2_shifts: Option<Tier2Shifts>,
     /// The current deflection plan, recomputed only on [`set_plan`](Self::set_plan)
     /// and read cheaply thereafter.
     plan: Option<PlanState>,
@@ -707,6 +814,7 @@ impl MissionCore {
             nominal_clock: None,
             nominal_encounter: None,
             nominal_frame: None,
+            tier2_shifts: None,
             plan: None,
             bodies: Vec::new(),
         })
@@ -782,7 +890,11 @@ impl MissionCore {
         self.nominal_clock = Some(built.nominal_clock);
         self.nominal_encounter = Some(built.nominal_encounter);
         self.nominal_frame = Some(built.nominal_frame);
-        self.scenario = Some(built.scenario);
+        // A new scenario invalidates any prior Tier-2 preview: the shifts were
+        // measured against the old field. They are re-measured on demand when the
+        // menu is next opened ([`measure_tier2_shifts`]).
+        self.tier2_shifts = None;
+        self.scenario = Some(Arc::new(built.scenario));
         self.plan = None; // a new scenario invalidates any prior plan
         self.bodies = bodies; // …and the catalog is replaced, not appended to
     }
@@ -859,6 +971,49 @@ impl MissionCore {
     /// Whether the (expensive) scenario has been built.
     pub fn has_scenario(&self) -> bool {
         self.scenario.is_some()
+    }
+
+    /// Whether the four single-term Tier-2 shifts have been measured for the current
+    /// scenario — the frontend's cue that the menu's numbers are ready rather than
+    /// still `-1`. False right after a build; set once the on-demand preview lands
+    /// ([`adopt_tier2_shifts`](Self::adopt_tier2_shifts)).
+    pub fn has_tier2_preview(&self) -> bool {
+        self.tier2_shifts.is_some()
+    }
+
+    /// An `Arc` clone of the built scenario, for handing to the Tier-2 preview
+    /// worker ([`measure_tier2_shifts`]). `None` before a scenario is installed.
+    /// The clone shares the *exact* scenario the threat was flown in, so the
+    /// measured shifts are consistent with the encounter on screen — and it is a
+    /// refcount bump, not a rebuild.
+    pub fn scenario_arc(&self) -> Option<Arc<RealFieldScenario>> {
+        self.scenario.clone()
+    }
+
+    /// Adopt Tier-2 shifts measured off-thread by the preview worker — the landing
+    /// point for [`measure_tier2_shifts`] run on a [`scenario_arc`](Self::scenario_arc)
+    /// clone. Cheap: the expensive propagation already happened on the worker.
+    pub fn adopt_tier2_shifts(&mut self, shifts: Tier2Shifts) {
+        self.tier2_shifts = Some(shifts);
+    }
+
+    /// The measured **shifted nominal perigee** (m) for one Tier-2 term — the
+    /// perigee the fixed shipping seed reaches with just that term on. `None` when
+    /// the preview was never run, `term` is unknown, or (belt only) the small-body
+    /// kernel was absent so the belt shift is genuinely unavailable rather than
+    /// zero. The frontend forms the shift as
+    /// [`nominal_perigee_m`](Self::nominal_perigee_m) − this.
+    ///
+    /// `term` is one of `"relativity"`, `"yarkovsky"`, `"belt"`, `"srp"`.
+    pub fn tier2_shifted_perigee_m(&self, term: &str) -> Option<f64> {
+        let s = self.tier2_shifts?;
+        match term {
+            "relativity" => Some(s.relativity_perigee_m),
+            "yarkovsky" => Some(s.yarkovsky_perigee_m),
+            "belt" => s.belt_perigee_m,
+            "srp" => Some(s.srp_perigee_m),
+            _ => None,
+        }
     }
 
     /// Heliocentric **ecliptic-J2000** position of NAIF body `naif_id` at
@@ -2219,6 +2374,82 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Kernel-gated (release-run, **~70 s**: three ~16 s single-term propagations
+    /// plus the build). The Tier-2 preview seam end to end — the on-demand numbers
+    /// path that lights the frontend's GR/Yarkovsky/belt/SRP menu, walked the exact
+    /// way the gdext worker walks it: build → install → `scenario_arc` →
+    /// [`measure_tier2_shifts`] off the Arc clone → [`adopt_tier2_shifts`].
+    ///
+    /// Pins the three contracts that matter:
+    /// - **Off until asked.** A freshly-installed scenario carries no shifts, so
+    ///   [`has_tier2_preview`](MissionCore::has_tier2_preview) is `false` and every
+    ///   term reads unavailable — the invariant that keeps the ~64 s off the build
+    ///   critical path (the threat solution must not wait on the menu).
+    /// - **Measured, the three always-available terms are real, finite, and actually
+    ///   moved** the perigee off the baseline (a term that returned the baseline
+    ///   unchanged would be a dead toggle).
+    /// - **Belt is `None`, not `0`, when sb441 is unmounted.** This runs on the bare
+    ///   DE almanac, so the belt shift is genuinely unavailable; surfacing it as a
+    ///   `-1` sentinel rather than a `0` km "belt does nothing" is the whole reason
+    ///   its field is an `Option`.
+    #[test]
+    fn tier2_preview_measures_three_terms_and_leaves_belt_unavailable_unmounted() {
+        if !have_kernels() {
+            eprintln!("skipping tier2_preview_*: no DE kernel");
+            return;
+        }
+        let mut mc = MissionCore::load().expect("load kernels");
+        let eph = mc.ephemeris_arc();
+
+        // Build and install exactly as the fast worker does — no preview on this path.
+        let built = BuiltScenario::build(Arc::clone(&eph), &ImpactorConfig::default(), false)
+            .expect("scenario builds");
+        mc.install(built, Vec::new());
+        assert!(!mc.has_tier2_preview(), "a freshly-built scenario carries no preview");
+        assert_eq!(
+            mc.tier2_shifted_perigee_m("relativity"),
+            None,
+            "no preview yet → every term unavailable"
+        );
+
+        let baseline = mc.nominal_perigee_m().expect("baseline perigee");
+
+        // Now the on-demand path: measure off an Arc clone of the installed scenario
+        // (what the preview worker holds) and adopt the result — the ~64 s, paid only
+        // when the operator opens the menu, never on the build.
+        let scenario = mc.scenario_arc().expect("installed scenario is Arc-shareable");
+        let shifts = measure_tier2_shifts(&scenario, mc.small_bodies_mounted())
+            .expect("tier2 preview measures");
+        mc.adopt_tier2_shifts(shifts);
+        assert!(mc.has_tier2_preview(), "adopted preview must light the menu");
+
+        // The three always-available terms: finite, and each genuinely moved the
+        // perigee off the baseline (not a dead toggle).
+        for term in ["relativity", "yarkovsky", "srp"] {
+            let shifted = mc
+                .tier2_shifted_perigee_m(term)
+                .unwrap_or_else(|| panic!("{term} shift should be available"));
+            assert!(shifted.is_finite() && shifted > 0.0, "{term} perigee {shifted} m");
+            assert!(
+                (shifted - baseline).abs() > 1.0,
+                "{term} left the perigee within 1 m of baseline ({shifted} vs {baseline}) — dead toggle"
+            );
+        }
+
+        // Belt: unavailable (None → -1 at the FFI edge), NOT zero. The almanac has
+        // no sb441, so the honest answer is "cannot say," never "does nothing."
+        assert_eq!(
+            mc.tier2_shifted_perigee_m("belt"),
+            None,
+            "belt shift must be unavailable (not 0) without the small-body kernel"
+        );
+        assert_eq!(
+            mc.tier2_shifted_perigee_m("no-such-term"),
+            None,
+            "an unknown term is unavailable, not a silent 0"
+        );
     }
 
     #[test]

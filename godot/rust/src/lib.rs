@@ -24,8 +24,8 @@ use godot::prelude::*;
 use asteroid_core::scenario::{ImpactorConfig, ScenarioError};
 use asteroid_core::{Epoch, OrbitalElements};
 use mission_core::{
-    display_comet, load_neo_bodies, mount_small_bodies, seed_orrery_body, BuiltScenario,
-    MissionCore, OrreryBody,
+    display_comet, load_neo_bodies, measure_tier2_shifts, mount_small_bodies, seed_orrery_body,
+    BuiltScenario, MissionCore, OrreryBody, Tier2Shifts,
     SB441_BODIES,
 };
 
@@ -74,6 +74,11 @@ struct Mission {
     /// [`begin_build_scenario`](Mission::begin_build_scenario). `Some` exactly while
     /// a worker is running, so it doubles as the "is building" flag.
     build: Option<mpsc::Receiver<Result<(BuiltScenario, Vec<OrreryBody>), String>>>,
+    /// The in-flight on-demand Tier-2 shift measurement, if any — see
+    /// [`begin_tier2_preview`](Mission::begin_tier2_preview). `Some` exactly while a
+    /// preview worker is running; independent of `build` (a scenario is fully usable
+    /// without ever measuring the menu).
+    tier2_build: Option<mpsc::Receiver<Result<Tier2Shifts, String>>>,
     error: GString,
     base: Base<RefCounted>,
 }
@@ -295,6 +300,12 @@ impl Mission {
                 &ImpactorConfig::default(),
                 mounted,
             )
+            // The Tier-2 shift preview is DELIBERATELY not measured here: it is ~64 s
+            // of propagation that would sit *before* `install`, delaying the threat
+            // solution and the planner — the core gameplay — by that much. It is
+            // instead computed on demand when the operator opens the force-model menu
+            // (`begin_tier2_preview`), off the same scenario, so the threat lands as
+            // fast as it did before the menu existed.
             .map_err(|e| e.to_string())
                 .and_then(|built| {
                     // The orrery's scenery flies here, on this thread, in the field
@@ -389,6 +400,87 @@ impl Mission {
         }
     }
 
+    /// Kick off the on-demand Tier-2 shift measurement on a worker thread — the
+    /// ~64 s the force-model menu costs, paid only when the operator opens it and
+    /// **off the critical build path** so the threat solution is never delayed.
+    ///
+    /// The worker gets an `Arc` clone of the built scenario (a refcount bump, not a
+    /// rebuild — the shifts come off the *exact* scenario the threat was flown in),
+    /// measures the four single-term shifts ([`measure_tier2_shifts`]) and sends them
+    /// back for [`poll_tier2_preview`](Self::poll_tier2_preview) to adopt. Returns
+    /// `false` (a no-op) if the preview is already measured or already in flight, or
+    /// if there is no scenario to measure against yet.
+    #[func]
+    fn begin_tier2_preview(&mut self) -> bool {
+        if self.tier2_build.is_some() {
+            return false; // already measuring — not an error, just nothing new to do
+        }
+        let Some(core) = self.core.as_ref() else {
+            self.error = "load() must succeed before begin_tier2_preview()".into();
+            return false;
+        };
+        if core.has_tier2_preview() {
+            return false; // already measured; the numbers are cached
+        }
+        let Some(scenario) = core.scenario_arc() else {
+            self.error = "build the scenario before measuring Tier-2 shifts".into();
+            return false;
+        };
+        let mounted = core.small_bodies_mounted();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = measure_tier2_shifts(&scenario, mounted).map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+        self.tier2_build = Some(rx);
+        self.error = GString::new();
+        true
+    }
+
+    /// Whether the on-demand Tier-2 shift measurement is currently in flight.
+    #[func]
+    fn is_measuring_tier2(&self) -> bool {
+        self.tier2_build.is_some()
+    }
+
+    /// Pump the Tier-2 preview worker: adopt the shifts if they have landed. Returns
+    /// `true` while the measurement is **still running**, `false` once it is finished
+    /// (or none is in flight) — at which point [`has_tier2_preview`](Self::has_tier2_preview)
+    /// says whether it succeeded. Non-blocking; safe to call every frame.
+    #[func]
+    fn poll_tier2_preview(&mut self) -> bool {
+        let Some(rx) = self.tier2_build.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Ok(Ok(shifts)) => {
+                self.tier2_build = None;
+                match self.core.as_mut() {
+                    Some(core) => {
+                        core.adopt_tier2_shifts(shifts);
+                        self.error = GString::new();
+                    }
+                    None => {
+                        self.error =
+                            "the Tier-2 preview finished but the mission is no longer loaded".into()
+                    }
+                }
+                false
+            }
+            Ok(Err(message)) => {
+                self.tier2_build = None;
+                self.error = message.as_str().into();
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.tier2_build = None;
+                self.error = "the Tier-2 preview thread died without reporting".into();
+                false
+            }
+        }
+    }
+
     /// The nominal encounter's focused capture radius `b_capture`, m (`-1.0` if no
     /// scenario) — the radius of Earth's effective collision disc in the b-plane,
     /// ~1.773 R⊕ at this encounter's `v_inf`.
@@ -422,6 +514,30 @@ impl Mission {
         self.core
             .as_ref()
             .and_then(|c| c.nominal_perigee_m())
+            .unwrap_or(-1.0)
+    }
+
+    /// Whether the four single-term Tier-2 shifts were measured for this scenario
+    /// — the frontend's cue that the GR/Yarkovsky/belt/SRP menu holds real numbers
+    /// rather than the `-1` "not ready" sentinel. `true` only after a build that
+    /// opted into the preview (the frontend's worker build does).
+    #[func]
+    fn has_tier2_preview(&self) -> bool {
+        self.core.as_ref().is_some_and(|c| c.has_tier2_preview())
+    }
+
+    /// The **shifted nominal perigee**, m, that the fixed shipping seed reaches with
+    /// a single Tier-2 term switched on — `term` ∈ {`"relativity"`, `"yarkovsky"`,
+    /// `"belt"`, `"srp"`}. `-1.0` when the preview was not run, `term` is unknown,
+    /// or — **belt only** — the small-body kernel is absent, so the belt shift is
+    /// genuinely *unavailable* rather than zero (a 0 would read as "the belt does
+    /// nothing"). The GDScript menu forms the shift as
+    /// `nominal_perigee_m() − this` and formats the km.
+    #[func]
+    fn tier2_shifted_perigee_m(&self, term: GString) -> f64 {
+        self.core
+            .as_ref()
+            .and_then(|c| c.tier2_shifted_perigee_m(&term.to_string()))
             .unwrap_or(-1.0)
     }
 

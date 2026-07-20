@@ -1585,3 +1585,15 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod _sync_gate {
+    fn _assert_sync<T: Sync>() {}
+    #[test]
+    fn real_field_scenario_is_sync() {
+        // The gate for the Arc-shared Tier-2 preview: the gdext binding clones an
+        // Arc<RealFieldScenario> to a worker thread and measures shifts off it while
+        // the render thread keeps reading the same scenario. That needs Sync.
+        _assert_sync::<super::RealFieldScenario>();
+    }
+}

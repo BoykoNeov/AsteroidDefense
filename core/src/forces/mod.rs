@@ -32,6 +32,7 @@
 //! against ASSIST land in later batches.
 
 pub mod point_mass;
+pub mod relativity;
 
 use crate::epoch::Epoch;
 use crate::state::StateVector;

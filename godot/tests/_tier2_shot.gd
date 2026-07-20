@@ -40,21 +40,34 @@ func _run() -> void:
 		await get_tree().process_frame
 	print("TIER2SHOT  mission_online=%s after %d ms" % [Sim.mission_online, Time.get_ticks_msec() - t0])
 
-	# Open the panel (kicks the on-demand ~2 min measurement) and wait for it.
 	main.enc.visible = false
 	main.map2d.visible = false
 	main.planner.visible = false
-	main.tier2_panel.visible = true
-	Sim.tier2_panel_open = true
-	Sim.request_tier2_preview()
+
+	# Drive the REAL toggle path — the one thing every other check bypassed:
+	# a key event through main._input(), so project.godot action -> main.gd handler
+	# -> Sim executes. [P] must open the panel AND kick the measurement.
+	assert(not main.tier2_panel.visible, "panel starts hidden")
+	main._input(_key(KEY_P))
+	print("TIER2SHOT  [P] -> panel.visible=%s measuring=%s (expect true/true)"
+		% [main.tier2_panel.visible, Sim.tier2_measuring])
+	assert(main.tier2_panel.visible, "[P] must open the panel via the action")
+	assert(Sim.tier2_measuring, "[P] must kick the on-demand measurement")
+
+	# Wait for the on-demand measurement.
 	var t1 := Time.get_ticks_msec()
 	while not Sim.tier2_ready and Time.get_ticks_msec() - t1 < 240000:
 		await get_tree().process_frame
 	print("TIER2SHOT  tier2_ready=%s after %d ms" % [Sim.tier2_ready, Time.get_ticks_msec() - t1])
 
-	# Switch every term on — the numbers branch of _draw.
-	for term in ["relativity", "yarkovsky", "belt", "srp"]:
-		Sim.tier2_on[term] = true
+	# Flip each term ON with its REAL key (panel is open, so the guarded branches
+	# fire) — the numbers branch of _draw, reached through the action handlers.
+	for pair in [[KEY_G, "relativity"], [KEY_Y, "yarkovsky"], [KEY_A, "belt"], [KEY_S, "srp"]]:
+		var before: bool = Sim.tier2_on[pair[1]]
+		main._input(_key(pair[0]))
+		print("TIER2SHOT  key -> tier2_on[%s] %s -> %s (expect flipped)"
+			% [pair[1], before, Sim.tier2_on[pair[1]]])
+		assert(Sim.tier2_on[pair[1]] != before, "term key must flip %s" % pair[1])
 	await _settle(6)   # _draw runs here for the now-visible panel
 
 	# Echo exactly what the panel formats, so the console and the picture can be
@@ -69,6 +82,15 @@ func _run() -> void:
 
 	await _shot("tier2_menu_all_on")
 	get_tree().quit(0)
+
+
+## A pressed key event for `keycode`, to feed main._input() so the real action
+## handlers (project.godot -> main.gd -> Sim) run rather than being bypassed.
+func _key(keycode: int) -> InputEventKey:
+	var ev := InputEventKey.new()
+	ev.keycode = keycode
+	ev.pressed = true
+	return ev
 
 
 func _settle(frames: int) -> void:

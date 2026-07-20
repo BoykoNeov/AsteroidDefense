@@ -45,6 +45,30 @@ func _run() -> void:
 		await get_tree().process_frame
 	print("SHOT  mission_online=%s after %d ms" % [Sim.mission_online, Time.get_ticks_msec() - t0])
 
+	# 0. THE COMET (3D), in the 3D solar view — the shot pair the span gate exists
+	#    for. On its arc it must be a body out in the field; past the end of its
+	#    propagated orbit it must be GONE, and specifically not sitting on the Sun,
+	#    which is what ZERO draws as in this heliocentric frame. Nothing else here
+	#    checks that, and no passive run scrubs past 22.6 years.
+	print("SHOT  comet_online=%s arc=%s" % [Sim.comet_online, Sim.comet_arc_label()])
+	Sim.paused = true
+	Sim.jump(Sim.T_IMPACT)                 # perihelion falls near the impact epoch
+	await _settle(4)
+	await _shot("comet_1_on_arc")
+	var p_on: Vector3 = Sim.pos_ecl(Sim.comet_el, Sim.t)
+	print("SHOT  comet on arc: t=%.0f d active=%s r=%.2f AU node_visible=%s"
+		% [Sim.t, Sim.catalog_active(Sim.comet_el, Sim.t), p_on.length(),
+			main.solar.comet_node.visible])
+
+	Sim.jump(Sim.comet_el.t_max + 400.0)   # past the end of the propagated orbit
+	await _settle(4)
+	await _shot("comet_2_past_span_gone")
+	print("SHOT  comet past span: t=%.0f d active=%s node_visible=%s (must be false — ZERO is the Sun)"
+		% [Sim.t, Sim.catalog_active(Sim.comet_el, Sim.t), main.solar.comet_node.visible])
+	Sim.jump(0.0)
+	Sim.paused = false
+	await _settle(2)
+
 	# Show the b-plane view: exactly what [3] does, without an InputMap round-trip.
 	main.enc.visible = true
 	main.map2d.visible = false

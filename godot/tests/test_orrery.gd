@@ -137,13 +137,40 @@ func _init() -> void:
 
 	# The b-plane view lights WITH the threat (3C-2c): its geometry is the same
 	# `EncounterFrame` the scenario build produces, so it is real exactly when the
-	# threat is. The comet and interceptor stay dark — each is gated on the real
-	# source that feeds it, and neither has one yet. This is why there are four
-	# flags: one would light all four, and two of them would be lying.
+	# threat is. The comet lights too as of 3D — but on its own gate, set from what
+	# the catalog actually holds, not alongside `mission_online`. The interceptor
+	# stays dark: still no Lambert solver behind its cosmetic bezier. This is why
+	# there are four flags and not one.
 	_check(sim.encounter_online,
 		"the b-plane view lights with the threat — same frame, same propagation")
-	_check(not sim.comet_online and not sim.interceptor_online,
-		"comet/interceptor stay dormant on their own gates (no core behind either)")
+	_check(sim.comet_online,
+		"the comet lights from the catalog the worker flew alongside the threat")
+	_check(not sim.interceptor_online,
+		"the interceptor stays dormant on its own gate (no Lambert solver behind it)")
+
+	# --- The comet is the core's integration, gated on its own span ---------
+	# It rode the build worker through the same validated field as the threat, so
+	# it is drawable exactly where it was flown — and nowhere else. The gate is the
+	# point: outside the span the binding returns ZERO, and ZERO here is the SUN.
+	_check(sim.comet_el.source == "catalog" and not sim.comet_el.has("m0"),
+		"the comet is a catalog body, not a GDScript Kepler ellipse")
+	var comet_span_yr: float = (sim.comet_el.t_max - sim.comet_el.t_min) / 365.25
+	_check(comet_span_yr > 21.0 and comet_span_yr < 24.0,
+		"the comet's arc is the ~22.6 yr orbit it was authored as (%.1f yr)" % comet_span_yr)
+	_check(sim.catalog_active(sim.comet_el, sim.comet_el.t_min + 1.0),
+		"the comet is active inside its propagated span")
+	_check(not sim.catalog_active(sim.comet_el, sim.comet_el.t_max + 10.0),
+		"the comet is NOT active past its span — where a lookup would draw it on the Sun")
+	var comet_off: Vector3 = sim.pos_ecl(sim.comet_el, sim.comet_el.t_max + 10.0)
+	_check(comet_off == Vector3.ZERO,
+		"an out-of-span comet read is refused by the gate, not served as a position")
+
+	# On its arc it is a real body at a real distance — and NOT at the origin,
+	# which is the failure the gate exists to catch.
+	var comet_on: Vector3 = sim.pos_ecl(sim.comet_el, sim.comet_el.t_min + 100.0)
+	_check(comet_on != Vector3.ZERO and comet_on.length() > 0.7
+			and comet_on.length() < 15.6,
+		"the comet sits on its designed ellipse in-span (%.2f AU)" % comet_on.length())
 
 	# --- The threat is REAL: it arrives on Earth ----------------------------
 	# The core integrated it backward from an impact condition, so the arc must

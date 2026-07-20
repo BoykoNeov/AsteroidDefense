@@ -221,16 +221,126 @@ fn discover_span(eph: &Ephemeris) -> Result<(f64, f64), ScenarioError> {
 }
 
 /// One body in the orrery catalog: a pre-integrated, dense-output trajectory the
-/// display scrubs over. The `Clock` is built **once** (at [`MissionCore::
-/// add_synthetic_body`]) in the same validated Tier-1 field as the threat, so a
-/// scrub query is a cheap dense-output evaluation, never a re-integration.
-struct OrreryBody {
+/// display scrubs over. The `Clock` is built **once** (at [`seed_orrery_body`], via
+/// [`MissionCore::add_synthetic_body`] or the build worker) in the same validated
+/// Tier-1 field as the threat, so a scrub query is a cheap dense-output evaluation,
+/// never a re-integration.
+pub struct OrreryBody {
     /// Display label (e.g. `"C/2029 K1"`).
     name: String,
     /// Coarse class the frontend styles on (`"asteroid"`, `"comet"`, …).
     kind: String,
     /// The pre-integrated trajectory in SSB metres (the integration frame).
     clock: Clock,
+}
+
+/// The display comet **C/2029 K1** — the one piece of scenery in the orrery, and
+/// the parameters it is authored from.
+///
+/// It exists to give the long clock something to sweep besides the planets, and it
+/// is *synthetic and labelled as such*: a designed orbit flown through the same
+/// validated Tier-1 field as the threat, not a real object. What it is emphatically
+/// not any more is a Kepler ellipse drawn in GDScript beside a real integrated
+/// threat — two different physics on one screen with nothing marking which is which.
+pub mod display_comet {
+    use super::*;
+    use crate::AU_M;
+
+    pub const NAME: &str = "C/2029 K1";
+    pub const KIND: &str = "comet";
+
+    const A_AU: f64 = 8.0; // ⇒ period ≈ 22.6 yr
+    const E: f64 = 0.9; // q ≈ 0.8 AU, Q ≈ 15.2 AU
+    const INCLINATION_DEG: f64 = 28.0;
+    const RAAN_DEG: f64 = 210.0;
+    const ARG_PERIAPSIS_DEG: f64 = 0.0;
+
+    /// True anomaly at the campaign-start epoch, degrees — just past aphelion and
+    /// inbound, chosen so **perihelion falls near the impact epoch** rather than in
+    /// the campaign's first months. The display's job is to have something happening
+    /// while the operator works, and the operator works towards impact.
+    ///
+    /// Derived from that intent, not tuned by eye: wanting perihelion ≈ 12.8 yr
+    /// after epoch0 on a 22.6 yr period fixes the mean anomaly at
+    /// `M₀ = −2π·(12.8/22.6) ≈ 2.725 rad`, and solving Kepler's equation at `e = 0.9`
+    /// gives `E ≈ 2.921 rad` ⇒ `ν ≈ 176.8°`. Elements here are true-anomaly only by
+    /// design (`elements.rs`), which is why the conversion is spelled out rather
+    /// than computed.
+    ///
+    /// **Measured on the real perturbed field** (not the two-body derivation):
+    /// perihelion **0.807 AU, +0.97 yr after impact** — the comet is inbound at
+    /// ~4.4 AU while the encounter plays out and rounds the Sun the year after.
+    /// `build_worker_installs_the_display_comet` re-measures it.
+    const TRUE_ANOMALY_DEG: f64 = 176.8;
+
+    /// Snapshot cadence, seconds. Sub-cadence scrub queries come from the
+    /// integrator's dense output, so this sets memory and integration cost — not the
+    /// fidelity of the fast perihelion rounding.
+    pub const CADENCE_SECONDS: f64 = 5.0 * 86_400.0;
+
+    /// Snapshots — **one full orbit** (≈ 22.6 yr) from the campaign start. Measured
+    /// cost: ~4 s of integration, which is why this rides the build worker and never
+    /// the main thread. One period rather than two because a second lap retraces the
+    /// same arc for another ~4 s of build.
+    pub const N_SNAPSHOTS: u32 = 1651;
+
+    /// The authored orbit, referred to the ecliptic at the campaign-start epoch.
+    pub fn elements() -> OrbitalElements {
+        OrbitalElements::new(
+            A_AU * AU_M,
+            E,
+            INCLINATION_DEG.to_radians(),
+            RAAN_DEG.to_radians(),
+            ARG_PERIAPSIS_DEG.to_radians(),
+            TRUE_ANOMALY_DEG.to_radians(),
+        )
+    }
+}
+
+/// Integrate a synthetic designer body into an [`OrreryBody`], given the field it
+/// flies in — the seed math, factored out so the **worker thread** and
+/// [`MissionCore::add_synthetic_body`] cannot drift apart.
+///
+/// The seed is built in the integration frame: element→state about the Sun
+/// (heliocentric, ecliptic), rotate ecliptic→ICRF, add the Sun's SSB state — the
+/// exact inverse of the read path, so a query back at `epoch0` recovers the
+/// authored position. See [`MissionCore::add_synthetic_body`] for the parameters.
+///
+/// Free rather than a method because the worker holds a `BuiltScenario` and an
+/// `Arc<Ephemeris>` but **no `MissionCore`** — the core stays on the main thread
+/// serving the orrery while this runs.
+pub fn seed_orrery_body(
+    ephemeris: &Arc<Ephemeris>,
+    scenario: &RealFieldScenario,
+    name: &str,
+    kind: &str,
+    elements: OrbitalElements,
+    epoch0: Epoch,
+    cadence_seconds: f64,
+    n_snapshots: u32,
+) -> Result<OrreryBody, ScenarioError> {
+    let mu_sun = ephemeris
+        .sun_gm_m3_s2()
+        .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
+
+    let helio_ecl = elements.to_state(mu_sun);
+    let helio_icrf = StateVector::new(
+        ecliptic_to_icrf(helio_ecl.position),
+        ecliptic_to_icrf(helio_ecl.velocity),
+    );
+    let sun_ssb = EphemerisPerturber::new(Arc::clone(ephemeris), SUN_J2000)
+        .state_at(epoch0)
+        .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
+    let seed = StateVector::new(
+        helio_icrf.position + sun_ssb.position,
+        helio_icrf.velocity + sun_ssb.velocity,
+    );
+
+    Ok(OrreryBody {
+        name: name.to_string(),
+        kind: kind.to_string(),
+        clock: scenario.propagate_free(epoch0, seed, cadence_seconds, n_snapshots)?,
+    })
 }
 
 /// A committed deflection plan and its precomputed result.
@@ -300,6 +410,19 @@ pub struct BuiltScenario {
 }
 
 impl BuiltScenario {
+    /// The field just built, borrowed — so the **same worker** can fly orrery bodies
+    /// through it before handing everything over ([`seed_orrery_body`]). Borrowing
+    /// rather than moving keeps the scenario whole for [`MissionCore::install`].
+    pub fn scenario_ref(&self) -> &RealFieldScenario {
+        &self.scenario
+    }
+
+    /// The campaign-start epoch this scenario was built around — the epoch orrery
+    /// bodies are seeded at, so the scenery and the campaign share one `t = 0`.
+    pub fn epoch0(&self) -> Epoch {
+        self.scenario.epoch0()
+    }
+
     /// Design the impactor, back-propagate the seed, fly the nominal, and scan the
     /// encounter it produces — **~10 s of work**, and the whole reason this takes an
     /// `Arc<Ephemeris>` rather than `&MissionCore`: it is meant to be called on a
@@ -425,15 +548,22 @@ impl MissionCore {
         Arc::clone(&self.ephemeris)
     }
 
-    /// Adopt a scenario built elsewhere (a worker thread; see [`BuiltScenario`]).
+    /// Adopt a scenario built elsewhere (a worker thread; see [`BuiltScenario`]),
+    /// along with any orrery bodies flown in that same field on the same worker.
     /// Cheap — every expensive thing already happened off-thread.
-    pub fn install(&mut self, built: BuiltScenario) {
+    ///
+    /// `bodies` arrives **with** the scenario rather than being added afterwards
+    /// because a new scenario invalidates the catalog (the old bodies were flown in
+    /// the old field), and because seeding them here instead would put a multi-second
+    /// integration back on the main thread — the very stall the worker exists to
+    /// avoid. See [`seed_orrery_body`].
+    pub fn install(&mut self, built: BuiltScenario, bodies: Vec<OrreryBody>) {
         self.nominal_clock = Some(built.nominal_clock);
         self.nominal_encounter = Some(built.nominal_encounter);
         self.nominal_frame = Some(built.nominal_frame);
         self.scenario = Some(built.scenario);
         self.plan = None; // a new scenario invalidates any prior plan
-        self.bodies.clear(); // …and any orrery bodies flown in the old field
+        self.bodies = bodies; // …and the catalog is replaced, not appended to
     }
 
     /// Build the designer impactor + campaign over the already-loaded ephemeris and
@@ -449,7 +579,7 @@ impl MissionCore {
     #[allow(dead_code)]
     pub fn build_scenario(&mut self, cfg: &ImpactorConfig) -> Result<(), ScenarioError> {
         let built = BuiltScenario::build(self.ephemeris_arc(), cfg)?;
-        self.install(built);
+        self.install(built, Vec::new());
         Ok(())
     }
 
@@ -925,33 +1055,18 @@ impl MissionCore {
             .scenario
             .as_ref()
             .ok_or_else(|| ScenarioError::NominalNotAHit("scenario not built".into()))?;
-        let mu_sun = self
-            .ephemeris
-            .sun_gm_m3_s2()
-            .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
 
-        // Heliocentric ecliptic state from the elements, rotated into the ICRF
-        // integration frame, then lifted to SSB by adding the Sun's barycentric
-        // state — the seed the field integrates.
-        let helio_ecl = elements.to_state(mu_sun);
-        let helio_icrf = StateVector::new(
-            ecliptic_to_icrf(helio_ecl.position),
-            ecliptic_to_icrf(helio_ecl.velocity),
-        );
-        let sun_ssb = EphemerisPerturber::new(Arc::clone(&self.ephemeris), SUN_J2000)
-            .state_at(epoch0)
-            .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
-        let seed = StateVector::new(
-            helio_icrf.position + sun_ssb.position,
-            helio_icrf.velocity + sun_ssb.velocity,
-        );
-
-        let clock = sc.propagate_free(epoch0, seed, cadence_seconds, n_snapshots)?;
-        self.bodies.push(OrreryBody {
-            name: name.to_string(),
-            kind: kind.to_string(),
-            clock,
-        });
+        let body = seed_orrery_body(
+            &self.ephemeris,
+            sc,
+            name,
+            kind,
+            elements,
+            epoch0,
+            cadence_seconds,
+            n_snapshots,
+        )?;
+        self.bodies.push(body);
         Ok(self.bodies.len() - 1)
     }
 
@@ -1540,6 +1655,95 @@ mod tests {
 
         // The deflected track is a full n-point line too.
         assert_eq!(mc.deflected_track_ecl_au(150).len(), 150);
+    }
+
+    /// Kernel-gated (release-run). **The build worker's exact composition**, and the
+    /// only thing that proves the comet reaches the display at all: `Mission`'s
+    /// worker calls `BuiltScenario::build` → [`seed_orrery_body`] → [`install`], and
+    /// no other test walks that sequence (`build_scenario` installs an empty
+    /// catalog). Assembling it here rather than in GDScript is the point — a
+    /// GDScript-only check would only say the flag flipped.
+    ///
+    /// The perihelion assertion is not decoration: `TRUE_ANOMALY_DEG` is *derived*
+    /// from "round the Sun near the impact epoch" through a Kepler solve written
+    /// out by hand in a doc comment. This re-measures that derivation on the real
+    /// perturbed field, so a careless edit to the seed angle fails loudly instead of
+    /// quietly parking the comet at aphelion for the whole campaign.
+    #[test]
+    fn build_worker_installs_the_display_comet() {
+        if !have_kernels() {
+            eprintln!("skipping build_worker_installs_the_display_comet: no DE kernel");
+            return;
+        }
+        let mut mc = MissionCore::load().expect("load kernels");
+
+        // Exactly what `begin_build_scenario`'s worker does, in order.
+        let eph = mc.ephemeris_arc();
+        let built = BuiltScenario::build(Arc::clone(&eph), &ImpactorConfig::default())
+            .expect("scenario builds");
+        let epoch0 = built.epoch0();
+        let comet = seed_orrery_body(
+            &eph,
+            built.scenario_ref(),
+            display_comet::NAME,
+            display_comet::KIND,
+            display_comet::elements(),
+            epoch0,
+            display_comet::CADENCE_SECONDS,
+            display_comet::N_SNAPSHOTS,
+        )
+        .expect("comet flies in the built field");
+        mc.install(built, vec![comet]);
+
+        assert_eq!(mc.catalog_count(), 1);
+        assert_eq!(mc.catalog_name(0), Some(display_comet::NAME));
+        assert_eq!(mc.catalog_kind(0), Some(display_comet::KIND));
+
+        // The span is the gate the display hides the comet outside of — one orbit.
+        let epoch0_tdb = epoch0.tdb_seconds_past_j2000();
+        let (lo, hi) = mc.catalog_span_tdb(0).expect("comet span");
+        assert!((lo - epoch0_tdb).abs() < 1.0);
+        let span_years = (hi - lo) / (365.25 * 86_400.0);
+        assert!(
+            (21.0..=24.0).contains(&span_years),
+            "comet span {span_years:.1} yr is not the ~22.6 yr orbit it is authored as"
+        );
+
+        // Sweep the span: the comet stays on its designed ellipse, and its closest
+        // approach to the Sun — the visible event — lands near the impact epoch.
+        let impact_tdb = mc.impact_tdb_seconds();
+        let (mut peri_r, mut peri_tdb) = (f64::INFINITY, 0.0);
+        let samples = 4000;
+        for k in 0..=samples {
+            let tdb = lo + (hi - lo) * (k as f64 / samples as f64);
+            let r = mc
+                .catalog_position_ecl_au(0, tdb)
+                .expect("in-span position")
+                .norm();
+            assert!(
+                (0.7..=15.6).contains(&r),
+                "comet at {r:.3} AU is off its designed ellipse [q, Q] ≈ [0.8, 15.2]"
+            );
+            if r < peri_r {
+                peri_r = r;
+                peri_tdb = tdb;
+            }
+        }
+        assert!(
+            (0.7..=0.95).contains(&peri_r),
+            "perihelion {peri_r:.3} AU is not the designed q ≈ 0.8 AU"
+        );
+        let peri_vs_impact_yr = (peri_tdb - impact_tdb) / (365.25 * 86_400.0);
+        assert!(
+            peri_vs_impact_yr.abs() < 1.5,
+            "perihelion falls {peri_vs_impact_yr:+.2} yr from impact — the seed angle no \
+             longer puts the comet's pass anywhere near the campaign's payoff"
+        );
+
+        // The ZERO-is-the-Sun gate has something to gate on: outside the span the
+        // read fails rather than silently returning the origin.
+        assert!(mc.catalog_position_ecl_au(0, hi + 86_400.0).is_none());
+        assert!(mc.catalog_position_ecl_au(0, lo - 86_400.0).is_none());
     }
 
     /// Kernel-gated (release-run). The orrery seed path is correct end-to-end. A

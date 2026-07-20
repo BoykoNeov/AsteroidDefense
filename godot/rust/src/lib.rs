@@ -17,13 +17,13 @@
 
 mod mission_core;
 
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use godot::prelude::*;
 
 use asteroid_core::scenario::{ImpactorConfig, ScenarioError};
 use asteroid_core::{Epoch, OrbitalElements};
-use mission_core::{BuiltScenario, MissionCore};
+use mission_core::{display_comet, seed_orrery_body, BuiltScenario, MissionCore, OrreryBody};
 
 /// Metres per astronomical unit — synthetic-body semi-major axes reach the SI
 /// core as AU from GDScript.
@@ -69,7 +69,7 @@ struct Mission {
     /// The in-flight background scenario build, if any — see
     /// [`begin_build_scenario`](Mission::begin_build_scenario). `Some` exactly while
     /// a worker is running, so it doubles as the "is building" flag.
-    build: Option<mpsc::Receiver<Result<BuiltScenario, String>>>,
+    build: Option<mpsc::Receiver<Result<(BuiltScenario, Vec<OrreryBody>), String>>>,
     error: GString,
     base: Base<RefCounted>,
 }
@@ -189,12 +189,30 @@ impl Mission {
             // The error is flattened to a String on this side of the channel: only
             // the message ever reaches the HUD, and a plain String is unambiguously
             // safe to send.
-            let built =
-                BuiltScenario::build(eph, &ImpactorConfig::default()).map_err(|e| e.to_string());
+            let result = BuiltScenario::build(Arc::clone(&eph), &ImpactorConfig::default())
+                .map_err(|e| e.to_string())
+                .and_then(|built| {
+                    // The orrery's scenery flies here, on this thread, in the field
+                    // that was just built — ~4 s of integration that would otherwise
+                    // land on the main thread, since `add_synthetic_body` is
+                    // inline-and-expensive by design.
+                    let comet = seed_orrery_body(
+                        &eph,
+                        built.scenario_ref(),
+                        display_comet::NAME,
+                        display_comet::KIND,
+                        display_comet::elements(),
+                        built.epoch0(),
+                        display_comet::CADENCE_SECONDS,
+                        display_comet::N_SNAPSHOTS,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    Ok((built, vec![comet]))
+                });
             // A closed channel means the game quit mid-build. Dropping the result is
             // the right response; `send`'s Err must not become a panic on a detached
             // thread.
-            let _ = tx.send(built);
+            let _ = tx.send(result);
         });
         self.build = Some(rx);
         self.error = GString::new();
@@ -221,11 +239,11 @@ impl Mission {
         };
         match rx.try_recv() {
             Err(mpsc::TryRecvError::Empty) => true,
-            Ok(Ok(built)) => {
+            Ok(Ok((built, bodies))) => {
                 self.build = None;
                 match self.core.as_mut() {
                     Some(core) => {
-                        core.install(built);
+                        core.install(built, bodies);
                         self.error = GString::new();
                     }
                     // The kernels were dropped (a failed re-load) while the build

@@ -52,8 +52,9 @@ func _draw() -> void:
 		var col := bright if Sim.blink(1.4) else mid
 		_tag_diamond(cam, Sim.pos3d(Sim.ast_el, t), "2031-XK <THREAT>", col)
 
-	if Sim.comet_online:
-		_tag_diamond(cam, Sim.pos3d(Sim.comet_el, t), "C/2029 K1", dim)
+	# Only while it is on its arc — a tag at ZERO would label the Sun.
+	if Sim.catalog_active(Sim.comet_el, t):
+		_tag_diamond(cam, Sim.pos3d(Sim.comet_el, t), Sim.comet_el.name, dim)
 
 	if Sim.interceptor_online and Sim.interceptor_phase(t) == "CRUISE":
 		_tag_cross(cam, Sim.interceptor_pos(t), "ATLAS-1", bright)

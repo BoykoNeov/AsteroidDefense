@@ -505,9 +505,54 @@ scrubbing**: at warp the clock runs on through the settle frames and the first a
 rock 1.3 LD out and off-plot (the gate working, not the branch). The payoff picture: the contact sits at perigee
 0.024 LD **inside** its own b-point at 0.038 LD — b≠perigee, legible without reading a number.
 
-**NEXT — 3D:** comet via `add_synthetic_body`/`catalog_*` → flip `comet_online` (bounded `catalog_span_tdb` →
-same hide-outside-arc discipline as `threat_active`); real bodies via `sb441-n16.bsp` (already on disk).
-Interceptor stays cosmetic until a Lambert solver exists — `interceptor_online` is the flag. `required_dv`
-remains ~18.3 s → keep OFF every live path (`req_dv_label` is a labelled first-order estimate). Still open:
-osculating e/i for the HUD needs an ICRF-vs-ecliptic inclination decision; ξ/ζ sign stays Tier-3 (3C-2c coexists
-with it — display axes + rotation-invariant scalars only, so settling it later is free).
+## 3D (comet half) DONE 2026-07-20 — `comet_online` is true, and GDScript owns no orbital mechanics at all
+
+**Scope was SPLIT on advisor's call** (user agreed): the comet is wiring over an API that already existed and
+was already tested; **real NEOs are a different design** and are NOT done. `add_synthetic_body` *integrates
+Keplerian elements* through the field, but `sb441-n16.bsp` **already contains** the ephemeris — the honest path
+is reading it directly, the same `"ephem"` path the planets use extended to small-body NAIF ids, which is a new
+catalog *source variant*, not more wiring. Don't bundle them.
+
+**MEASURE-FIRST decided the placement, again.** `add_synthetic_body` is inline-on-the-main-thread by design.
+Probe (release, temp kernels): `build_scenario` **11.2 s**, comet **2.0 s over 12 yr / 8.1 s over 45 yr** — both
+far past the ~0.5 s an inline-after-install call could hide, so it **folds into the existing build worker**.
+New free fn `seed_orrery_body(&Arc<Ephemeris>, &RealFieldScenario, …) -> OrreryBody` holds the seed math so the
+worker and `add_synthetic_body` **cannot drift**; `BuiltScenario` grew `scenario_ref()`/`epoch0()` so the worker
+can fly bodies through the field it just built; `install(built, bodies)` takes both because a new scenario
+invalidates the old catalog anyway. Shipped span = **one orbit ≈ 22.6 yr (~4 s)**; a 2nd lap retraces the same
+arc for another ~4 s.
+
+**The comet is authored, not tuned by eye.** `display_comet` module: a=8 AU, e=0.9, i=28°, Ω=210°. Elements are
+**true-anomaly only by design** (`elements.rs` has no mean-anomaly API), so wanting "perihelion near impact"
+had to be converted by hand — M₀ = −2π(12.8/22.6) ≈ 2.725 rad → Kepler solve at e=0.9 → E ≈ 2.921 → **ν₀ =
+176.8°** — and the derivation is spelled out in the doc comment. **Measured on the real perturbed field: 0.807
+AU, +0.97 yr from impact** (vs +0.8 targeted two-body). The test re-measures it, so a careless edit to the seed
+angle fails loudly instead of quietly parking the comet at aphelion for the whole campaign.
+
+**GDScript's LAST Kepler is deleted.** The comet was the only remaining user of `_elements`/`_kepler_pos_ecl`/
+`solve_kepler` and the Kepler fallback branches of `pos_ecl`/`orbit_points` — all gone (advisor predicted this
+before I looked). Every drawn body now names a source: `ephem`/`threat`/`threat_defl`/`catalog`. **The fallback
+now `push_error`s instead of returning ZERO** — returning ZERO for an unknown source is the trap itself.
+
+**ZERO-is-the-Sun, 3rd instance — first one caught BEFORE shipping.** `catalog_position_ecl_au` returns
+`Vector3::ZERO` out-of-span. The comet's 22.6 yr arc is <1/10 of the ~300 yr clock, so ungated it would sit on
+the Sun for most of the timeline. Per-body gate `Sim.catalog_active(el, t)` off `catalog_span_tdb` (the flag is
+set from **what the catalog actually holds**, not alongside `mission_online` — the 4-flags rule). test_orrery's
+old `not sim.comet_online` assertion INVERTED, +8 new checks.
+
+**Verified:** core 81 + gdext 14 (**70 s** = real physics, not a kernel skip) + validation all green;
+test_orrery **0 failures**; and the two `_shot.gd` pictures that are the actual proof — `comet_1_on_arc`
+(inbound 4.4 AU, tagged C/2029 K1 while the encounter plays out) and the money shot `comet_2_past_span_gone`
+(2051: comet **absent**, planets untouched, nothing on the Sun). **The orbit polyline hides WITH the body** — advisor caught me
+claiming it stayed drawn "matching the threat-track convention" when `_nom_orbit_line.visible = active`
+means the threat hides its track too, so the claim was backwards AND unverified. The polyline is *safe*
+either way (built once from the whole span, never queries the live clock, so it cannot collapse to the
+Sun) — but an orbit drawn for a body the sim is not tracking still reads as a claim that it is. Lesson
+repeated: don't assert a parallel to existing code without opening the existing code.
+
+**NEXT — 3D (real-NEO half), NOT started:** `sb441-n16.bsp` (on disk) via a new SPK-backed catalog source, not
+`add_synthetic_body`; teaching set is Apophis / Bennu / Didymos (HANDOFF §9). Interceptor stays cosmetic until a
+Lambert solver exists — `interceptor_online` is the flag. `required_dv` remains ~18.3 s → keep OFF every live
+path (`req_dv_label` is a labelled first-order estimate). Still open: osculating e/i for the HUD needs an
+ICRF-vs-ecliptic inclination decision; ξ/ζ sign stays Tier-3 (3C-2c coexists with it — display axes +
+rotation-invariant scalars only, so settling it later is free).

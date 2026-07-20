@@ -49,9 +49,15 @@ const DAY_S := 86400.0
 ## it is false.
 var mission_online := false
 
-## The comet is dormant until it comes from the core's orrery catalog (3C-2c).
-## It was a Kepler ellipse; drawing it beside a real integrated threat would put
-## two different physics on one screen with nothing marking which is which.
+## The comet is live (3D): it comes from the core's orrery catalog, integrated on
+## the build worker in the same validated Tier-1 field as the threat. It was a
+## Kepler ellipse authored in this file, which put two different physics on one
+## screen with nothing marking which is which.
+##
+## Set from what the catalog actually holds after the build lands (see
+## `_install_catalog`) — never alongside `mission_online`, because the comet is a
+## separate body that can fail to fly on its own. It is *synthetic and labelled as
+## such*: a designed orbit, honestly propagated, not a real object.
 var comet_online := false
 
 ## The interceptor is dormant. Its cruise path is a cosmetic bezier with no
@@ -394,8 +400,13 @@ func _install_threat() -> void:
 
 	mission_online = true
 	# The b-plane frame is built with the scenario, so the close-up is live the
-	# moment the threat is. The comet and interceptor flags stay dark: still no core.
+	# moment the threat is.
 	encounter_online = true
+	# The comet rode the same worker, in the same field — so it lands here too, and
+	# `comet_online` is set by what the catalog actually contains, not by assuming
+	# the worker did what it was asked. The interceptor flag stays dark: still no
+	# Lambert solver behind it.
+	_install_catalog()
 	_build_events()
 	mission_ready.emit()
 	event_logged.emit(_stamp(t) + "  THREAT SOLUTION ACQUIRED - 2031-XK TRACKING")
@@ -448,22 +459,52 @@ func moon_pos3d(t_days: float) -> Vector3:
 	return pos3d(earth_el, t_days) + moon_local(t_days)
 
 
-func _build_comet() -> void:
-	comet_el = _elements(8.0, 0.90, deg_to_rad(28.0), deg_to_rad(210.0),
-		deg_to_rad(80.0), 0.0)
-	# Put it inbound, perihelion ~T_IMPACT + 300 d.
-	comet_el.m0 = wrapf(-comet_el.n * (T_IMPACT + 300.0), -PI, PI)
-	comet_el.name = "C/2029 K1"
-	comet_el.vis_r = 0.040
-	comet_el.kind = "comet"
+## Adopt the orrery catalog the build worker flew alongside the threat.
+##
+## The comet used to be a Kepler ellipse authored here — the last piece of orbital
+## mechanics in GDScript, and the same mistake the threat's f64 block was: two
+## different physics on one screen with nothing marking which is which. Now it is
+## the core's integration in the core's validated field, and this layer only names
+## an index and a colour.
+func _install_catalog() -> void:
+	comet_el = {}
+	comet_online = false
+	for i in mission.catalog_count():
+		if mission.catalog_kind(i) != "comet":
+			continue
+		var s: PackedFloat64Array = mission.catalog_span_tdb(i)
+		if s.size() != 2:
+			continue
+		comet_el = {
+			"name": mission.catalog_name(i), "source": "catalog",
+			"kind": "comet", "catalog_index": i, "vis_r": 0.040,
+			# Days from EPOCH0_TDB — the ZERO-is-the-Sun gate, per body, read from
+			# the core rather than reconstructed from the span we asked for.
+			"t_min": (s[0] - EPOCH0_TDB) / DAY_S,
+			"t_max": (s[1] - EPOCH0_TDB) / DAY_S,
+		}
+		comet_online = true
+		break
 
 
-func _elements(a: float, e: float, i: float, om: float, w: float, m0: float) -> Dictionary:
-	return {
-		"name": "", "a": a, "e": e, "i": i, "om": om, "w": w,
-		"m0": m0, "n": TAU / (365.25 * pow(a, 1.5)),
-		"vis_r": 0.05, "kind": "body",
-	}
+## Whether a catalog body exists at a mission time — the per-body twin of
+## `threat_active`, and mandatory for the same reason: outside its propagated span
+## `catalog_position_ecl_au` returns ZERO, and ZERO here is the Sun. A comet that
+## silently parks on the Sun for the two thirds of the clock it does not cover is
+## exactly the failure this gate exists to prevent.
+func catalog_active(el: Dictionary, t_days: float = INF) -> bool:
+	if not comet_online or el.get("source", "") != "catalog":
+		return false
+	var d := t if is_inf(t_days) else t_days
+	return d >= float(el.t_min) and d <= float(el.t_max)
+
+
+## The comet's tracked arc as dates, for a readout that has to explain why there is
+## nothing to show at the current clock.
+func comet_arc_label() -> String:
+	if not comet_online:
+		return "--"
+	return "%s .. %s" % [date_string(comet_el.t_min), date_string(comet_el.t_max)]
 
 
 ## Default timeline: no mission on file. Impact happens unless a plan is
@@ -747,14 +788,6 @@ func req_dv_label() -> String:
 
 # ------------------------------------------------------------ propagation ---
 
-static func solve_kepler(m: float, e: float) -> float:
-	var ecc := m + e * sin(m)
-	for _i in 10:
-		var f := ecc - e * sin(ecc) - m
-		ecc -= f / (1.0 - e * cos(ecc))
-	return ecc
-
-
 ## Heliocentric ecliptic position, AU, at mission time t_days.
 ##
 ## The dispatch seam: an `"ephem"` body is a real DE440 lookup through the
@@ -781,30 +814,19 @@ func pos_ecl(el: Dictionary, t_days: float) -> Vector3:
 			if not has_plan() or not threat_active(t_days):
 				return Vector3.ZERO
 			return mission.deflected_position_ecl_au(tdb(t_days))
-	return _kepler_pos_ecl(el, t_days)
-
-
-## Analytic two-body position, AU — HANDOFF §5 Tier 0 (cosmetic context orbits,
-## never a hit/miss decision). Retained for bodies that have no ephemeris source.
-func _kepler_pos_ecl(el: Dictionary, t_days: float) -> Vector3:
-	var m: float = wrapf(el.m0 + el.n * t_days, -PI, PI)
-	var ecc := solve_kepler(m, el.e)
-	var nu := 2.0 * atan2(sqrt(1.0 + el.e) * sin(ecc * 0.5),
-		sqrt(1.0 - el.e) * cos(ecc * 0.5))
-	var r: float = el.a * (1.0 - el.e * cos(ecc))
-	var xp := r * cos(nu)
-	var yp := r * sin(nu)
-
-	var co: float = cos(el.om)
-	var so: float = sin(el.om)
-	var cw: float = cos(el.w)
-	var sw: float = sin(el.w)
-	var ci: float = cos(el.i)
-	var si: float = sin(el.i)
-	return Vector3(
-		(co * cw - so * sw * ci) * xp + (-co * sw - so * cw * ci) * yp,
-		(so * cw + co * sw * ci) * xp + (-so * sw + co * cw * ci) * yp,
-		(sw * si) * xp + (cw * si) * yp)
+		"catalog":
+			# Orrery scenery, flown in the same field on the build worker. Gated on
+			# its own propagated span for the same reason the threat is: outside it
+			# the binding returns ZERO, which here is the Sun.
+			if not catalog_active(el, t_days):
+				return Vector3.ZERO
+			return mission.catalog_position_ecl_au(el.catalog_index, tdb(t_days))
+	# Every drawn body now names a real source. Reaching here is a bug, and it must
+	# not present as one: ZERO is the Sun in this frame, so say so out loud rather
+	# than quietly parking the body at the origin.
+	push_error("pos_ecl: body '%s' has no known source '%s'" % [
+		el.get("name", "?"), el.get("source", "")])
+	return Vector3.ZERO
 
 
 ## Ecliptic (AU) -> Godot scene units. Ecliptic plane = XZ, north = +Y.
@@ -858,12 +880,18 @@ func orbit_points(el: Dictionary, count: int = 192) -> PackedVector3Array:
 			pts.append(ecl_to_godot(pos_ecl(el, td)))
 		return pts
 
-	var saved: float = el.m0
-	for k in count + 1:
-		var m := TAU * float(k) / float(count)
-		el.m0 = m
-		pts.append(ecl_to_godot(_kepler_pos_ecl(el, 0.0)))
-	el.m0 = saved
+	if src == "catalog":
+		if not comet_online:
+			return pts
+		# The catalog body's own propagated span, sampled by the binding — the same
+		# arc `pos_ecl` walks, so the drawn orbit and the moving body agree by
+		# construction rather than by two layers computing the same ellipse.
+		for p in mission.catalog_track_ecl_au(el.catalog_index, count):
+			pts.append(ecl_to_godot(p))
+		return pts
+
+	push_error("orbit_points: body '%s' has no known source '%s'" % [
+		el.get("name", "?"), src])
 	return pts
 
 

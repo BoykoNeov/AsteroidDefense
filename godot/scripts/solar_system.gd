@@ -22,6 +22,7 @@ var interceptor: MeshInstance3D
 var intercept_flash: MeshInstance3D
 var _nom_orbit_line: MeshInstance3D
 var _defl_orbit_line: MeshInstance3D
+var _comet_orbit_line: MeshInstance3D
 var _intercept_path_line: MeshInstance3D
 
 
@@ -97,10 +98,20 @@ func _process(_delta: float) -> void:
 		ast_deflected.rotate_y(0.01)
 		ast_deflected.rotate_x(0.004)
 
+	# Hidden outside its propagated span, not drawn at ZERO — which in this
+	# heliocentric frame would put the comet on the Sun for most of the clock its
+	# one-orbit arc does not cover. The track hides with the body, exactly as the
+	# threat's does above: the polyline itself is safe (built once from the whole
+	# span, so it never queries the live clock and cannot collapse to the Sun), but
+	# an orbit drawn for a body the sim is not tracking still reads as a claim that
+	# it is.
 	if Sim.comet_online:
-		comet_node.position = Sim.pos3d(Sim.comet_el, t)
-		comet_node.rotate_y(0.006)
-		_update_comet_tail()
+		comet_node.visible = Sim.catalog_active(Sim.comet_el, t)
+		_comet_orbit_line.visible = comet_node.visible
+		if comet_node.visible:
+			comet_node.position = Sim.pos3d(Sim.comet_el, t)
+			comet_node.rotate_y(0.006)
+			_update_comet_tail()
 
 	if not Sim.interceptor_online:
 		return
@@ -370,12 +381,12 @@ func _build_threat() -> void:
 
 
 func _build_comet() -> void:
-	var orbit := _line_mesh(_dash(Sim.orbit_points(Sim.comet_el, 512), 3, 3),
+	_comet_orbit_line = _line_mesh(_dash(Sim.orbit_points(Sim.comet_el, 512), 3, 3),
 		Mesh.PRIMITIVE_LINES)
-	orbit.set_instance_shader_parameter("line_color", Color(1, 1, 1))
-	orbit.set_instance_shader_parameter("energy", 0.22)
-	orbit.name = "CometOrbit"
-	add_child(orbit)
+	_comet_orbit_line.set_instance_shader_parameter("line_color", Color(1, 1, 1))
+	_comet_orbit_line.set_instance_shader_parameter("energy", 0.22)
+	_comet_orbit_line.name = "CometOrbit"
+	add_child(_comet_orbit_line)
 
 	comet_node = _wire_blob(Sim.comet_el.vis_r, 3.0)
 	comet_node.set_instance_shader_parameter("line_color", Color(1, 1, 1))

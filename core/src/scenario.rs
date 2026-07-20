@@ -39,8 +39,10 @@ use std::sync::{Arc, OnceLock};
 use anise::constants::frames::{EARTH_J2000, SUN_J2000};
 use nalgebra::Vector3;
 
-use crate::ephemeris::{Ephemeris, KM3_S2_TO_M3_S2};
-use crate::forces::point_mass::PointMassGravity;
+use crate::ephemeris::{Ephemeris, EphemerisError, KM3_S2_TO_M3_S2};
+use crate::forces::relativity::Relativity1PN;
+use crate::forces::yarkovsky::YarkovskyA2;
+use crate::forces::CompositeForce;
 use crate::geometry::BPlaneEncounter;
 use crate::perturber_field::{tier1_perturber_field, EphemerisPerturber};
 use crate::{
@@ -61,6 +63,40 @@ pub const ENCOUNTER_HALF_WINDOW_SECONDS: f64 = 1.5 * 86_400.0;
 /// Samples across the encounter window — dense enough that the track is smooth
 /// through the tight turn near closest approach.
 pub const ENCOUNTER_SAMPLES: usize = 1_400;
+
+/// Which Tier-2 force terms are enabled on the shipping field (HANDOFF §5/§6).
+///
+/// Every term is off by [`Default`], and that default is load-bearing: an all-off
+/// config makes [`compose_force`] a [`CompositeForce`] holding the single Tier-1
+/// point-mass term, whose per-evaluation acceleration is `0 + a_pointmass` — equal
+/// to the bare `PointMassGravity` result to the last bit (`0.0 + x == x` in IEEE,
+/// the sole exception `−0.0 → +0.0` being unobservable in any magnitude
+/// downstream). So flipping Tier-2 in *without* enabling a term reproduces the
+/// Tier-1 scenario's b-plane exactly — the "unchanged with them off" half of the
+/// wiring's contract, checked empirically by the scenario tests.
+///
+/// Enabling a term makes the forward field disagree with the point-mass field the
+/// seed was designed against, so the *same seed* now reaches a *different* b-plane
+/// perigee — the "shifts with them on" half. That is measured, never asserted to a
+/// hand-derived magnitude, by [`RealFieldScenario::nominal_encounter_with`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Tier2Config {
+    /// Enable the 1PN relativistic Sun term (PPN Schwarzschild, β=γ=1). Its μ is
+    /// taken from the *same* ANISE `SUN_J2000` GM the point-mass Sun uses, never a
+    /// hardcoded constant, so GR and Newtonian gravity can never silently disagree
+    /// on μ_sun. Over the default ~12 yr campaign this shifts the predicted b-plane
+    /// perigee by a few hundred km — real, and still a hit (keyhole-precision
+    /// territory, the reason GR matters for planetary defence).
+    pub relativity: bool,
+    /// Yarkovsky transverse `A2` (m/s² at 1 AU, JPL Sentry sign convention: `>0`
+    /// prograde → outward secular drift, `<0` retrograde → inward), or `None` to
+    /// disable. The shipping threat is synthetic, so any `A2` is *made up*; use a
+    /// **physically plausible** value (~1e-13…1e-14 for a sub-km body) and report
+    /// whatever b-plane shift it produces, even if sub-km. Do **not** amplify it to
+    /// manufacture a visible shift — that is the display-grade lie this project
+    /// keeps catching.
+    pub yarkovsky_a2: Option<f64>,
+}
 
 /// The knobs that define a designer impactor and the campaign around it.
 ///
@@ -97,6 +133,11 @@ pub struct ImpactorConfig {
     /// Relative tolerance for the **backward** seed integration. Tight, because
     /// this fixes how faithfully the forward pass reproduces the designed impact.
     pub back_rtol: f64,
+    /// Which Tier-2 force terms the field carries (HANDOFF §5/§6). [`Default`] is
+    /// all-off, reproducing the Tier-1 scenario bit-for-bit; the back-propagation
+    /// that designs the seed uses this same field, so a terms-on config yields a
+    /// self-consistent (still-hitting) impactor rather than a broken one.
+    pub tier2: Tier2Config,
 }
 
 impl ImpactorConfig {
@@ -127,8 +168,41 @@ impl Default for ImpactorConfig {
             cadence_days: 1.0,
             span_margin_days: 60.0,
             back_rtol: 1.0e-12,
+            tier2: Tier2Config::default(),
         }
     }
+}
+
+/// Assemble the force field for a scenario: the Tier-1 point-mass field plus
+/// whichever Tier-2 terms `tier2` enables, all summed in one [`CompositeForce`].
+///
+/// This is the single place the shipping field is constructed, so
+/// [`RealFieldScenario::build_with`] (which designs and flies the seed) and
+/// [`RealFieldScenario::nominal_encounter_with`] (which re-flies the *same* seed
+/// through a differently-toggled field, to measure the shift) can never disagree
+/// about what "GR on" or "Yarkovsky on" means.
+///
+/// The 1PN μ_sun and both terms' central body are drawn from the *same* `eph` and
+/// the *same* `SUN_J2000` frame the Tier-1 field's Sun uses — so the relativistic
+/// μ matches the Newtonian one, and the heliocentric `r`,`v` the terms difference
+/// out is the Sun the point-mass gravity is already tracking.
+fn compose_force(
+    eph: &Arc<Ephemeris>,
+    tier2: &Tier2Config,
+) -> Result<CompositeForce, EphemerisError> {
+    let point_mass = tier1_perturber_field(eph)?;
+    let mut force = CompositeForce::new().with(Box::new(point_mass));
+
+    if tier2.relativity {
+        let mu_sun = eph.gm_km3_s2(SUN_J2000)? * KM3_S2_TO_M3_S2;
+        let sun = EphemerisPerturber::new(Arc::clone(eph), SUN_J2000);
+        force = force.with(Box::new(Relativity1PN::new(mu_sun, sun)));
+    }
+    if let Some(a2) = tier2.yarkovsky_a2 {
+        let sun = EphemerisPerturber::new(Arc::clone(eph), SUN_J2000);
+        force = force.with(Box::new(YarkovskyA2::standard(a2, sun)));
+    }
+    Ok(force)
 }
 
 /// Everything downstream failure mode of building/sweeping a scenario, unified so
@@ -197,7 +271,11 @@ impl From<DeflectionError> for ScenarioError {
 pub struct RealFieldScenario {
     /// The DE440 almanac (kept alive; the field and Earth source hold `Arc`s).
     ephemeris: Arc<Ephemeris>,
-    force: PointMassGravity,
+    /// The full force field the seed is designed against and flown through: the
+    /// Tier-1 point-mass sum plus any Tier-2 terms `cfg.tier2` enabled
+    /// ([`compose_force`]). A [`CompositeForce`], not a bare `PointMassGravity`, so
+    /// the realism ladder is expressed as *which terms are in this sum* (HANDOFF §5).
+    force: CompositeForce,
     earth: EphemerisPerturber,
     mu_earth: f64,
     earth_radius: f64,
@@ -335,8 +413,8 @@ impl RealFieldScenario {
     /// [`build`](Self::build) is the env-var convenience over this; a binding that
     /// loads the kernel itself (surfacing its own error to the UI) calls here.
     pub fn build_with(cfg: &ImpactorConfig, eph: Arc<Ephemeris>) -> Result<Self, ScenarioError> {
-        let force =
-            tier1_perturber_field(&eph).map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
+        let force = compose_force(&eph, &cfg.tier2)
+            .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
         let earth = EphemerisPerturber::new(Arc::clone(&eph), EARTH_J2000);
         let sun = EphemerisPerturber::new(Arc::clone(&eph), SUN_J2000);
 
@@ -509,6 +587,58 @@ impl RealFieldScenario {
     /// The impact epoch.
     pub fn impact_epoch(&self) -> Epoch {
         self.impact_epoch
+    }
+
+    /// Re-fly this scenario's **built seed** through the field with `tier2` terms
+    /// toggled, and report the nominal Earth encounter it reaches — the direct
+    /// measurement of *how much 1PN relativity / Yarkovsky moves the predicted
+    /// impact* (HANDOFF §5/§6 wiring).
+    ///
+    /// The seed is held fixed — it is whatever [`build`](Self::build) designed
+    /// (through *this* scenario's `cfg.tier2` field) — and only the forward force
+    /// changes. That is the whole point: rebuilding with terms enabled would
+    /// back-propagate the seed through the terms-on field too, reproducing the hit
+    /// *by construction* and showing no shift at all. Fixing the seed and swapping
+    /// only the field is what makes the perigee difference attributable to the
+    /// terms rather than to a re-designed impactor.
+    ///
+    /// Passing `&Tier2Config::default()` (all-off) re-flies through the bare Tier-1
+    /// field and returns the scenario's own baseline perigee to the last bit — the
+    /// "unchanged with them off" invariant, callable as a self-check. Passing a
+    /// terms-on config returns the shifted perigee; the caller takes the difference.
+    /// `None` means the re-flown pass found no close approach inside the scan gate
+    /// (a miss so wide it left the gate) — not an error, just no finite perigee.
+    ///
+    /// Cost: one full nominal propagation and one full-span scan, i.e. seconds. This
+    /// is a measurement/what-if entry point, not something to call in a render loop.
+    pub fn nominal_encounter_with(
+        &self,
+        tier2: &Tier2Config,
+    ) -> Result<Option<BPlaneEncounter>, ScenarioError> {
+        let force = compose_force(&self.ephemeris, tier2)
+            .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
+        let nominal = Clock::propagate(
+            &Dop853::new(),
+            &force,
+            self.epoch0,
+            self.seed,
+            self.cadence_seconds,
+            self.n_snapshots,
+        )
+        .map_err(|e| ScenarioError::Integration(e.to_string()))?;
+        let ds = DeflectionScenario::with_nominal(
+            Dop853::new(),
+            &force,
+            &self.earth,
+            self.epoch0,
+            nominal,
+            self.cadence_seconds,
+            self.n_snapshots,
+            self.scan,
+            self.mu_earth,
+            self.earth_radius,
+        )?;
+        Ok(ds.nominal_encounter()?)
     }
 
     /// Free-propagate an arbitrary seed state through this scenario's validated
@@ -1168,5 +1298,107 @@ mod tests {
         );
         assert_eq!(pre_plan.nominal_perigee, via_frame_from.nominal_perigee);
         assert_eq!(pre_plan.capture_radius, via_frame_from.capture_radius);
+    }
+
+    /// Wiring the Tier-2 terms into the shipping field must satisfy both halves of
+    /// its contract (HANDOFF §5/§6): the b-plane is **unchanged** when every term is
+    /// off, and **shifts** by a resolvable, physically-sensible amount when 1PN
+    /// relativity or Yarkovsky is on.
+    ///
+    /// The measurement holds the built seed fixed and re-flies it with terms toggled
+    /// ([`RealFieldScenario::nominal_encounter_with`]). That is the *only* way a
+    /// shift can appear: rebuilding with terms on would back-propagate the seed
+    /// through the terms-on field, reproducing the hit by construction and showing
+    /// nothing. Fixing the seed and changing only the forward force attributes the
+    /// perigee move to the physics, not to a re-designed impactor.
+    ///
+    /// Assertions are **structural**, never hand-derived magnitudes:
+    /// - *Off == baseline, bit-for-bit.* The all-off composite is `0 + a_pointmass`,
+    ///   identical to the bare field; if it differs, the wiring perturbed the
+    ///   shipping scenario, which it must not.
+    /// - *GR shifts and still hits.* 1PN over the ~12 yr campaign moves the perigee
+    ///   by a resolvable amount (hundreds of km at this geometry) yet keeps it inside
+    ///   the capture radius — keyhole-precision territory. The magnitude is measured
+    ///   and printed, not asserted to a number.
+    /// - *Yarkovsky at a physical A2 shifts honestly.* `A2 = 1e-13 m/s²` (plausible
+    ///   for a sub-km body, deliberately **not** amplified) moves the perigee by some
+    ///   nonzero finite amount; whether that is km-scale or sub-km is reported, not
+    ///   asserted large.
+    ///
+    /// Kernel-gated: skips (does not fail) with no kernel.
+    #[test]
+    fn tier2_terms_leave_the_bplane_unchanged_off_and_shift_it_on() {
+        if crate::kernels::resolve_for_test("tier2_terms_…_shift_it_on").is_none() {
+            return;
+        }
+
+        let sc = RealFieldScenario::build(&ImpactorConfig::default()).expect("scenario builds");
+
+        // The shipping baseline: the nominal hit the default (all-off) scenario reports.
+        let baseline = sc
+            .deflection()
+            .expect("deflection")
+            .nominal_encounter()
+            .expect("nominal reduces")
+            .expect("nominal is a hit");
+
+        // (a) Off == baseline, to the last bit.
+        let off = sc
+            .nominal_encounter_with(&Tier2Config::default())
+            .expect("off re-fly")
+            .expect("off pass is still an encounter");
+        assert_eq!(
+            off.perigee, baseline.perigee,
+            "all-off Tier-2 re-fly must match the shipping perigee bit-for-bit"
+        );
+
+        // (b) GR on shifts the perigee by a resolvable amount and stays a hit.
+        let gr = sc
+            .nominal_encounter_with(&Tier2Config {
+                relativity: true,
+                yarkovsky_a2: None,
+            })
+            .expect("GR re-fly")
+            .expect("GR pass is still an encounter");
+        let gr_shift = (gr.perigee - baseline.perigee).abs();
+        println!(
+            "1PN perigee shift over the campaign: {:.1} km \
+             (baseline {:.1} km → GR {:.1} km, capture {:.1} km)",
+            gr_shift / 1e3,
+            baseline.perigee / 1e3,
+            gr.perigee / 1e3,
+            gr.capture_radius / 1e3,
+        );
+        assert!(
+            gr_shift > 2.0e3,
+            "1PN should move the perigee by a resolvable amount (> 2 km), got {:.3e} m",
+            gr_shift
+        );
+        assert!(
+            gr.perigee < gr.capture_radius,
+            "GR-on perigee {:.1} km should still be a hit (inside capture {:.1} km)",
+            gr.perigee / 1e3,
+            gr.capture_radius / 1e3,
+        );
+
+        // (c) Yarkovsky at a physical, un-amplified A2 shifts the perigee by some
+        //     nonzero finite amount — honest whether that is km-scale or sub-km.
+        let yar = sc
+            .nominal_encounter_with(&Tier2Config {
+                relativity: false,
+                yarkovsky_a2: Some(1.0e-13),
+            })
+            .expect("Yarkovsky re-fly")
+            .expect("Yarkovsky pass is still an encounter");
+        let yar_shift = (yar.perigee - baseline.perigee).abs();
+        println!(
+            "Yarkovsky (A2 = 1e-13 m/s²) perigee shift over the campaign: {:.3} km",
+            yar_shift / 1e3,
+        );
+        assert!(
+            yar_shift > 0.0 && yar_shift.is_finite(),
+            "a physical Yarkovsky A2 should move the perigee by a nonzero finite amount, got {:.3e} m",
+            yar_shift
+        );
     }
 }

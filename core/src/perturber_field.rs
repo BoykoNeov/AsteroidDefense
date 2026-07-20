@@ -160,6 +160,20 @@ impl crate::close_approach::GeocentricState for EphemerisPerturber {
     }
 }
 
+impl crate::forces::relativity::CentralBodyState for EphemerisPerturber {
+    /// The SSB-relative **state** of this perturber's body — the Sun's when built
+    /// with [`SUN_J2000`]. This is what the heliocentric-referenced Tier-2 terms
+    /// (1PN relativity, Yarkovsky) subtract to form the body's `r`,`v` about the
+    /// Sun. The isolation tests use [`FixedCentralBody`](crate::FixedCentralBody)
+    /// at the origin; the *shipping* field wants the Sun's real barycentric
+    /// wobble, which is exactly this lookup — the same one
+    /// [`state_at`](EphemerisPerturber::state_at) already serves the close-approach
+    /// detector, so GR/Yarkovsky and the encounter geometry read one Sun.
+    fn state_at(&self, epoch: Epoch) -> Result<StateVector, ForceError> {
+        EphemerisPerturber::state_at(self, epoch)
+    }
+}
+
 /// Assemble the Tier-1 MVP point-mass field (Sun + 8 planets + Moon) from a
 /// loaded [`Ephemeris`] (HANDOFF §5, §10.7).
 ///

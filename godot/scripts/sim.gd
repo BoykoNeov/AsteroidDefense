@@ -528,7 +528,10 @@ func _install_asteroids() -> void:
 			"naif_id": mission.small_body_id(i),
 			# Nominal only — display decisions (orbit-line sampling), never a
 			# position. Main belt to within what a 0.5 AU-wide ring needs.
-			"a": 2.7, "vis_r": 0.020, "kind": "asteroid",
+			# vis_r has to beat the scenery: the belt's dust points are ~1 px and
+			# these must read as bodies, not as brighter dust. Sized between the
+			# comet (0.040) and a small planet.
+			"a": 2.7, "vis_r": 0.045, "kind": "asteroid",
 		})
 
 

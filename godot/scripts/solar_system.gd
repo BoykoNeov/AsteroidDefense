@@ -343,7 +343,9 @@ func _build_asteroids() -> void:
 	for el in Sim.asteroids:
 		var node := _wire_blob(el.vis_r, 3.0)
 		node.set_instance_shader_parameter("line_color", Color(1.0, 0.72, 0.25))
-		node.set_instance_shader_parameter("energy", 1.1)
+		# Brighter than the belt dust (0.05–0.20) by a wide margin — the dust is
+		# scenery and these are measurements, and the screen has to say which.
+		node.set_instance_shader_parameter("energy", 1.6)
 		node.name = "Asteroid_%s" % el.name
 		add_child(node)
 		_asteroid_nodes.append(node)

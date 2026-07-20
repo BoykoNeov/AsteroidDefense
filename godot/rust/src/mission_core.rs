@@ -1326,7 +1326,17 @@ mod tests {
         };
         let Some(sb) = k.small_bodies.clone() else {
             // No 646 MB kernel on this machine — the optional half of the contract.
-            // Nothing to assert, and failing here would punish a valid setup.
+            // Failing here would punish a valid setup.
+            //
+            // But note what this skip is NOT covered by: `ASTEROID_REQUIRE_KERNELS`
+            // deliberately does not catch it, because sb441 is genuinely optional in
+            // a way the DE pair is not. So on a box with the pair and not the
+            // small-body file, this test prints green having asserted nothing about
+            // mounting — the exact silent-green shape that cost this project two
+            // verification claims in July. The `eprintln` below is swallowed for a
+            // passing test; the wall clock is again the only tell (~0.3 s warm here
+            // versus instant). If this becomes load-bearing in CI, it wants its own
+            // require-flag rather than a stricter reading of the existing one.
             eprintln!("no small-body kernel resolved — skipping the mount test");
             return;
         };

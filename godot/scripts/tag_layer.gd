@@ -34,6 +34,19 @@ func _draw() -> void:
 	_tag_box(cam, Vector3.ZERO, "SOL", dim)
 	for el in Sim.planets:
 		_tag_box(cam, Sim.pos3d(el, t), el.name, mid if el.name == "EARTH" else dim)
+	# The sixteen real main-belt bodies. Tagged for the same reason the planets are:
+	# an untagged blob among 1600 scenery dust points is indistinguishable from the
+	# scenery, and the entire point of mounting a kernel rather than scattering an
+	# RNG annulus is that these sixteen are *real*. A name is what carries that.
+	#
+	# Only when zoomed out far enough to see the belt at all — at close zoom they
+	# are off-screen or piled on each other, and sixteen overlapping labels is worse
+	# than none. `Sim.asteroids` is empty unless the kernel mounted, so there is no
+	# unmounted state in which this labels anything.
+	if camera_rig.distance > 18.0:
+		for el in Sim.asteroids:
+			_tag_box(cam, Sim.pos3d(el, t), el.name, dim)
+
 	# Moon tag only at close zoom — at system scale it overlaps EARTH's.
 	if camera_rig.distance < 10.0:
 		_tag_box(cam, Sim.moon_pos3d(t), "MOON", dim)

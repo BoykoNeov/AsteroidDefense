@@ -71,6 +71,12 @@
 //! over a multi-year baseline is itself the measured result — and the thing that
 //! motivates the next menu item, enrolling the sixteen perturbers to lower the
 //! floor.
+//!
+//! The endpoint reduction is *correlational* — it is the term's drift outgrowing
+//! the floor, not a proof of its sign in isolation (which the `⟨da/dt⟩` oracle
+//! already pins; a smaller residual could in principle be its drift cancelling an
+//! unmodelled floor term). Oracle-for-sign plus capstone-for-emergence is the
+//! honest pair; this test asserts only the emergence.
 
 use std::sync::Arc;
 
@@ -115,12 +121,21 @@ fn apophis_own_integration_converges_to_horizons_as_tier2_terms_switch_on() {
 
     let bodies =
         asteroid_core::horizons::load_all_for_test("Tier-2 capstone (needs apophis.neo)");
-    let Some(apophis) = bodies.iter().find(|n| n.designation() == "99942") else {
-        // Kernels/tables present but this particular object is not — a legitimate
-        // partial catalog, not a physics failure. Skip loudly rather than panic.
-        eprintln!("no 99942 Apophis table present — skipping the capstone");
+    if bodies.is_empty() {
+        // No tables at all — `load_all_for_test` has already panicked if the
+        // require-flag is set, so reaching here means the suite is legitimately
+        // running without real data. Skip.
         return;
-    };
+    }
+    // Tables present but no Apophis is NOT a soft skip: under the require-flag
+    // that would green-pass a suite that ran none of the capstone physics — the
+    // exact "printed 13 passed" trap the flag exists to kill. Apophis ships with
+    // the other tables from one fetch, so its absence is a broken catalog, and
+    // this fails loud to say so (matching `hermite_matches_held_out_horizons_states`).
+    let apophis = bodies
+        .iter()
+        .find(|n| n.designation() == "99942")
+        .expect("apophis.neo is one of the shipped tables");
 
     let checks: Vec<usize> = (1..=CHECK_YEARS)
         .map(|y| SEED_INDEX + SAMPLES_PER_YEAR * y)

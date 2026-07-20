@@ -41,6 +41,7 @@ use nalgebra::Vector3;
 
 use crate::ephemeris::{Ephemeris, EphemerisError, KM3_S2_TO_M3_S2};
 use crate::forces::relativity::Relativity1PN;
+use crate::forces::srp::SolarRadiationPressure;
 use crate::forces::yarkovsky::YarkovskyA2;
 use crate::forces::CompositeForce;
 use crate::geometry::BPlaneEncounter;
@@ -79,6 +80,36 @@ pub const ENCOUNTER_SAMPLES: usize = 1_400;
 /// seed was designed against, so the *same seed* now reaches a *different* b-plane
 /// perigee — the "shifts with them on" half. That is measured, never asserted to a
 /// hand-derived magnitude, by [`RealFieldScenario::nominal_encounter_with`].
+/// Physical inputs for the solar-radiation-pressure term (HANDOFF §5), carried by
+/// [`Tier2Config::srp`]. The cannonball model needs only the radiation-pressure
+/// coefficient and the area-to-mass ratio; [`compose_force`] hands these to
+/// [`SolarRadiationPressure::from_physical`], which folds in the solar constant and
+/// `c`. A struct rather than a bare characteristic acceleration so the menu names
+/// the physically meaningful knobs a body actually has.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SrpParams {
+    /// Radiation-pressure coefficient `C_r`: 1 for a perfect absorber, up to 2 for
+    /// a perfect reflector. ~1–1.5 for a real dark asteroid surface.
+    pub cr: f64,
+    /// Area-to-mass ratio `A/m`, m²/kg. A sub-km rock sits around 1e-6…1e-5;
+    /// [`Self::sub_km_rock`] is a plausible default for the synthetic threat.
+    pub area_to_mass_m2_per_kg: f64,
+}
+
+impl SrpParams {
+    /// A plausible sub-km stony asteroid: a 300 m body (`r = 150 m`) at
+    /// 2000 kg/m³ gives `A/m = 3/(4·r·ρ) ≈ 2.5e-6 m²/kg`, with `C_r = 1.3` for a
+    /// dark, partly-reflecting surface. Yields `β ≈ 2.5e-9` — the physically tiny,
+    /// un-amplified value the shipping toggle uses.
+    pub fn sub_km_rock() -> Self {
+        let (radius_m, density_kg_m3) = (150.0, 2000.0);
+        Self {
+            cr: 1.3,
+            area_to_mass_m2_per_kg: 3.0 / (4.0 * radius_m * density_kg_m3),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Tier2Config {
     /// Enable the 1PN relativistic Sun term (PPN Schwarzschild, β=γ=1). Its μ is
@@ -107,6 +138,14 @@ pub struct Tier2Config {
     /// Over the default ~12 yr campaign the sixteen shift the predicted b-plane
     /// perigee by a small, measured amount (reported, never asserted to a magnitude).
     pub asteroid_perturbers: bool,
+    /// Solar-radiation-pressure cannonball term ([`SrpParams`]), or `None` to
+    /// disable. SRP is **radial** — it produces no secular along-track drift (that
+    /// is Yarkovsky's role), only a small orbit-shape change — so its b-plane shift
+    /// over the campaign is small (plausibly sub-km at a realistic `A/m`). Use a
+    /// **physically plausible** [`SrpParams::sub_km_rock`] and report whatever shift
+    /// it yields; do **not** inflate `A/m` to manufacture a visible one — the same
+    /// display-grade lie the `yarkovsky_a2` note warns against.
+    pub srp: Option<SrpParams>,
 }
 
 /// The knobs that define a designer impactor and the campaign around it.
@@ -217,6 +256,14 @@ fn compose_force(
         // Fails loud if `eph` lacks the sb441 kernel — `build` mounts it when the
         // flag is set, and a `build_with` caller must have chained it on.
         force = force.with(Box::new(sb441_perturber_field(eph)?));
+    }
+    if let Some(p) = tier2.srp {
+        let sun = EphemerisPerturber::new(Arc::clone(eph), SUN_J2000);
+        force = force.with(Box::new(SolarRadiationPressure::from_physical(
+            p.cr,
+            p.area_to_mass_m2_per_kg,
+            sun,
+        )));
     }
     Ok(force)
 }
@@ -1433,6 +1480,29 @@ mod tests {
             yar_shift > 0.0 && yar_shift.is_finite(),
             "a physical Yarkovsky A2 should move the perigee by a nonzero finite amount, got {:.3e} m",
             yar_shift
+        );
+
+        // (d) SRP at a physical, un-amplified area-to-mass shifts the perigee by
+        //     some nonzero finite amount. SRP is radial (no secular along-track
+        //     drift), so this is expected small — reported, not asserted large.
+        let srp = sc
+            .nominal_encounter_with(&Tier2Config {
+                relativity: false,
+                yarkovsky_a2: None,
+                srp: Some(SrpParams::sub_km_rock()),
+                ..Tier2Config::default()
+            })
+            .expect("SRP re-fly")
+            .expect("SRP pass is still an encounter");
+        let srp_shift = (srp.perigee - baseline.perigee).abs();
+        println!(
+            "SRP (sub-km rock, β≈2.5e-9) perigee shift over the campaign: {:.4} km",
+            srp_shift / 1e3,
+        );
+        assert!(
+            srp_shift > 0.0 && srp_shift.is_finite(),
+            "a physical SRP term should move the perigee by a nonzero finite amount, got {:.3e} m",
+            srp_shift
         );
     }
 

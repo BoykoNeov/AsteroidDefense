@@ -46,6 +46,7 @@ pub use elements::{ElementsError, OrbitalElements};
 pub use horizons::{Neo, NeoError};
 pub use epoch::Epoch;
 pub use forces::relativity::{CentralBodyState, FixedCentralBody, Relativity1PN, SPEED_OF_LIGHT_M_S};
+pub use forces::yarkovsky::YarkovskyA2;
 pub use forces::{CompositeForce, ForceError, ForceModel};
 pub use geometry::{
     BPlaneEncounter, GeometryError, EARTH_EQUATORIAL_RADIUS_M, EARTH_MEAN_RADIUS_M,

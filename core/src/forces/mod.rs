@@ -33,6 +33,7 @@
 
 pub mod point_mass;
 pub mod relativity;
+pub mod yarkovsky;
 
 use crate::epoch::Epoch;
 use crate::state::StateVector;

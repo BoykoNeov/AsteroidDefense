@@ -556,3 +556,49 @@ Lambert solver exists — `interceptor_online` is the flag. `required_dv` remain
 path (`req_dv_label` is a labelled first-order estimate). Still open: osculating e/i for the HUD needs an
 ICRF-vs-ecliptic inclination decision; ξ/ζ sign stays Tier-3 (3C-2c coexists with it — display axes +
 rotation-invariant scalars only, so settling it later is free).
+
+**Horizons NEO half DONE 2026-07-20 (the real teaching asteroids on screen).** The recorded plan ("reuse the
+identical read path") was FALSE and the gate `core/examples/probe_horizons.rs` proved it before any plumbing:
+`sb441-n16.bsp` is SPK **type 2** (Chebyshev), a Horizons per-object SPK is **type 21** (ext. modified diff
+arrays), and **ANISE 0.10.3 has no type-21 evaluator** (dispatches 1/2/3/8/9/12/13, returns "not supported for
+SPK computations" for 21) — no request param changes the emitted type. Advisor-gated pivot to **Horizons
+VECTORS → in-project sampled trajectory + cubic Hermite**: fetch the trajectory as *states* (pos+vel,
+`EPHEM_TYPE=VECTORS`, heliocentric `CENTER='500@10'`, `REF_PLANE=FRAME` ICRF, `KM-S`, 1-day TDB cadence) and
+interpolate. Honesty preserved & is the point — interpolating JPL's own relativistic states, NOT integrating our
+own worse ones (rejected: integrating a state vector re-litigates the deleted display Kepler + hits the Tier-2
+1PN trap; implementing type 21 in a forked ANISE = variable-MAXTRM record parsing, a user-owned scope call).
+**NEOs are scenery — never the threat, never a deflection target.** New `core/src/horizons.rs`: `Neo` loads a
+plain-text `.neo` table (key/val header + one whitespace state per line, floats via Python `repr`; NOT JSON —
+core stays serde-free; hard-errors on magic/frame/declared-count mismatch), `helio_state_at` = cubic Hermite
+(velocity in the table → tangent to the real arc). Accuracy **measured not eyeballed** and the measurement
+FOUND something: median converges ~12×/halving (4th-order-ish) but worst case pins to the **2029 Apophis Earth
+flyby** (hours-long curvature no daily table resolves) → shipped cadence measured directly vs a committed
+**hourly** fixture = **median 24 m, worst 18 885 km** = 1.3e-4 AU, sub-pixel; both flyby fixtures
+(`core/tests/fixtures/apophis_flyby_{1d,1h}.neo`, ~173 KB) COMMITTED so that check runs kernel-free on a fresh
+clone. **NAIF trap** (flagged ahead by the sb441 note): Horizons uses **`20000000+number`** (Apophis =
+**20099942**), not sb441's `2000000+number` — verified by enumerating a fetched SPK's segment table, provenance
+only (sampled path never resolves it). Binding: `OrreryBody` now carries `Trajectory::{Integrated(Clock) = our
+physics/SSB m, Sampled(Neo) = JPL's/helio-ICRF m}`; the two frames differ by the Sun's barycentric wobble
+(~1e6 km, "looks like a rendering nudge") reconciled in the SINGLE `catalog_body_helio_ecl_au`;
+`catalog_provenance(i)` → "integrated"/"sampled" and GDScript labels bodies with it (unlabelled beside real
+physics = the deleted Kepler's sin). Tables at `<kernels>/neo/*.neo`, gitignored/regenerable
+(`pyref/fetch_horizons_neo.py`), absent on fresh clone = no asteroids & everything else works; resolver +
+skip-loud `load_all_for_test` mirror [[kernel-resolver]]. **ZERO-is-the-Sun 5th instance**: tables span
+2020–2070 vs the ~300-yr clock, `helio_state_at` returns None (never ZERO) outside span, per-body via
+`catalog_active`/`catalog_span_tdb`; `catalog_active` USED to gate on the single `comet_online` flag — right for
+1 body, wrong at 4 (Apophis's table ≠ the comet's arc in years). **Threat untouched STRUCTURALLY**: a sampled
+NEO never reaches the almanac, carries no GM, can't enter `tier1_perturber_field` — pinned by
+`neo_bodies_cannot_reach_the_force_model` (core, compile-time) + `real_asteroids_join_the_catalog_without_
+touching_the_threat` (one build, cap/perigee/impact read before & after NEO install, `==` not tolerance; cap
+stayed 11311, |B| 14639 to the digit). **Orbit lines draw ONE lap** (a decades-long table of a ~1-yr orbit =
+dozens of precessing laps overplotted; comet escaped it because its span IS one period): `Neo::
+orbital_period_seconds` (vis-viva, same "period-to-bound-the-window" move the `ephem` path makes) →
+`catalog_track_window_ecl_au` samples one period clamped in span. **Verified by picture** (`_shot.gd` neo_1_on_
+arc: 3 NEOs cyan, named, 1.0–1.3 AU near Earth at the flyby, one clean lap each; neo_2_past_span_gone: 2071, all
+gone/no lines/not on Sun) **and by the advisor's discriminating check**: every other NEO test is `norm()` =
+rotation-invariant, so a Sampled-branch frame error would pass them all — added a **co-location assertion**
+(Apophis's real 2029 flyby ~0.0003 AU from Earth → drawn on top of Earth; got **0.0073 AU** at t=471 d, jointly
+confirms frame+epoch+identity). 83/83 GDScript, 91 core + 16 gdext (178 s = real run not the skip trap).
+Incidental: debug-mount cost 11→34 s is now ~20 s, not chased. **Open/NEXT**: these are the §9 teaching
+asteroids on-screen but NOT validated vs Horizons — that's **Tier 2** (needs 1PN + Yarkovsky before our own
+integration of a real NEO could match JPL; the display is honest today *because* it doesn't integrate them).

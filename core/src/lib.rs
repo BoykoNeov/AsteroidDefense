@@ -25,6 +25,7 @@ pub mod ephemeris;
 pub mod epoch;
 pub mod forces;
 pub mod geometry;
+pub mod horizons;
 pub mod integrator;
 pub mod kernels;
 pub mod perturber_field;
@@ -42,6 +43,7 @@ pub use deflection::{
     DvSolveTol,
 };
 pub use elements::{ElementsError, OrbitalElements};
+pub use horizons::{Neo, NeoError};
 pub use epoch::Epoch;
 pub use forces::{CompositeForce, ForceError, ForceModel};
 pub use geometry::{

@@ -90,6 +90,17 @@ var small_bodies_armed := false
 ## The main-belt asteroids from sb441, as `"ephem"` bodies. Empty until a build
 ## lands with the kernel mounted — see `_install_asteroids`.
 var asteroids: Array = []
+## The real near-Earth asteroids from JPL Horizons state tables, as `"catalog"`
+## bodies. Empty until a build lands with tables on disk — see `_install_catalog`.
+##
+## **A third provenance on one screen.** The belt asteroids above are `"ephem"`:
+## a kernel contains them and ANISE reads them. The comet is `"catalog"` and
+## integrated: our physics, our field. These are `"catalog"` and *sampled*: JPL's
+## trajectory, interpolated between JPL's own states, because Horizons ships these
+## objects as SPK type 21 and ANISE cannot evaluate it. Each carries a
+## `provenance` field from the core rather than this layer assuming one — the
+## standing rule being that nothing is drawn beside real physics unlabelled.
+var neos: Array = []
 
 # Mission timeline (days from EPOCH0_TDB). The impact epoch is fixed by the
 # threat; launch/intercept epochs come from the operator's plan ([M]).
@@ -488,22 +499,39 @@ func _install_catalog() -> void:
 	_install_asteroids()
 	comet_el = {}
 	comet_online = false
+	neos.clear()
 	for i in mission.catalog_count():
-		if mission.catalog_kind(i) != "comet":
-			continue
 		var s: PackedFloat64Array = mission.catalog_span_tdb(i)
 		if s.size() != 2:
 			continue
-		comet_el = {
+		var el := {
 			"name": mission.catalog_name(i), "source": "catalog",
-			"kind": "comet", "catalog_index": i, "vis_r": 0.040,
+			"kind": mission.catalog_kind(i), "catalog_index": i,
+			# Named by the core, not inferred here: "integrated" is our physics in
+			# our field, "sampled" is JPL's read from a Horizons table. The HUD
+			# shows it, because two provenances drawn identically is the mistake
+			# the deleted GDScript Kepler was.
+			"provenance": mission.catalog_provenance(i),
 			# Days from EPOCH0_TDB — the ZERO-is-the-Sun gate, per body, read from
 			# the core rather than reconstructed from the span we asked for.
 			"t_min": (s[0] - EPOCH0_TDB) / DAY_S,
 			"t_max": (s[1] - EPOCH0_TDB) / DAY_S,
 		}
-		comet_online = true
-		break
+		match el.kind:
+			"comet":
+				if comet_online:
+					continue  # one comet is scenery; several would be a catalog bug
+				el["vis_r"] = 0.040
+				comet_el = el
+				comet_online = true
+			"asteroid":
+				# Smaller than the comet and than the belt blobs: these are the
+				# real NEOs, and they are physically the smallest things drawn.
+				el["vis_r"] = 0.032
+				neos.append(el)
+			_:
+				push_error("_install_catalog: catalog body '%s' has unknown kind '%s'"
+					% [el.name, el.kind])
 
 
 ## Adopt the main-belt asteroids the build worker's mount made reachable.
@@ -540,8 +568,13 @@ func _install_asteroids() -> void:
 ## `catalog_position_ecl_au` returns ZERO, and ZERO here is the Sun. A comet that
 ## silently parks on the Sun for the two thirds of the clock it does not cover is
 ## exactly the failure this gate exists to prevent.
+## Gates **per body**, not on a global flag. It used to require `comet_online`,
+## which was correct while the catalog held exactly one body and became wrong the
+## moment it held four: Apophis's table and the comet's arc cover different years,
+## and one flag cannot answer for both. An offline body has no `source` (its
+## dictionary is empty), so it still answers false here.
 func catalog_active(el: Dictionary, t_days: float = INF) -> bool:
-	if not comet_online or el.get("source", "") != "catalog":
+	if el.get("source", "") != "catalog":
 		return false
 	var d := t if is_inf(t_days) else t_days
 	return d >= float(el.t_min) and d <= float(el.t_max)
@@ -929,13 +962,29 @@ func orbit_points(el: Dictionary, count: int = 192) -> PackedVector3Array:
 		return pts
 
 	if src == "catalog":
-		if not comet_online:
+		# Any catalog body, not just the comet — gated on the body having an index
+		# rather than on a per-body online flag, since the mission may carry a
+		# comet, real NEOs, both or neither.
+		if not mission_online or not el.has("catalog_index"):
 			return pts
-		# The catalog body's own propagated span, sampled by the binding — the same
-		# arc `pos_ecl` walks, so the drawn orbit and the moving body agree by
-		# construction rather than by two layers computing the same ellipse.
-		for p in mission.catalog_track_ecl_au(el.catalog_index, count):
-			pts.append(ecl_to_godot(p))
+		var idx: int = el.catalog_index
+		var period_s: float = mission.catalog_orbit_period_seconds(idx)
+		var span: PackedFloat64Array = mission.catalog_span_tdb(idx)
+		# One orbital period, not the whole table. A NEO's states cover ~50 years
+		# but its orbit is ~1 year, so the full span is dozens of precessing laps
+		# drawn over each other; the binding returns the period for exactly this.
+		# The comet reports its whole 22.6-yr span as "one period" and is unchanged.
+		# Sampled via the binding's windowed track — the same arc `pos_ecl` walks,
+		# so the drawn orbit and the moving body cannot disagree.
+		if period_s > 0.0 and span.size() == 2 and (span[1] - span[0]) > period_s:
+			# Anchor the lap at the body's active midpoint, clamped inside the span.
+			var mid: float = 0.5 * (span[0] + span[1])
+			var t0: float = clampf(mid - 0.5 * period_s, span[0], span[1] - period_s)
+			for p in mission.catalog_track_window_ecl_au(idx, t0, t0 + period_s, count):
+				pts.append(ecl_to_godot(p))
+		else:
+			for p in mission.catalog_track_ecl_au(idx, count):
+				pts.append(ecl_to_godot(p))
 		return pts
 
 	push_error("orbit_points: body '%s' has no known source '%s'" % [

@@ -18,6 +18,11 @@ var _belt: MeshInstance3D
 ## rather than a name dict because the pairing with that list is what the per-frame
 ## lookup uses, and a name-keyed miss would be a silent no-draw.
 var _asteroid_nodes: Array[MeshInstance3D] = []
+## The real near-Earth asteroids, index-aligned with `Sim.neos` for the same
+## reason. Each carries its own orbit line, unlike the belt sixteen: a NEO's orbit
+## crosses Earth's and that crossing is the whole reason the object is on screen.
+var _neo_nodes: Array[MeshInstance3D] = []
+var _neo_orbit_lines: Array[MeshInstance3D] = []
 var ast_nominal: MeshInstance3D
 var ast_deflected: MeshInstance3D
 var comet_node: MeshInstance3D
@@ -54,6 +59,7 @@ func _ready() -> void:
 func _on_mission_ready() -> void:
 	_build_threat()
 	_build_asteroids()
+	_build_neos()
 	if Sim.comet_online:
 		_build_comet()
 	if Sim.interceptor_online:
@@ -116,6 +122,20 @@ func _process(_delta: float) -> void:
 	# span, so it never queries the live clock and cannot collapse to the Sun), but
 	# an orbit drawn for a body the sim is not tracking still reads as a claim that
 	# it is.
+	# The real NEOs, each on its own span gate. Their tables cover 2020–2070 while
+	# the clock ranges over the DE kernel's ~300 years, so most of the scrub range
+	# is *outside* them — and a body drawn outside its table would be drawn at ZERO,
+	# which here is the Sun. Per-body, because Apophis's table and the comet's
+	# integrated arc do not cover the same years and one flag cannot answer for both.
+	for i in _neo_nodes.size():
+		var el: Dictionary = Sim.neos[i]
+		var on: bool = Sim.catalog_active(el, t)
+		_neo_nodes[i].visible = on
+		_neo_orbit_lines[i].visible = on
+		if on:
+			_neo_nodes[i].position = Sim.pos3d(el, t)
+			_neo_nodes[i].rotate_y(0.008)
+
 	if Sim.comet_online:
 		comet_node.visible = Sim.catalog_active(Sim.comet_el, t)
 		_comet_orbit_line.visible = comet_node.visible
@@ -349,6 +369,40 @@ func _build_asteroids() -> void:
 		node.name = "Asteroid_%s" % el.name
 		add_child(node)
 		_asteroid_nodes.append(node)
+
+
+## The real near-Earth asteroids: Apophis, Bennu, Didymos — the objects this whole
+## simulator is *about*, finally on the same screen as the fictional threat.
+##
+## Drawn in a distinct cyan, and the colour is load-bearing. Everything else here
+## is either our own integration (the amber threat, the comet) or a kernel read
+## (the amber belt). These are JPL's own trajectory, interpolated between JPL's
+## states because ANISE cannot evaluate the SPK type Horizons ships them in — a
+## third provenance, and this project's rule is that provenance is visible or the
+## screen is lying. `Sim.neos` carries the core's own `provenance` string and the
+## tag layer prints it.
+##
+## Empty until a build lands with `.neo` tables on disk; `Sim.neos` is the gate and
+## it is empty on a fresh clone that has not run `pyref/fetch_horizons_neo.py`.
+func _build_neos() -> void:
+	for el in Sim.neos:
+		# Dashed, dim: an orbit line is a claim about a whole period, while the
+		# body itself is only claimed where the table covers. Dashes read as
+		# "reference track", solid amber as "this is being tracked".
+		var orbit := _line_mesh(_dash(Sim.orbit_points(el, 384), 2, 4),
+			Mesh.PRIMITIVE_LINES)
+		orbit.set_instance_shader_parameter("line_color", Color(0.35, 0.95, 1.0))
+		orbit.set_instance_shader_parameter("energy", 0.30)
+		orbit.name = "NeoOrbit_%s" % el.name
+		add_child(orbit)
+		_neo_orbit_lines.append(orbit)
+
+		var node := _wire_blob(el.vis_r, 3.0)
+		node.set_instance_shader_parameter("line_color", Color(0.35, 0.95, 1.0))
+		node.set_instance_shader_parameter("energy", 1.7)
+		node.name = "Neo_%s" % el.name
+		add_child(node)
+		_neo_nodes.append(node)
 
 
 func _build_belt() -> void:

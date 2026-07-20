@@ -172,6 +172,81 @@ func _init() -> void:
 			and comet_on.length() < 15.6,
 		"the comet sits on its designed ellipse in-span (%.2f AU)" % comet_on.length())
 
+	# --- The real NEOs: JPL's trajectory, on JPL's own states ---------------
+	# Apophis, Bennu and Didymos are the first objects on this screen that are
+	# neither our integration nor a kernel read. Horizons ships them as SPK type 21
+	# and ANISE cannot evaluate it, so they arrive as state tables and are
+	# interpolated between JPL's own samples — which is why every one of them must
+	# report provenance "sampled" rather than being quietly drawn like the comet.
+	_check(sim.neos.size() >= 3,
+		"the real NEO catalog loaded (%d bodies; if 0, run pyref/fetch_horizons_neo.py)"
+		% sim.neos.size())
+	var names := []
+	for el in sim.neos:
+		names.append(el.name)
+		_check(el.provenance == "sampled",
+			"%s is labelled as JPL's trajectory, not ours (provenance '%s')"
+			% [el.name, el.provenance])
+		_check(el.kind == "asteroid" and el.source == "catalog",
+			"%s is a sampled catalog asteroid" % el.name)
+	_check(str(names).contains("Apophis"),
+		"Apophis is among the loaded NEOs (%s)" % str(names))
+
+	# The span gate again, and this is its FIFTH instance in this codebase: the
+	# tables cover 2020-2070 while the clock scrubs the kernel's ~300 years, so
+	# most of the range is outside them. Outside, a lookup is ZERO — the Sun.
+	var neo: Dictionary = sim.neos[0]
+	_check(sim.catalog_active(neo, neo.t_min + 1.0),
+		"%s is active inside its table's span" % neo.name)
+	_check(not sim.catalog_active(neo, neo.t_max + 10.0),
+		"%s is NOT active past its table — where a lookup would draw it on the Sun"
+		% neo.name)
+	_check(sim.pos_ecl(neo, neo.t_max + 10.0) == Vector3.ZERO,
+		"an out-of-span NEO read is refused by the gate, not served as a position")
+	# And the gate is answering per body, not from one global flag: the comet's
+	# integrated arc and a NEO's table cover different years, which is exactly what
+	# broke when `catalog_active` required `comet_online`.
+	_check(sim.catalog_active(neo, neo.t_min + 1.0)
+			!= sim.catalog_active(sim.comet_el, neo.t_min + 1.0)
+		or neo.t_min != sim.comet_el.t_min,
+		"the span gate answers per body, not from one shared flag")
+
+	var neo_on: Vector3 = sim.pos_ecl(neo, neo.t_min + 100.0)
+	_check(neo_on != Vector3.ZERO and neo_on.length() > 0.1 and neo_on.length() < 5.0,
+		"%s sits at a near-Earth distance in-span (%.3f AU)" % [neo.name, neo_on.length()])
+
+	# **The co-location check — the one assertion that is NOT rotation-invariant.**
+	# Every other NEO test here compares distances-from-the-Sun (norm()), so a frame
+	# error unique to the sampled branch (a wrong, missing or doubled ICRF->ecliptic
+	# rotation) would pass all of them. Apophis's real 2029-04-13 flyby put it
+	# ~0.0003 AU from Earth — on a heliocentric plot, on top of Earth. So its drawn
+	# position at that epoch must land on the drawn Earth's, and only if frame,
+	# epoch AND object identity are all correct does it. 2029-04-13 is ~471 days past
+	# the 2028-01-01 campaign epoch. (Apophis alone gives this — Bennu and Didymos
+	# have no 2029 Earth coincidence.)
+	var apophis: Dictionary = neo
+	for el in sim.neos:
+		if str(el.name).contains("Apophis"):
+			apophis = el
+	var flyby_d := 471.0
+	var ap_pos: Vector3 = sim.pos_ecl(apophis, flyby_d)
+	var earth_pos: Vector3 = sim.pos_ecl(sim.earth_el, flyby_d)
+	var chord_au: float = (ap_pos - earth_pos).length()
+	_check(ap_pos != Vector3.ZERO and chord_au < 0.02,
+		"Apophis sits on Earth at its real 2029 flyby (%.4f AU apart) — frame, epoch and identity all correct"
+		% chord_au)
+
+	# The drawn orbit is the core's sampling of the same table the body walks, so
+	# the line and the moving dot cannot disagree.
+	var neo_trk: PackedVector3Array = sim.orbit_points(neo, 128)
+	var neo_zeros := 0
+	for p in neo_trk:
+		if p == Vector3.ZERO:
+			neo_zeros += 1
+	_check(neo_trk.size() > 100 and neo_zeros == 0,
+		"%s's orbit line is a real arc with no Sun-collapsed points (%d pts, %d zeros)"
+		% [neo.name, neo_trk.size(), neo_zeros])
+
 	# --- The threat is REAL: it arrives on Earth ----------------------------
 	# The core integrated it backward from an impact condition, so the arc must
 	# still end on the drawn Earth after a 12-year round trip through the

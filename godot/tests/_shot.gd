@@ -64,6 +64,37 @@ func _run() -> void:
 				main.solar._asteroid_nodes[i].position])
 	Sim.paused = false
 
+	# 0b. THE REAL NEOs (3D) — Apophis, Bennu, Didymos, on JPL's own trajectory. The
+	#     shot pair the span gate exists for, and the point of the whole commit: at an
+	#     epoch inside their tables they are named bodies out in the field, and past
+	#     the table's end they are GONE — not on the Sun, which is what ZERO draws as
+	#     here. The on-arc shot is scrubbed to the 2029 Apophis flyby, when the real
+	#     object is genuinely near Earth. No passive run scrubs to a named year.
+	print("SHOT  neos=%d" % Sim.neos.size())
+	if Sim.neos.size() > 0:
+		var apophis: Dictionary = Sim.neos[0]
+		for el in Sim.neos:
+			if str(el.name).contains("Apophis"):
+				apophis = el
+		Sim.paused = true
+		# 2029-04-13, the flyby — ~471 days past the 2028-01-01 epoch.
+		Sim.jump(468.0)
+		await _settle(4)
+		await _shot("neo_1_on_arc")
+		for el in Sim.neos:
+			var p: Vector3 = Sim.pos_ecl(el, Sim.t)
+			print("SHOT  %-14s prov=%s active=%s r=%.3f AU"
+				% [el.name, el.provenance, Sim.catalog_active(el, Sim.t), p.length()])
+
+		Sim.jump(apophis.t_max + 400.0)        # past the end of the table
+		await _settle(4)
+		await _shot("neo_2_past_span_gone")
+		print("SHOT  apophis past span: t=%.0f d active=%s (must be false — ZERO is the Sun)"
+			% [Sim.t, Sim.catalog_active(apophis, Sim.t)])
+		Sim.jump(0.0)
+		Sim.paused = false
+		await _settle(2)
+
 	# 0. THE COMET (3D), in the 3D solar view — the shot pair the span gate exists
 	#    for. On its arc it must be a body out in the field; past the end of its
 	#    propagated orbit it must be GONE, and specifically not sitting on the Sun,

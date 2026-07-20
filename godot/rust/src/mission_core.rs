@@ -41,9 +41,11 @@ use std::sync::Arc;
 
 use anise::constants::frames::{SSB_J2000, SUN_J2000};
 use anise::prelude::Frame;
+use godot::global::godot_warn;
 use nalgebra::Vector3;
 
 use asteroid_core::ephemeris::Ephemeris;
+use asteroid_core::horizons::Neo;
 use asteroid_core::geometry::BPlaneEncounter;
 use asteroid_core::scenario::{
     DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError,
@@ -221,18 +223,46 @@ fn discover_span(eph: &Ephemeris) -> Result<(f64, f64), ScenarioError> {
     Ok((lo.1 + SPAN_MARGIN_S, hi.0 - SPAN_MARGIN_S))
 }
 
-/// One body in the orrery catalog: a pre-integrated, dense-output trajectory the
-/// display scrubs over. The `Clock` is built **once** (at [`seed_orrery_body`], via
-/// [`MissionCore::add_synthetic_body`] or the build worker) in the same validated
-/// Tier-1 field as the threat, so a scrub query is a cheap dense-output evaluation,
-/// never a re-integration.
+/// Where a catalog body's positions come from — and, because the two answer in
+/// **different frames**, a distinction the read path is not allowed to forget.
+///
+/// This is the one place the project mixes provenance in a single list, so each
+/// variant states what it is and what it is not:
+///
+/// - [`Integrated`](Trajectory::Integrated) — *our* physics. A synthetic designer
+///   body flown through the same validated Tier-1 field as the threat. States are
+///   **SSB metres**, the integration frame.
+/// - [`Sampled`](Trajectory::Sampled) — *JPL's* physics. A real asteroid read from
+///   a Horizons state table and interpolated between JPL's own samples; nothing
+///   here is integrated by us. States are **heliocentric ICRF metres**.
+///
+/// The frames differ by the Sun's barycentric wobble (~10⁶ km) — large enough to
+/// misplace a body, small enough to look like a rendering nudge rather than a bug.
+/// `catalog_body_helio_ecl_au` is the single conversion point, so there is exactly
+/// one place that has to get it right.
+///
+/// A frontend that wants to *say* which is which reads
+/// [`MissionCore::catalog_provenance`]: this project's standing rule is that
+/// nothing is drawn beside real physics without being labelled, which is what the
+/// deleted GDScript Kepler violated.
+pub enum Trajectory {
+    /// Integrated by us, in our field. SSB metres.
+    Integrated(Clock),
+    /// JPL Horizons states, interpolated. Heliocentric ICRF metres.
+    Sampled(Neo),
+}
+
+/// One body in the orrery catalog: a trajectory the display scrubs over, built
+/// **once** and thereafter only evaluated — a scrub query is a dense-output
+/// evaluation or a Hermite interpolation, never a re-integration and never a
+/// re-read of the source file.
 pub struct OrreryBody {
-    /// Display label (e.g. `"C/2029 K1"`).
+    /// Display label (e.g. `"C/2029 K1"`, `"99942 Apophis"`).
     name: String,
     /// Coarse class the frontend styles on (`"asteroid"`, `"comet"`, …).
     kind: String,
-    /// The pre-integrated trajectory in SSB metres (the integration frame).
-    clock: Clock,
+    /// Where the positions come from — and in which frame. See [`Trajectory`].
+    trajectory: Trajectory,
 }
 
 /// The display comet **C/2029 K1** — the one piece of scenery in the orrery, and
@@ -340,8 +370,42 @@ pub fn seed_orrery_body(
     Ok(OrreryBody {
         name: name.to_string(),
         kind: kind.to_string(),
-        clock: scenario.propagate_free(epoch0, seed, cadence_seconds, n_snapshots)?,
+        trajectory: Trajectory::Integrated(scenario.propagate_free(
+            epoch0,
+            seed,
+            cadence_seconds,
+            n_snapshots,
+        )?),
     })
+}
+
+/// Load every real near-Earth asteroid state table on disk into catalog bodies.
+///
+/// **No scenario, no almanac, no integration** — a `.neo` table already contains
+/// JPL's trajectory, so this is a file read and nothing more. That is the whole
+/// difference between these and [`seed_orrery_body`]'s synthetic scenery, and it
+/// is why real asteroids cost no build time and cannot perturb the threat.
+///
+/// A table that fails to parse costs that one asteroid and is warned about; it
+/// never takes the build down, for the same reason a failed small-body mount does
+/// not. Returns an empty vector when no tables are present, which is the ordinary
+/// state of a fresh clone (`python pyref/fetch_horizons_neo.py` fetches them).
+///
+/// Runs on the build worker only because that is where the catalog is assembled —
+/// it is milliseconds, not the small-body kernel's seconds.
+pub fn load_neo_bodies() -> Vec<OrreryBody> {
+    let (bodies, errors) = asteroid_core::horizons::load_all();
+    for e in errors {
+        godot_warn!("NEO state table skipped: {e}");
+    }
+    bodies
+        .into_iter()
+        .map(|neo| OrreryBody {
+            name: neo.name().to_string(),
+            kind: "asteroid".to_string(),
+            trajectory: Trajectory::Sampled(neo),
+        })
+        .collect()
 }
 
 /// A committed deflection plan and its precomputed result.
@@ -721,6 +785,26 @@ impl MissionCore {
         self.scenario = Some(built.scenario);
         self.plan = None; // a new scenario invalidates any prior plan
         self.bodies = bodies; // …and the catalog is replaced, not appended to
+    }
+
+    /// Append catalog bodies to the **current** scenario, without replacing it.
+    ///
+    /// Only legitimate for bodies that carry their own trajectory — i.e.
+    /// [`Trajectory::Sampled`] ones, which were never flown in any field of ours
+    /// and so cannot be invalidated by which scenario is installed. An
+    /// *integrated* body must arrive through [`install`](Self::install) with the
+    /// scenario it was flown in; adding one here would put it in a catalog beside
+    /// a threat that moves through a different field.
+    ///
+    /// Cheap by construction: no integration, no almanac access.
+    pub fn adopt_bodies(&mut self, bodies: Vec<OrreryBody>) {
+        debug_assert!(
+            bodies
+                .iter()
+                .all(|b| matches!(b.trajectory, Trajectory::Sampled(_))),
+            "only sampled bodies may be adopted after a scenario is installed"
+        );
+        self.bodies.extend(bodies);
     }
 
     /// Build the designer impactor + campaign over the already-loaded ephemeris and
@@ -1253,33 +1337,131 @@ impl MissionCore {
         self.bodies.get(i).map(|b| b.kind.as_str())
     }
 
-    /// The propagated span of catalog body `i` as `(lo, hi)` seconds past J2000 —
+    /// Where catalog body `i`'s positions come from: `"integrated"` (our physics,
+    /// in our field) or `"sampled"` (JPL's, read from a Horizons table). `None` if
+    /// `i` is out of range.
+    ///
+    /// Exists so the frontend can *label* the distinction rather than quietly
+    /// drawing two kinds of physics in one colour. That is not a style preference
+    /// here: a display-grade Kepler propagator drawn beside the real integrated
+    /// threat, with nothing marking which was which, is the specific mistake this
+    /// project spent a phase deleting.
+    pub fn catalog_provenance(&self, i: usize) -> Option<&'static str> {
+        self.bodies.get(i).map(|b| match b.trajectory {
+            Trajectory::Integrated(_) => "integrated",
+            Trajectory::Sampled(_) => "sampled",
+        })
+    }
+
+    /// The covered span of catalog body `i` as `(lo, hi)` seconds past J2000 —
     /// the frontend clamps/hides the body outside this (the reverse/long scrub
     /// exposes bodies with a bounded arc). `None` if `i` is out of range.
+    ///
+    /// **Both variants are bounded, for different reasons**: an integrated body
+    /// covers what was propagated, a sampled one covers the years its table was
+    /// fetched for. Neither is the clock's span, and outside either the position
+    /// query returns `None` — which the caller must honour rather than draw, since
+    /// a zeroed position is the Sun.
     pub fn catalog_span_tdb(&self, i: usize) -> Option<(f64, f64)> {
-        self.bodies.get(i).map(|b| b.clock.covered_span())
+        self.bodies.get(i).map(|b| match &b.trajectory {
+            Trajectory::Integrated(c) => c.covered_span(),
+            Trajectory::Sampled(n) => n.span_tdb(),
+        })
     }
 
     /// Position of catalog body `i` at `tdb`, heliocentric **ecliptic AU** — the
     /// same display frame as the planets and the threat. `None` if `i` is out of
-    /// range or `tdb` is outside the body's propagated span (the frontend uses
+    /// range or `tdb` is outside the body's span (the frontend uses
     /// [`catalog_span_tdb`](Self::catalog_span_tdb) to know which).
     pub fn catalog_position_ecl_au(&self, i: usize, tdb: f64) -> Option<Vector3<f64>> {
         let b = self.bodies.get(i)?;
-        let epoch = Epoch::from_tdb_seconds_past_j2000(tdb);
-        let st = b.clock.state_at(epoch).ok()?;
-        self.ssb_m_to_helio_ecl_au(st.position, epoch)
+        self.catalog_body_helio_ecl_au(b, Epoch::from_tdb_seconds_past_j2000(tdb))
+    }
+
+    /// **The one place the two trajectory frames are reconciled.** Integrated
+    /// bodies come back in SSB metres and have the Sun's barycentric position
+    /// subtracted; sampled bodies are already Sun-relative and must not be
+    /// shifted again. Both then take the same ICRF→ecliptic rotation the planets
+    /// take, so everything on screen lands in one frame.
+    ///
+    /// Doing this once, here, is the point: the wrong branch is a ~10⁶ km offset
+    /// that looks like a rendering nudge, and two copies of this logic is two
+    /// chances to get it wrong.
+    fn catalog_body_helio_ecl_au(&self, b: &OrreryBody, epoch: Epoch) -> Option<Vector3<f64>> {
+        match &b.trajectory {
+            Trajectory::Integrated(c) => {
+                self.ssb_m_to_helio_ecl_au(c.state_at(epoch).ok()?.position, epoch)
+            }
+            Trajectory::Sampled(n) => {
+                let helio_m = n.helio_state_at(epoch.tdb_seconds_past_j2000())?.position;
+                Some(icrf_km_to_ecliptic_au(helio_m / M_PER_KM))
+            }
+        }
+    }
+
+    /// One orbital period of catalog body `i`'s trajectory, seconds — or the whole
+    /// covered span when a period is not meaningful (an integrated body, or a
+    /// sampled one on an unbound arc). `None` if `i` is out of range.
+    ///
+    /// The orbit *line* wants one lap: a sampled NEO's table is decades long but
+    /// its orbit is ~a year, and a polyline over the whole table is dozens of
+    /// precessing laps drawn on top of each other. This says how much to draw.
+    pub fn catalog_orbit_period_seconds(&self, i: usize) -> Option<f64> {
+        match &self.bodies.get(i)?.trajectory {
+            // The comet's span already *is* one authored period, and an integrated
+            // body has no closed-form period here — draw the whole span.
+            Trajectory::Integrated(c) => {
+                let (lo, hi) = c.covered_span();
+                Some(hi - lo)
+            }
+            Trajectory::Sampled(n) => {
+                let (lo, hi) = n.span_tdb();
+                Some(n.orbital_period_seconds().unwrap_or(hi - lo))
+            }
+        }
     }
 
     /// Catalog body `i`'s trajectory as `n` heliocentric ecliptic-AU points across
-    /// its whole propagated span — the orbit polyline. Sampled **once**. Empty if
+    /// its whole covered span — the orbit polyline. Sampled **once**. Empty if
     /// `i` is out of range.
+    ///
+    /// Goes through [`catalog_body_helio_ecl_au`](Self::catalog_body_helio_ecl_au)
+    /// rather than the SSB-only `track_ecl_au` helper the threat paths use,
+    /// because a sampled body's states are not SSB and that helper would subtract
+    /// the Sun from a position the Sun had already been subtracted from.
     pub fn catalog_track_ecl_au(&self, i: usize, n: usize) -> Vec<Vector3<f64>> {
+        match self.catalog_span_tdb(i) {
+            Some((t0, t1)) => self.catalog_track_window_ecl_au(i, t0, t1, n),
+            None => Vec::new(),
+        }
+    }
+
+    /// Catalog body `i`'s trajectory as `n` points across `[t0_tdb, t1_tdb]` — the
+    /// orbit polyline over an arbitrary window, so a decades-long sampled body can
+    /// draw a single lap rather than dozens overplotted. Points outside the body's
+    /// span are dropped (never drawn at the Sun), so a window straying past an edge
+    /// yields a short arc, not a spray of origin points. Empty if `i` is invalid.
+    pub fn catalog_track_window_ecl_au(
+        &self,
+        i: usize,
+        t0_tdb: f64,
+        t1_tdb: f64,
+        n: usize,
+    ) -> Vec<Vector3<f64>> {
         let Some(b) = self.bodies.get(i) else {
             return Vec::new();
         };
-        let (t0, t1) = b.clock.covered_span();
-        self.track_ecl_au(n, t0, t1, |e| b.clock.state_at(e).ok().map(|s| s.position))
+        let n = n.max(2);
+        let mut out = Vec::with_capacity(n);
+        for k in 0..n {
+            let t = t0_tdb + (t1_tdb - t0_tdb) * (k as f64 / (n - 1) as f64);
+            if let Some(au) =
+                self.catalog_body_helio_ecl_au(b, Epoch::from_tdb_seconds_past_j2000(t))
+            {
+                out.push(au);
+            }
+        }
+        out
     }
 }
 
@@ -1911,6 +2093,108 @@ mod tests {
     /// out by hand in a doc comment. This re-measures that derivation on the real
     /// perturbed field, so a careless edit to the seed angle fails loudly instead of
     /// quietly parking the comet at aphelion for the whole campaign.
+    /// **Real asteroids are scenery, and scenery cannot move the threat.**
+    ///
+    /// The sb441 mount had to prove this empirically, because mounting a kernel
+    /// changes the almanac the threat is *integrated against* — and the check was
+    /// real work (cap and |B| had to match pre-mount to the digit). For sampled
+    /// NEOs the same claim holds for a stronger reason: a `.neo` table never
+    /// reaches the almanac at all. It is read after the scenario is built, carries
+    /// no gravitational parameter, and enters nothing but the catalog.
+    ///
+    /// So this test pins the structural version: **one** build, its threat numbers
+    /// read before and after the asteroids are installed, compared with `==`
+    /// rather than a tolerance. A tolerance here would be an admission that the
+    /// scenery might perturb something a little.
+    #[test]
+    fn real_asteroids_join_the_catalog_without_touching_the_threat() {
+        if !have_kernels() {
+            eprintln!("skipping real_asteroids_join_the_catalog_*: no DE kernel");
+            return;
+        }
+        let mut mc = MissionCore::load().expect("load kernels");
+        let eph = mc.ephemeris_arc();
+        let built = BuiltScenario::build(Arc::clone(&eph), &ImpactorConfig::default(), false)
+            .expect("scenario builds");
+        mc.install(built, Vec::new());
+
+        // The threat, before any scenery exists.
+        let (capture, perigee, impact) = (
+            mc.capture_radius_m().expect("capture radius"),
+            mc.nominal_perigee_m().expect("nominal perigee"),
+            mc.impact_tdb_seconds(),
+        );
+
+        let neos = load_neo_bodies();
+        if neos.is_empty() {
+            // Loud, for the same reason the kernel skip is: a green run here that
+            // installed nothing would be asserting nothing.
+            assert!(
+                !asteroid_core::kernels::require_kernels(),
+                "ASTEROID_REQUIRE_KERNELS is set but no .neo tables loaded, so this \
+                 test would have verified an empty catalog and printed green.\n{}",
+                asteroid_core::horizons::not_found_message()
+            );
+            eprintln!("no .neo tables — skipping the real-asteroid half of this test");
+            return;
+        }
+        let n_neos = neos.len();
+        mc.adopt_bodies(neos);
+
+        // Bit-identical, not "close". Nothing in the read path above touched the
+        // field the threat was flown in.
+        assert_eq!(mc.capture_radius_m(), Some(capture), "capture radius moved");
+        assert_eq!(mc.nominal_perigee_m(), Some(perigee), "nominal perigee moved");
+        assert_eq!(mc.impact_tdb_seconds(), impact, "impact epoch moved");
+
+        // And the asteroids are actually there, sampled, span-gated, and in NEO
+        // territory — an empty or Sun-parked catalog would pass the checks above.
+        assert_eq!(mc.catalog_count(), n_neos);
+        for i in 0..mc.catalog_count() {
+            let name = mc.catalog_name(i).expect("name").to_string();
+            assert_eq!(mc.catalog_kind(i), Some("asteroid"), "{name}");
+            assert_eq!(
+                mc.catalog_provenance(i),
+                Some("sampled"),
+                "{name} must be labelled as JPL's trajectory, not ours"
+            );
+
+            let (lo, hi) = mc.catalog_span_tdb(i).expect("span");
+            let r = mc
+                .catalog_position_ecl_au(i, 0.5 * (lo + hi))
+                .expect("in-span position")
+                .norm();
+            assert!(
+                (0.1..5.0).contains(&r),
+                "{name} sits {r:.3} AU from the Sun — a near-Earth asteroid does not"
+            );
+
+            // The span gate, per body. One day outside the table there is no
+            // position, and the frontend must hide the body rather than draw the
+            // ZERO that a lesser API would return here.
+            assert!(
+                mc.catalog_position_ecl_au(i, lo - 86_400.0).is_none(),
+                "{name} answered before its table starts"
+            );
+            assert!(
+                mc.catalog_position_ecl_au(i, hi + 86_400.0).is_none(),
+                "{name} answered after its table ends"
+            );
+
+            // The polyline is what the orrery draws; an empty one is an invisible
+            // asteroid and a short one is a broken arc.
+            let track = mc.catalog_track_ecl_au(i, 256);
+            assert_eq!(track.len(), 256, "{name} track");
+            for p in &track {
+                assert!(
+                    (0.1..5.0).contains(&p.norm()),
+                    "{name} track leaves NEO distances at {:.3} AU",
+                    p.norm()
+                );
+            }
+        }
+    }
+
     #[test]
     fn build_worker_installs_the_display_comet() {
         if !have_kernels() {

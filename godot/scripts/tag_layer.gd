@@ -69,6 +69,14 @@ func _draw() -> void:
 	if Sim.catalog_active(Sim.comet_el, t):
 		_tag_diamond(cam, Sim.pos3d(Sim.comet_el, t), Sim.comet_el.name, dim)
 
+	# The real NEOs, named — and the name is the point, exactly as it was for the
+	# sixteen belt asteroids: an unlabelled blob among the scenery is
+	# indistinguishable from scenery, and these are the only real near-Earth
+	# objects on the screen. Same per-body span gate as the draw above.
+	for el in Sim.neos:
+		if Sim.catalog_active(el, t):
+			_tag_diamond(cam, Sim.pos3d(el, t), el.name, bright)
+
 	if Sim.interceptor_online and Sim.interceptor_phase(t) == "CRUISE":
 		_tag_cross(cam, Sim.interceptor_pos(t), "ATLAS-1", bright)
 

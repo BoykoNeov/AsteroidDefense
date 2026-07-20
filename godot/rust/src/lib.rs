@@ -24,7 +24,8 @@ use godot::prelude::*;
 use asteroid_core::scenario::{ImpactorConfig, ScenarioError};
 use asteroid_core::{Epoch, OrbitalElements};
 use mission_core::{
-    display_comet, mount_small_bodies, seed_orrery_body, BuiltScenario, MissionCore, OrreryBody,
+    display_comet, load_neo_bodies, mount_small_bodies, seed_orrery_body, BuiltScenario,
+    MissionCore, OrreryBody,
     SB441_BODIES,
 };
 
@@ -311,7 +312,19 @@ impl Mission {
                         display_comet::N_SNAPSHOTS,
                     )
                     .map_err(|e| e.to_string())?;
-                    Ok((built, vec![comet]))
+
+                    // The real asteroids join the same catalog — but they cost no
+                    // integration at all. A `.neo` table already holds JPL's
+                    // trajectory, so this is a file read (milliseconds) beside the
+                    // comet's ~4 s of flying. It rides the worker because this is
+                    // where the catalog is assembled, not because it is expensive.
+                    //
+                    // Absent tables are the ordinary state of a fresh clone and
+                    // produce an empty vector, exactly as an unmounted small-body
+                    // kernel produces an empty asteroid list.
+                    let mut bodies = vec![comet];
+                    bodies.extend(load_neo_bodies());
+                    Ok((built, bodies))
                 });
             // A closed channel means the game quit mid-build. Dropping the result is
             // the right response; `send`'s Err must not become a panic on a detached
@@ -888,6 +901,22 @@ impl Mission {
             .map_or_else(GString::new, |s| s.into())
     }
 
+    /// Where catalog body `index`'s positions come from: `"integrated"` (this
+    /// project's physics, flown in the validated Tier-1 field) or `"sampled"`
+    /// (JPL's, read from a Horizons state table and interpolated). Empty if out
+    /// of range.
+    ///
+    /// The frontend labels bodies with this. Drawing someone else's trajectory
+    /// beside our own with nothing distinguishing them is precisely the mistake
+    /// the GDScript Kepler propagator was.
+    #[func]
+    fn catalog_provenance(&self, index: i64) -> GString {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.core.as_ref().and_then(|c| c.catalog_provenance(i)))
+            .map_or_else(GString::new, |s| s.into())
+    }
+
     /// Position of catalog body `index` at `tdb_seconds`, heliocentric **ecliptic
     /// AU** (the planets' frame). `Vector3::ZERO` if the index is invalid or the
     /// epoch is outside the body's propagated span (use
@@ -926,6 +955,34 @@ impl Mission {
         arr
     }
 
+    /// Catalog body `index`'s orbit as `samples` points across `[t0_tdb, t1_tdb]` —
+    /// the polyline over an arbitrary window, so a decades-long sampled body draws
+    /// one lap instead of dozens overplotted. Points outside the body's span are
+    /// dropped rather than drawn at the Sun. Empty if the index is invalid.
+    #[func]
+    fn catalog_track_window_ecl_au(
+        &self,
+        index: i64,
+        t0_tdb: f64,
+        t1_tdb: f64,
+        samples: i64,
+    ) -> PackedVector3Array {
+        let n = samples.max(0) as usize;
+        let pts = usize::try_from(index)
+            .ok()
+            .and_then(|i| {
+                self.core
+                    .as_ref()
+                    .map(|c| c.catalog_track_window_ecl_au(i, t0_tdb, t1_tdb, n))
+            })
+            .unwrap_or_default();
+        let mut arr = PackedVector3Array::new();
+        for v in pts {
+            arr.push(Vector3::new(v.x as f32, v.y as f32, v.z as f32));
+        }
+        arr
+    }
+
     /// Catalog body `index`'s propagated span as `[lo, hi]` seconds past J2000 (a
     /// 2-element array; **empty** if the index is invalid). f64 precision, unlike a
     /// `Vector2`, because a TDB second near 1e9 would lose ~64 s as f32. The
@@ -941,5 +998,23 @@ impl Mission {
             arr.push(hi);
         }
         arr
+    }
+
+    /// One orbital period of catalog body `index`, seconds — or the whole covered
+    /// span where a period is not meaningful. `0.0` if the index is invalid.
+    ///
+    /// The orbit line samples this rather than the full span: a real NEO's table
+    /// runs decades while its orbit is about a year, so the whole span is dozens
+    /// of laps overplotted into noise.
+    #[func]
+    fn catalog_orbit_period_seconds(&self, index: i64) -> f64 {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| {
+                self.core
+                    .as_ref()
+                    .and_then(|c| c.catalog_orbit_period_seconds(i))
+            })
+            .unwrap_or(0.0)
     }
 }

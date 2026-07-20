@@ -550,7 +550,7 @@ either way (built once from the whole span, never queries the live clock, so it 
 Sun) — but an orbit drawn for a body the sim is not tracking still reads as a claim that it is. Lesson
 repeated: don't assert a parallel to existing code without opening the existing code.
 
-**NEXT — 3D (real-NEO half), NOT started:** `sb441-n16.bsp` (on disk) via a new SPK-backed catalog source, not
+**~~NEXT — 3D (real-NEO half), NOT started~~ (SUPERSEDED — both halves DONE 2026-07-20, see below):** `sb441-n16.bsp` (on disk) via a new SPK-backed catalog source, not
 `add_synthetic_body`; teaching set is Apophis / Bennu / Didymos (HANDOFF §9). Interceptor stays cosmetic until a
 Lambert solver exists — `interceptor_online` is the flag. `required_dv` remains ~18.3 s → keep OFF every live
 path (`req_dv_label` is a labelled first-order estimate). Still open: osculating e/i for the HUD needs an

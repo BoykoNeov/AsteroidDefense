@@ -36,6 +36,7 @@
 //! obliquity rotation (SPICE's `ECLIPJ2000` value, 84381.448″) so the returned
 //! positions sit in the ecliptic — skipping it would tilt the whole system ~23°.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anise::constants::frames::{SSB_J2000, SUN_J2000};
@@ -380,6 +381,64 @@ const SPAN_MARGIN_S: f64 = 86_400.0;
 const PROBE_LO_S: f64 = -31_557_600_000.0;
 const PROBE_HI_S: f64 = 31_557_600_000.0;
 
+/// The bodies `sb441-n16.bsp` actually contains: the 16 asteroid perturbers ASSIST
+/// integrates against, by NAIF id. **Main-belt, every one of them** — this file is
+/// a perturber set, not a target list, so there is no Apophis and no Bennu here and
+/// there never will be. Those are per-object JPL Horizons kernels, read through this
+/// same path once they are fetched.
+///
+/// Ids are the SPK convention for a numbered asteroid: 2000000 + the number, so
+/// 2000001 is (1) Ceres. Verified by enumerating the kernel's segment table rather
+/// than copied from documentation.
+pub const SB441_BODIES: &[(i32, &str)] = &[
+    (2000001, "Ceres"),
+    (2000002, "Pallas"),
+    (2000003, "Juno"),
+    (2000004, "Vesta"),
+    (2000007, "Iris"),
+    (2000010, "Hygiea"),
+    (2000015, "Eunomia"),
+    (2000016, "Psyche"),
+    (2000031, "Euphrosyne"),
+    (2000052, "Europa"),
+    (2000065, "Cybele"),
+    (2000087, "Sylvia"),
+    (2000088, "Thisbe"),
+    (2000107, "Camilla"),
+    (2000511, "Davida"),
+    (2000704, "Interamnia"),
+];
+
+/// Build an almanac with the small-body kernel chained onto the DE pair — the
+/// worker-thread counterpart to [`MissionCore::load_from`].
+///
+/// **~5.7 s cold, ~272 ms warm.** The gap is page-cache I/O on a 646 MB file, so a
+/// freshly launched game pays the full cost and only a re-run pays the small one.
+/// That measurement is why this exists as a separate function called from the build
+/// worker instead of a line inside `load_from`.
+///
+/// Re-reading de440s + pck11 (~ms) rather than mounting onto the served `Arc` is not
+/// waste — [`Ephemeris::with_constants`] takes `self` by value, and the served
+/// almanac is behind an `Arc` that the render thread is reading every frame. A
+/// second almanac is the only way to do this without stopping the solar system.
+pub fn mount_small_bodies(
+    bsp: &Path,
+    pca: &Path,
+    small_bodies: &Path,
+) -> Result<Ephemeris, ScenarioError> {
+    let to_str = |p: &Path| -> Result<String, ScenarioError> {
+        p.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| ScenarioError::Ephemeris(format!("kernel path is not UTF-8: {p:?}")))
+    };
+    Ephemeris::load(&to_str(bsp)?)
+        .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?
+        .with_constants(&to_str(pca)?)
+        .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?
+        .with_constants(&to_str(small_bodies)?)
+        .map_err(|e| ScenarioError::Ephemeris(e.to_string()))
+}
+
 /// A finished scenario and everything fixed at build time, ready to be handed to a
 /// [`MissionCore`] — the unit of work that crosses back from a worker thread.
 ///
@@ -407,6 +466,19 @@ pub struct BuiltScenario {
     /// the b-plane view can open on the threat the instant the build lands, with no
     /// propagation and nothing to wait for.
     nominal_frame: EncounterFrame,
+    /// The almanac this was built against, carried back so [`MissionCore::install`]
+    /// can adopt it. When the worker mounted the small-body kernel this is the
+    /// *mounted* almanac, and adopting it is what puts asteroids within reach of
+    /// `body_position_ecl_au`; when it did not, this is the same `Arc` that went
+    /// out and the swap is a no-op refcount bump.
+    ///
+    /// It travels **with** the scenario for the same reason the orrery bodies do:
+    /// the scenario was integrated in this field, so a core serving positions from
+    /// a different one would be quietly answering from a field its own threat was
+    /// never flown in.
+    ephemeris: Arc<Ephemeris>,
+    /// Whether [`ephemeris`](Self::ephemeris) has the small-body kernel on it.
+    small_bodies_mounted: bool,
 }
 
 impl BuiltScenario {
@@ -428,7 +500,17 @@ impl BuiltScenario {
     /// `Arc<Ephemeris>` rather than `&MissionCore`: it is meant to be called on a
     /// worker thread, from a clone of the almanac, while the core it will eventually
     /// feed keeps drawing the solar system.
-    pub fn build(eph: Arc<Ephemeris>, cfg: &ImpactorConfig) -> Result<Self, ScenarioError> {
+    ///
+    /// The `small_bodies_mounted` flag describes the almanac being handed in; it is
+    /// carried, not inferred. Probing the almanac for an asteroid to find out would
+    /// be a lookup that fails for two different reasons (not mounted, or out of
+    /// span) and reports one.
+    pub fn build(
+        eph: Arc<Ephemeris>,
+        cfg: &ImpactorConfig,
+        small_bodies_mounted: bool,
+    ) -> Result<Self, ScenarioError> {
+        let ephemeris = Arc::clone(&eph);
         let scenario = RealFieldScenario::build_with(cfg, eph)?;
         // `build_with` already verified its round-trip through `deflection()`, so the
         // scenario's nominal cache is warm and all of these are cheap reads of work
@@ -451,6 +533,8 @@ impl BuiltScenario {
             nominal_clock,
             nominal_encounter,
             nominal_frame,
+            ephemeris,
+            small_bodies_mounted,
         })
     }
 }
@@ -459,6 +543,26 @@ impl BuiltScenario {
 /// once built — the cached nominal trajectory and (optionally) a deflection plan.
 pub struct MissionCore {
     ephemeris: Arc<Ephemeris>,
+    /// The paths this core was loaded from, kept so a worker can build a *second*
+    /// almanac with the small-body kernel chained on. It cannot mount onto
+    /// `ephemeris`: [`Ephemeris::with_constants`] consumes `self`, and this one is
+    /// behind an `Arc` being read every frame. Re-reading de440s costs ~ms.
+    bsp: PathBuf,
+    pca: PathBuf,
+    /// The small-body kernel to mount at build time, if the frontend supplied one
+    /// ([`set_small_body_kernel`](Self::set_small_body_kernel)). `None` — the
+    /// default — is a complete, working mission with no asteroids in the catalog.
+    ///
+    /// Deliberately *not* mounted at load: measured **5.7 s cold** on the 646 MB
+    /// `sb441-n16.bsp`, and `load_from` is contractually fast because the frontend
+    /// calls it on the way to the first drawn frame. The build worker already
+    /// spends ~10 s off-thread; this belongs there.
+    small_bodies: Option<PathBuf>,
+    /// Whether [`ephemeris`](Self::ephemeris) — the almanac being *served* — has
+    /// the small-body kernel chained on. Distinct from `small_bodies.is_some()`,
+    /// which only says one was *armed*: between `set_small_body_kernel` and the
+    /// build landing, a path is known and no asteroid is loadable.
+    small_bodies_mounted: bool,
     /// The kernel's usable coverage window, `(lo, hi)` seconds past J2000,
     /// discovered by bisection at load (see [`discover_span`]) rather than
     /// hardcoded — the shipped kernel may be de440s (~1850–2149) or the long-span
@@ -505,7 +609,14 @@ impl MissionCore {
             ScenarioError::KernelsNotFound(asteroid_core::kernels::not_found_message())
         })?;
         let (bsp, pca) = k.as_strs();
-        Self::load_from(bsp, pca)
+        let mut core = Self::load_from(bsp, pca)?;
+        // Arm it if the resolver found one beside the pair — still not mounted, so
+        // this stays the fast path. A shell run gets asteroids for free; a shell run
+        // on a machine without the 646 MB file is unaffected.
+        if let Some(sb) = k.small_bodies_str() {
+            core.set_small_body_kernel(sb)?;
+        }
+        Ok(core)
     }
 
     /// Read the DE kernels at two explicit paths — the entry point for any caller
@@ -523,6 +634,10 @@ impl MissionCore {
         let span = discover_span(&eph)?;
         Ok(Self {
             ephemeris: Arc::new(eph),
+            bsp: PathBuf::from(bsp),
+            pca: PathBuf::from(pca),
+            small_bodies: None,
+            small_bodies_mounted: false,
             span,
             scenario: None,
             nominal_clock: None,
@@ -538,6 +653,42 @@ impl MissionCore {
     /// and a failed lookup is indistinguishable from "at the Sun" downstream.
     pub fn usable_span_tdb(&self) -> (f64, f64) {
         self.span
+    }
+
+    /// Arm the small-body kernel at `path`, to be mounted by the **next** build
+    /// (see [`mount_small_bodies`]). Returns an error if the path is not a file —
+    /// a typo that silently produced an empty asteroid catalog would look exactly
+    /// like "this kernel has no asteroids in it", which is the wrong lesson.
+    ///
+    /// Nothing is read here; this is a string assignment. The 5.7 s is paid on the
+    /// worker, which is the entire reason the mount is not part of `load_from`.
+    pub fn set_small_body_kernel(&mut self, path: &str) -> Result<(), ScenarioError> {
+        let p = PathBuf::from(path);
+        if !p.is_file() {
+            return Err(ScenarioError::KernelsNotFound(format!(
+                "small-body kernel not found: {path}"
+            )));
+        }
+        self.small_bodies = Some(p);
+        Ok(())
+    }
+
+    /// The kernel paths a worker needs to build its own mounted almanac:
+    /// `(bsp, pca, small_bodies)`. Owned, so they cross the thread boundary
+    /// without borrowing this core — which stays here, drawing planets.
+    pub fn kernel_paths(&self) -> (PathBuf, PathBuf, Option<PathBuf>) {
+        (
+            self.bsp.clone(),
+            self.pca.clone(),
+            self.small_bodies.clone(),
+        )
+    }
+
+    /// Whether the almanac currently being served has the small-body kernel on it.
+    /// **The catalog gate**: false means asteroid lookups will fail, and a failed
+    /// lookup is indistinguishable from "at the Sun" once it reaches the display.
+    pub fn small_bodies_mounted(&self) -> bool {
+        self.small_bodies_mounted
     }
 
     /// The loaded almanac, shared. Cloning the `Arc` is how a worker thread gets a
@@ -558,6 +709,12 @@ impl MissionCore {
     /// integration back on the main thread — the very stall the worker exists to
     /// avoid. See [`seed_orrery_body`].
     pub fn install(&mut self, built: BuiltScenario, bodies: Vec<OrreryBody>) {
+        // Adopt the field the scenario was flown in — the swap that puts the
+        // small-body kernel under `body_position_ecl_au`. The old `Arc` drops when
+        // the last frame that read it is done with it; nothing is mutated underneath
+        // the renderer, which is why this can happen mid-flight at all.
+        self.ephemeris = built.ephemeris;
+        self.small_bodies_mounted = built.small_bodies_mounted;
         self.nominal_clock = Some(built.nominal_clock);
         self.nominal_encounter = Some(built.nominal_encounter);
         self.nominal_frame = Some(built.nominal_frame);
@@ -578,7 +735,18 @@ impl MissionCore {
     /// by hand at each call site would be worse.
     #[allow(dead_code)]
     pub fn build_scenario(&mut self, cfg: &ImpactorConfig) -> Result<(), ScenarioError> {
-        let built = BuiltScenario::build(self.ephemeris_arc(), cfg)?;
+        // Blocking already, so the small-body mount can be honest here: if one was
+        // armed, this build produces a mounted almanac exactly as the worker does.
+        // A shell tool that armed a kernel and then found no asteroids would have
+        // been told nothing about why.
+        let (eph, mounted) = match self.small_bodies.clone() {
+            Some(sb) => (
+                Arc::new(mount_small_bodies(&self.bsp, &self.pca, &sb)?),
+                true,
+            ),
+            None => (self.ephemeris_arc(), false),
+        };
+        let built = BuiltScenario::build(eph, cfg, mounted)?;
         self.install(built, Vec::new());
         Ok(())
     }
@@ -1136,6 +1304,70 @@ mod tests {
         Epoch::from_tdb_gregorian(2035, 1, 1, 0, 0, 0, 0)
     }
 
+    /// The small-body mount, end to end: an unmounted core must **refuse** Ceres,
+    /// and a mounted one must place it in the main belt.
+    ///
+    /// The refusal half is the half that matters. `body_position_ecl_au` returning
+    /// `None` is what the display gates on; if an unmounted almanac ever answered
+    /// with something, that something would be drawn, and a body drawn at a bad
+    /// position in a heliocentric view is not a glitch — `Vector3::ZERO` *is* the
+    /// Sun. This project has shipped that confusion three times.
+    ///
+    /// The positive half also pins the ids: `SB441_BODIES` was read out of the
+    /// kernel's segment table, and a wrong id would resolve to nothing (or, worse,
+    /// to some other body) rather than announce itself.
+    #[test]
+    fn small_body_mount_gates_and_resolves() {
+        if !have_kernels() {
+            return;
+        }
+        let Some(k) = asteroid_core::kernels::resolve() else {
+            return;
+        };
+        let Some(sb) = k.small_bodies.clone() else {
+            // No 646 MB kernel on this machine — the optional half of the contract.
+            // Nothing to assert, and failing here would punish a valid setup.
+            eprintln!("no small-body kernel resolved — skipping the mount test");
+            return;
+        };
+
+        let (bsp, pca) = k.as_strs();
+        let t = epoch_2035().tdb_seconds_past_j2000();
+
+        // Unmounted: armed or not, an asteroid is not reachable until the mount.
+        let mut core = MissionCore::load_from(bsp, pca).expect("load");
+        assert!(!core.small_bodies_mounted(), "nothing mounted yet");
+        assert!(
+            core.body_position_ecl_au(2000001, t).is_none(),
+            "an unmounted almanac answered for Ceres — that answer becomes a body \
+             drawn on the Sun"
+        );
+        // Arming records a path and mounts nothing, so the refusal must survive it.
+        core.set_small_body_kernel(sb.to_str().unwrap()).expect("arm");
+        assert!(
+            !core.small_bodies_mounted() && core.body_position_ecl_au(2000001, t).is_none(),
+            "arming a kernel is not mounting it"
+        );
+
+        // Mounted: every id in the table resolves, and lands in the main belt.
+        let eph = mount_small_bodies(&k.bsp, &k.pca, &sb).expect("mount");
+        for (id, name) in SB441_BODIES {
+            let p = eph
+                .position_km(
+                    Frame::from_ephem_j2000(*id),
+                    SUN_J2000,
+                    Epoch::from_tdb_seconds_past_j2000(t).as_hifitime(),
+                )
+                .unwrap_or_else(|e| panic!("{name} ({id}) did not resolve: {e}"));
+            let r_au = p.norm() / AU_KM;
+            assert!(
+                (1.5..5.5).contains(&r_au),
+                "{name} ({id}) is {r_au:.3} AU from the Sun — not a main-belt \
+                 distance, so this id is not the body it claims to be"
+            );
+        }
+    }
+
     /// The obliquity rotation is a pure rotation: it preserves length and leaves
     /// a vector in the equatorial plane (z_eq = 0) with its z-component still
     /// zero only along the shared X axis. Concretely, the ecliptic north pole
@@ -1679,7 +1911,7 @@ mod tests {
 
         // Exactly what `begin_build_scenario`'s worker does, in order.
         let eph = mc.ephemeris_arc();
-        let built = BuiltScenario::build(Arc::clone(&eph), &ImpactorConfig::default())
+        let built = BuiltScenario::build(Arc::clone(&eph), &ImpactorConfig::default(), false)
             .expect("scenario builds");
         let epoch0 = built.epoch0();
         let comet = seed_orrery_body(

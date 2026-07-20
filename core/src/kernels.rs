@@ -42,6 +42,15 @@
 //! cargo test --release                              # green may mean "skipped"
 //! ```
 //!
+//! # The third kernel
+//!
+//! [`KernelPair`] also carries an **optional** small-body kernel
+//! ([`sb441-n16.bsp`](KernelPair::small_bodies)) when one is present. It is
+//! deliberately outside the both-or-nothing rule: it is 646 MB, a fresh clone
+//! will not have it, and everything that worked before it existed works without
+//! it. Absent → `None` → the caller does without. It is never a resolution
+//! failure, because failing the *pair* over it would take the planets down too.
+//!
 //! # What is deliberately not here
 //!
 //! `kernels.gd` reads `user://kernels.cfg` between the environment and the
@@ -64,6 +73,10 @@ pub const ENV_PCA: &str = "ASTEROID_PLANETARY_CONSTANTS";
 /// the fix that keeps the silent-green failure from coming back.
 pub const ENV_REQUIRE: &str = "ASTEROID_REQUIRE_KERNELS";
 
+/// Environment variable naming the small-body `.bsp` explicitly. **Optional** —
+/// see [`KernelPair::small_bodies`].
+pub const ENV_SMALL_BODIES: &str = "ASTEROID_SMALL_BODY_KERNEL";
+
 /// Accepted DE kernel filenames, most-preferred first. `de440s` is the standard
 /// short span (~1850–2149); `de441` is the long span. The core copes with
 /// either, so this is a preference order, not a requirement.
@@ -72,6 +85,10 @@ const BSP_NAMES: &[&str] = &["de440s.bsp", "de440.bsp", "de441.bsp"];
 /// Accepted planetary-constants filenames. `pck11.pca` is what the tests pin.
 const PCA_NAMES: &[&str] = &["pck11.pca"];
 
+/// Accepted small-body ephemeris filenames. `sb441-n16.bsp` is the 16 asteroid
+/// perturbers ASSIST uses — Ceres through Interamnia, main-belt, Sun-centered.
+const SMALL_BODY_NAMES: &[&str] = &["sb441-n16.bsp"];
+
 /// A resolved kernel pair, and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelPair {
@@ -79,6 +96,19 @@ pub struct KernelPair {
     pub bsp: PathBuf,
     /// Path to the planetary-constants `.pca`.
     pub pca: PathBuf,
+    /// Path to a small-body ephemeris `.bsp`, if one is present — **optional by
+    /// construction, and it must stay that way.**
+    ///
+    /// `sb441-n16.bsp` is ~646 MB, twenty times the DE kernel, and a fresh clone
+    /// will not have it. Everything the project did before it existed still works
+    /// without it, so a missing small-body kernel is `None` and never a resolution
+    /// failure: the pair is still a pair. It is a *third, independent* thing, not
+    /// a third member of the both-or-nothing rule that governs `bsp` + `pca`.
+    ///
+    /// Mounting it is not free — measured **5.7 s cold**, 272 ms warm, which is
+    /// page-cache I/O on the 646 MB file. That is why nothing on a startup path
+    /// mounts it; see the build worker in `godot/rust`.
+    pub small_bodies: Option<PathBuf>,
     /// Human-readable origin of the hit — the environment, or the directory
     /// scanned. When resolution goes wrong, *which* mechanism answered is the
     /// first thing worth knowing.
@@ -99,6 +129,18 @@ impl KernelPair {
             self.pca.to_str().expect("kernel path is UTF-8"),
         )
     }
+
+    /// The small-body kernel as `&str`, or `None`. Separate from
+    /// [`as_strs`](Self::as_strs) because it is separately optional — a caller
+    /// that wants the pair should not have to think about this one at all.
+    ///
+    /// # Panics
+    /// If the path is not valid UTF-8; see [`as_strs`](Self::as_strs).
+    pub fn small_bodies_str(&self) -> Option<&str> {
+        self.small_bodies
+            .as_ref()
+            .map(|p| p.to_str().expect("kernel path is UTF-8"))
+    }
 }
 
 /// Resolve the kernel pair, first hit wins:
@@ -113,9 +155,13 @@ pub fn resolve() -> Option<KernelPair> {
     if let (Ok(bsp), Ok(pca)) = (std::env::var(ENV_BSP), std::env::var(ENV_PCA)) {
         let (bsp, pca) = (PathBuf::from(bsp), PathBuf::from(pca));
         if bsp.is_file() && pca.is_file() {
+            // Beside the DE kernel is where the scan would have looked, so an
+            // env-resolved pair gets the same small-body courtesy.
+            let small_bodies = bsp.parent().and_then(small_bodies_in);
             return Some(KernelPair {
                 bsp,
                 pca,
+                small_bodies,
                 source: format!("{ENV_BSP} env"),
             });
         }
@@ -200,8 +246,22 @@ fn scan_dir(dir: &Path) -> Option<KernelPair> {
     Some(KernelPair {
         bsp,
         pca,
+        small_bodies: small_bodies_in(dir),
         source: dir.display().to_string(),
     })
+}
+
+/// The small-body kernel: [`ENV_SMALL_BODIES`] if it names a real file,
+/// otherwise whatever sits in `dir`. Unlike the pair this never fails — it
+/// answers `None` and the caller does without.
+fn small_bodies_in(dir: &Path) -> Option<PathBuf> {
+    if let Ok(p) = std::env::var(ENV_SMALL_BODIES) {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    first_present(dir, SMALL_BODY_NAMES)
 }
 
 fn first_present(dir: &Path, names: &[&str]) -> Option<PathBuf> {
@@ -263,6 +323,38 @@ mod tests {
         // outside), so it stands in for "a directory with neither file".
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert!(scan_dir(&repo.join("src")).is_none());
+    }
+
+    /// A directory with the pair but no small-body kernel still resolves, with
+    /// `small_bodies: None`. This is the whole optionality contract: `sb441` is
+    /// 646 MB and a fresh clone has none, so if its absence could ever fail a
+    /// resolution, every machine without it would lose the planets too.
+    #[test]
+    fn small_body_kernel_is_optional() {
+        // The env override outranks the directory by design, so it would mask
+        // both assertions below. Nothing to check here on a shell that sets it.
+        if std::env::var(ENV_SMALL_BODIES).is_ok() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "asteroid_kernels_optional_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        // Empty files are enough: the scan tests `is_file`, it does not parse.
+        std::fs::write(dir.join("de440s.bsp"), b"").expect("write bsp");
+        std::fs::write(dir.join("pck11.pca"), b"").expect("write pca");
+
+        let pair = scan_dir(&dir).expect("pair without a small-body kernel must resolve");
+        assert_eq!(pair.small_bodies, None, "invented a small-body kernel");
+
+        // …and it is found when present, so `None` above means absent, not blind.
+        std::fs::write(dir.join("sb441-n16.bsp"), b"").expect("write sb");
+        let pair = scan_dir(&dir).expect("still a pair");
+        assert_eq!(pair.small_bodies, Some(dir.join("sb441-n16.bsp")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The not-found text names every searched location — the message is the

@@ -23,7 +23,10 @@ use godot::prelude::*;
 
 use asteroid_core::scenario::{ImpactorConfig, ScenarioError};
 use asteroid_core::{Epoch, OrbitalElements};
-use mission_core::{display_comet, seed_orrery_body, BuiltScenario, MissionCore, OrreryBody};
+use mission_core::{
+    display_comet, mount_small_bodies, seed_orrery_body, BuiltScenario, MissionCore, OrreryBody,
+    SB441_BODIES,
+};
 
 /// Metres per astronomical unit — synthetic-body semi-major axes reach the SI
 /// core as AU from GDScript.
@@ -98,6 +101,84 @@ impl Mission {
     fn load_from(&mut self, bsp_path: GString, pca_path: GString) -> bool {
         let r = MissionCore::load_from(&bsp_path.to_string(), &pca_path.to_string());
         self.finish_load(r)
+    }
+
+    /// Arm the small-body kernel (`sb441-n16.bsp`) at an explicit path. Returns
+    /// `true`, or `false` + [`last_error`](Self::last_error) if the path is not a
+    /// file. Call it after `load_from` and **before** `begin_build_scenario` — the
+    /// mount happens on the build worker.
+    ///
+    /// Nothing is read here and nothing is slow here: this records a path. The
+    /// asteroids appear when the build lands, not when this returns.
+    #[func]
+    fn set_small_body_kernel(&mut self, path: GString) -> bool {
+        let Some(core) = self.core.as_mut() else {
+            self.error = "load() must succeed before set_small_body_kernel()".into();
+            return false;
+        };
+        match core.set_small_body_kernel(&path.to_string()) {
+            Ok(()) => {
+                self.error = GString::new();
+                true
+            }
+            Err(e) => {
+                self.error = GString::from(&e.to_string());
+                false
+            }
+        }
+    }
+
+    /// Whether the served almanac actually has the small-body kernel mounted.
+    ///
+    /// **Gate every asteroid draw on this.** False means every small-body lookup
+    /// fails, and a failed lookup that reaches the display is not a blank — it is a
+    /// body sitting exactly on the Sun. This project has shipped that bug three
+    /// times; the flag is cheaper than the fourth.
+    #[func]
+    fn small_bodies_mounted(&self) -> bool {
+        self.core
+            .as_ref()
+            .is_some_and(|c| c.small_bodies_mounted())
+    }
+
+    /// How many small bodies the mounted kernel offers — `0` when it is not
+    /// mounted, so a caller that ignores
+    /// [`small_bodies_mounted`](Self::small_bodies_mounted) still iterates nothing
+    /// rather than sixteen bodies that all resolve to the Sun.
+    #[func]
+    fn small_body_count(&self) -> i64 {
+        if self.small_bodies_mounted() {
+            SB441_BODIES.len() as i64
+        } else {
+            0
+        }
+    }
+
+    /// The NAIF id of small body `i`, or `0` if out of range / not mounted. Feed it
+    /// straight to [`body_position_ecl_au`](Self::body_position_ecl_au) — asteroids
+    /// travel the same ephemeris read path as the planets, which is the whole point
+    /// of mounting a kernel instead of integrating elements.
+    #[func]
+    fn small_body_id(&self, i: i64) -> i64 {
+        if !self.small_bodies_mounted() {
+            return 0;
+        }
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| SB441_BODIES.get(i))
+            .map_or(0, |(id, _)| *id as i64)
+    }
+
+    /// The name of small body `i`, or `""` if out of range / not mounted.
+    #[func]
+    fn small_body_name(&self, i: i64) -> GString {
+        if !self.small_bodies_mounted() {
+            return GString::new();
+        }
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| SB441_BODIES.get(i))
+            .map_or_else(GString::new, |(_, n)| GString::from(*n))
     }
 
     /// The kernel's usable coverage window as `[lo, hi]` seconds past J2000 — an
@@ -183,14 +264,37 @@ impl Mission {
             self.error = "load() must succeed before begin_build_scenario()".into();
             return false;
         };
-        let eph = core.ephemeris_arc();
+        let served = core.ephemeris_arc();
+        let (bsp, pca, small_bodies) = core.kernel_paths();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
+            // Mount the small-body kernel if one was armed — ~5.7 s cold on 646 MB,
+            // which is why it happens here and not on the load path. The result is a
+            // *second* almanac: `with_constants` consumes `self`, and the one that
+            // came out of `ephemeris_arc` is being read by the renderer every frame.
+            //
+            // A mount failure is not fatal. The mission is a complete, correct
+            // mission without asteroids; taking the whole build down over the
+            // scenery would trade a missing catalog for a missing threat.
+            let (eph, mounted) = match small_bodies.as_deref() {
+                Some(sb) => match mount_small_bodies(&bsp, &pca, sb) {
+                    Ok(e) => (Arc::new(e), true),
+                    Err(e) => {
+                        godot_warn!("small-body kernel not mounted, catalog will be empty: {e}");
+                        (Arc::clone(&served), false)
+                    }
+                },
+                None => (Arc::clone(&served), false),
+            };
             // The error is flattened to a String on this side of the channel: only
             // the message ever reaches the HUD, and a plain String is unambiguously
             // safe to send.
-            let result = BuiltScenario::build(Arc::clone(&eph), &ImpactorConfig::default())
-                .map_err(|e| e.to_string())
+            let result = BuiltScenario::build(
+                Arc::clone(&eph),
+                &ImpactorConfig::default(),
+                mounted,
+            )
+            .map_err(|e| e.to_string())
                 .and_then(|built| {
                     // The orrery's scenery flies here, on this thread, in the field
                     // that was just built — ~4 s of integration that would otherwise

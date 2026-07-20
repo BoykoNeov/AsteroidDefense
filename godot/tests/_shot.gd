@@ -45,6 +45,25 @@ func _run() -> void:
 		await get_tree().process_frame
 	print("SHOT  mission_online=%s after %d ms" % [Sim.mission_online, Time.get_ticks_msec() - t0])
 
+	# 0a. THE SIXTEEN REAL ASTEROIDS (3D). The mount happens on the build worker, so
+	#     this can only be checked after mission_online — and it must be checked in a
+	#     picture, because "the nodes exist" and "the nodes are somewhere real" are
+	#     different claims and only the second one matters. The specific failure being
+	#     looked for: a body at ZERO, which in this heliocentric view is the Sun.
+	print("SHOT  small_bodies armed=%s mounted=%s count=%d"
+		% [Sim.small_bodies_armed, Sim.mission.small_bodies_mounted(), Sim.asteroids.size()])
+	Sim.paused = true
+	Sim.jump(0.0)
+	await _settle(4)
+	await _shot("belt_1_real_asteroids")
+	for i in mini(Sim.asteroids.size(), 16):
+		var el: Dictionary = Sim.asteroids[i]
+		var p: Vector3 = Sim.pos_ecl(el, Sim.t)
+		print("SHOT  %-12s naif=%d r=%.3f AU node=%s"
+			% [el.name, el.naif_id, p.length(),
+				main.solar._asteroid_nodes[i].position])
+	Sim.paused = false
+
 	# 0. THE COMET (3D), in the 3D solar view — the shot pair the span gate exists
 	#    for. On its arc it must be a body out in the field; past the end of its
 	#    propagated orbit it must be GONE, and specifically not sitting on the Sun,

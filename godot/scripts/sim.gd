@@ -82,6 +82,14 @@ var mission = null
 var bodies_online := false
 var kernel_source := ""                # where the kernels were found (for the HUD)
 var kernel_error := ""                 # why they were not (for the HUD)
+## A small-body kernel was found and handed to the core. NOT the same as mounted:
+## the mount happens on the build worker, and `Mission.small_bodies_mounted()` is
+## the only flag an asteroid draw may gate on. This one is for the HUD, so a
+## machine without the 646 MB file can say so instead of showing nothing.
+var small_bodies_armed := false
+## The main-belt asteroids from sb441, as `"ephem"` bodies. Empty until a build
+## lands with the kernel mounted — see `_install_asteroids`.
+var asteroids: Array = []
 
 # Mission timeline (days from EPOCH0_TDB). The impact epoch is fixed by the
 # threat; launch/intercept epochs come from the operator's plan ([M]).
@@ -222,6 +230,16 @@ func _load_field() -> void:
 
 	kernel_source = k.source
 	bodies_online = true
+
+	# Arm the small-body kernel if this machine has one. Records a path only — the
+	# ~5.7 s mount happens on the build worker, so the load stays fast and the
+	# asteroids appear when the build lands. Absent (or unreadable) is fine: the
+	# mission is complete without them, so this warns rather than failing the load.
+	if not k.small_bodies.is_empty():
+		if mission.set_small_body_kernel(k.small_bodies):
+			small_bodies_armed = true
+		else:
+			push_warning("small-body kernel not armed: %s" % mission.last_error())
 
 	# Anchor the clock on the core's real campaign, read cheaply — the impact
 	# epoch is a config input, not something the expensive build solves for.
@@ -467,6 +485,7 @@ func moon_pos3d(t_days: float) -> Vector3:
 ## the core's integration in the core's validated field, and this layer only names
 ## an index and a colour.
 func _install_catalog() -> void:
+	_install_asteroids()
 	comet_el = {}
 	comet_online = false
 	for i in mission.catalog_count():
@@ -485,6 +504,32 @@ func _install_catalog() -> void:
 		}
 		comet_online = true
 		break
+
+
+## Adopt the main-belt asteroids the build worker's mount made reachable.
+##
+## These are `"ephem"` bodies, not `"catalog"` ones — the same read path as the
+## planets, because `sb441-n16.bsp` *contains* their trajectories. Nothing is
+## integrated for them and nothing here approximates them; the distinction is the
+## whole reason this is a kernel mount rather than sixteen more synthetic bodies.
+##
+## Gated on `small_bodies_mounted()`, which is the served core's answer, not on
+## `small_bodies_armed`, which only says a path was handed over. Between those two
+## states every lookup here fails — and a failed ephem lookup drawn anyway is a
+## body sitting on the Sun, the failure this project has shipped three times.
+func _install_asteroids() -> void:
+	asteroids.clear()
+	if not bodies_online or not mission.small_bodies_mounted():
+		return
+	for i in mission.small_body_count():
+		asteroids.append({
+			"name": mission.small_body_name(i),
+			"source": "ephem",
+			"naif_id": mission.small_body_id(i),
+			# Nominal only — display decisions (orbit-line sampling), never a
+			# position. Main belt to within what a 0.5 AU-wide ring needs.
+			"a": 2.7, "vis_r": 0.020, "kind": "asteroid",
+		})
 
 
 ## Whether a catalog body exists at a mission time — the per-body twin of

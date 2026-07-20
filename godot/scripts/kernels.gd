@@ -31,6 +31,14 @@ const BSP_NAMES: Array[String] = ["de440s.bsp", "de440.bsp", "de441.bsp"]
 ## Accepted planetary-constants (GM) filenames. pck11 is what the core tests pin.
 const PCA_NAMES: Array[String] = ["pck11.pca"]
 
+## Accepted small-body ephemeris filenames. sb441-n16.bsp holds the 16 main-belt
+## asteroids ASSIST perturbs against — Ceres through Interamnia.
+##
+## OPTIONAL, and it must stay that way: this file is ~646 MB, twenty times the DE
+## kernel, and a fresh clone will not have it. resolve() succeeds without it and
+## reports small_bodies == "". Everything that worked before it existed still works.
+const SMALL_BODY_NAMES: Array[String] = ["sb441-n16.bsp"]
+
 const CFG_PATH := "user://kernels.cfg"
 
 
@@ -54,7 +62,7 @@ static func resolve() -> Dictionary:
 			return _ok(pair[0], pair[1], dir)
 
 	return {
-		"ok": false, "bsp": "", "pca": "", "source": "",
+		"ok": false, "bsp": "", "pca": "", "source": "", "small_bodies": "",
 		"error": _not_found_message(),
 	}
 
@@ -144,7 +152,22 @@ static func _first_present(dir: String, names: Array[String]) -> String:
 
 
 static func _ok(bsp: String, pca: String, source: String) -> Dictionary:
-	return {"ok": true, "bsp": bsp, "pca": pca, "source": source, "error": ""}
+	return {
+		"ok": true, "bsp": bsp, "pca": pca, "source": source, "error": "",
+		# Looked for beside the DE kernel, wherever that turned out to be — the
+		# three kernels are shipped and stored together. "" means absent, which is
+		# a valid setup, not a failure.
+		"small_bodies": _small_bodies_beside(bsp),
+	}
+
+
+## The small-body kernel next to `bsp`, or "" if there is none. Honours
+## ASTEROID_SMALL_BODY_KERNEL first, matching the Rust resolver.
+static func _small_bodies_beside(bsp: String) -> String:
+	var env := OS.get_environment("ASTEROID_SMALL_BODY_KERNEL")
+	if not env.is_empty() and FileAccess.file_exists(env):
+		return env
+	return _first_present(bsp.get_base_dir(), SMALL_BODY_NAMES)
 
 
 ## The message the operator actually needs when nothing resolved: every place

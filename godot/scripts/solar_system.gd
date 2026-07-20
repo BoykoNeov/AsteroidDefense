@@ -14,6 +14,10 @@ var sun_node: Node3D
 var body_nodes := {}                  # name -> MeshInstance3D (wireframe)
 var moon_node: MeshInstance3D
 var _belt: MeshInstance3D
+## The sixteen real asteroids, index-aligned with `Sim.asteroids`. Kept as an Array
+## rather than a name dict because the pairing with that list is what the per-frame
+## lookup uses, and a name-keyed miss would be a silent no-draw.
+var _asteroid_nodes: Array[MeshInstance3D] = []
 var ast_nominal: MeshInstance3D
 var ast_deflected: MeshInstance3D
 var comet_node: MeshInstance3D
@@ -49,6 +53,7 @@ func _ready() -> void:
 ## The threat landed: build its nodes and start tracking plan changes.
 func _on_mission_ready() -> void:
 	_build_threat()
+	_build_asteroids()
 	if Sim.comet_online:
 		_build_comet()
 	if Sim.interceptor_online:
@@ -65,8 +70,14 @@ func _process(_delta: float) -> void:
 		for el in Sim.planets:
 			body_nodes[el.name].position = Sim.pos3d(el, t)
 		moon_node.position = Sim.moon_local(t)
+		# The sixteen real ones, in the same loop and by the same lookup as the
+		# planets — `Sim.asteroids` is empty unless the kernel actually mounted, so
+		# there is no unmounted state in which this draws anything.
+		for i in _asteroid_nodes.size():
+			_asteroid_nodes[i].position = Sim.pos3d(Sim.asteroids[i], t)
 	# Rigid rotation at the belt's mean motion (~2.7 AU, T ~ 4.4 yr) —
-	# Kepler shear across the annulus is invisible at display speeds.
+	# Kepler shear across the annulus is invisible at display speeds. This is the
+	# *scenery* belt, not the sixteen bodies above.
 	_belt.rotation.y = TAU * t / (4.4 * 365.25)
 
 	if not Sim.mission_online:
@@ -317,6 +328,27 @@ func _add_moon(earth_body: MeshInstance3D) -> void:
 ## Main asteroid belt: dim point scatter 2.1-3.3 AU with slight vertical
 ## dispersion. Reuses the starfield point shader; rotated rigidly in
 ## _process at the belt's mean orbital rate.
+## The sixteen real main-belt asteroids from sb441-n16.bsp, once mounted.
+##
+## Worth being precise about what changed, because they share the screen with
+## `_build_belt`'s 1600 dust points: that belt is **scenery** — a seeded RNG
+## annulus spun rigidly at a mean motion. These sixteen are positions read from a
+## JPL kernel every frame, the same call the planets make. Same view, two very
+## different epistemic statuses, so they are drawn as bodies (amber wire blobs
+## with tags) rather than as more dust.
+##
+## Empty until the build lands with the kernel mounted; `Sim.asteroids` is the gate
+## and it is empty when the mount did not happen.
+func _build_asteroids() -> void:
+	for el in Sim.asteroids:
+		var node := _wire_blob(el.vis_r, 3.0)
+		node.set_instance_shader_parameter("line_color", Color(1.0, 0.72, 0.25))
+		node.set_instance_shader_parameter("energy", 1.1)
+		node.name = "Asteroid_%s" % el.name
+		add_child(node)
+		_asteroid_nodes.append(node)
+
+
 func _build_belt() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 27021801

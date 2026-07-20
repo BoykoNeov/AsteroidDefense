@@ -43,6 +43,9 @@ use anise::constants::frames::{
 use anise::prelude::Frame;
 use nalgebra::Vector3;
 
+use anise::prelude::Epoch as AniseEpoch;
+use anise::time::TimeScale;
+
 use crate::ephemeris::{Ephemeris, EphemerisError, KM3_S2_TO_M3_S2};
 use crate::epoch::Epoch;
 use crate::forces::point_mass::{Perturber, PerturberEphemeris, PointMassGravity};
@@ -52,6 +55,68 @@ use crate::state::StateVector;
 /// SI conversion for **positions**: 1 km in metres. Separate from
 /// [`KM3_S2_TO_M3_S2`] (the GM factor, `1e9`) so the two can never be confused.
 pub const KM_TO_M: f64 = 1.0e3;
+
+/// One astronomical unit in **kilometres** — the DE440 header value
+/// (`AU = 0.149597870699999988D+09 km`), used only to convert the sb441 asteroid
+/// GMs out of the JPL-native au³/day² unit. The same figure `1.495_978_707e11` m
+/// the scenario/validation fixtures use, expressed in km.
+const AU_KM: f64 = 1.495_978_707e8;
+
+/// Seconds in a day, for the au³/**day²** → km³/**s²** conversion of the asteroid GMs.
+const DAY_S: f64 = 86_400.0;
+
+/// Convert a gravitational parameter from JPL's **au³/day²** (the unit the DE440
+/// header carries the asteroid `MA%04d` masses in) to **km³/s²** (the unit ANISE
+/// carries planetary GMs in, and the one the km→SI factor [`KM3_S2_TO_M3_S2`]
+/// consumes). Kept as a named constant so the single multiply is auditable, and
+/// so the unit conversion has one home a test can pin against pck11's independently
+/// determined km³/s² values (see [`sb441_perturber_field`]'s tests).
+const AU3_DAY2_TO_KM3_S2: f64 = (AU_KM * AU_KM * AU_KM) / (DAY_S * DAY_S);
+
+/// The 16 DE441 main-belt perturbers — the asteroid force field ASSIST integrates
+/// against (HANDOFF §5, Tier-2), each as `(NAIF id, name, GM in au³/day²)`.
+///
+/// **The masses are the load-bearing half, and their provenance is deliberate.**
+/// `sb441-n16.bsp` supplies only *positions*; ASSIST joins the masses from the
+/// DE440/441 planetary file's own constants (`MA%04d`, keyed by asteroid number),
+/// so the mass paired with each position is the very one JPL used when it
+/// *integrated* that position — using any other value would fly a perturber whose
+/// gravity disagrees with the trajectory it traces. These sixteen are transcribed
+/// **verbatim** from the DE440 header's GROUP 1041 (`MA0001 … MA0704`, D→e), and
+/// were re-read straight out of the local `linux_p1550p2650.440` binary's constant
+/// record to confirm the on-disk kernel carries these exact doubles — not recalled,
+/// not from documentation. The three best-determined (Ceres, Pallas, Vesta) match
+/// the independent pck11 SPICE constants to <1% (the unit-conversion guard, since a
+/// wrong au³/day² factor would miss by orders of magnitude); the rest are DE440's
+/// own free-fit solution and legitimately differ from later spacecraft/occultation
+/// determinations by tens of percent — which is the whole reason to use *this* set.
+///
+/// NAIF ids follow the numbered-asteroid convention `2000000 + number`, so 2000001
+/// is (1) Ceres. Ordered by number, matching [`crate::perturber_field`]'s field.
+///
+/// The literals carry the DE440 header's full precision — more digits than an `f64`
+/// resolves, the last rounding away — kept **verbatim** for provenance exactly as
+/// [`DE440_EMRAT`](crate::ephemeris::DE440_EMRAT) is; clippy confirms the truncation
+/// is bit-identical, so the stored values are unchanged either way.
+#[allow(clippy::excessive_precision)]
+pub const SB441_PERTURBER_GM_AU3_DAY2: [(i32, &str, f64); 16] = [
+    (2000001, "Ceres", 0.139645181230810698e-12),
+    (2000002, "Pallas", 0.304711463300432000e-13),
+    (2000003, "Juno", 0.428234396779950106e-14),
+    (2000004, "Vesta", 0.385480002252579039e-13),
+    (2000007, "Iris", 0.254160149734714977e-14),
+    (2000010, "Hygiea", 0.125425307616408099e-13),
+    (2000015, "Eunomia", 0.451077990514367950e-14),
+    (2000016, "Psyche", 0.354450028424889778e-14),
+    (2000031, "Euphrosyne", 0.240670122189375765e-14),
+    (2000052, "Europa", 0.598243152648698406e-14),
+    (2000065, "Cybele", 0.209171759551336823e-14),
+    (2000087, "Sylvia", 0.483456065461055208e-14),
+    (2000088, "Thisbe", 0.265294366103563534e-14),
+    (2000107, "Camilla", 0.321913920758785882e-14),
+    (2000511, "Davida", 0.868362534922865448e-14),
+    (2000704, "Interamnia", 0.631103434208788874e-14),
+];
 
 /// The Tier-1 MVP perturber set (HANDOFF §5): Sun + 8 planets + Moon, ten bodies.
 ///
@@ -198,6 +263,53 @@ pub fn tier1_perturber_field(
     Ok(PointMassGravity::new(perturbers))
 }
 
+/// Assemble the 16 sb441 asteroid perturbers as a point-mass field (HANDOFF §5,
+/// Tier-2) — the main-belt bodies that set the residual floor the Tier-1 field's
+/// capstone measured (`core/tests/capstone_neo_vs_horizons.rs`).
+///
+/// Each perturber pairs an [`EphemerisPerturber`] reading positions from `eph`
+/// (which **must have the `sb441-n16.bsp` small-body kernel chained on**) with the
+/// hardcoded DE440 GM from [`SB441_PERTURBER_GM_AU3_DAY2`], converted au³/day² →
+/// km³/s² → SI. Unlike [`tier1_perturber_field`] the GM is *not* pulled from ANISE:
+/// the shipped constants resolve only 6 of the 16 (and to a different, later mass
+/// solution — see the table doc), so a single self-consistent DE440 set is
+/// hardcoded instead.
+///
+/// **Fails loud if the small-body kernel is not mounted.** Positions for these NAIF
+/// ids resolve only when `sb441` is chained onto `eph`; a caller that enabled the
+/// asteroid perturbers but handed in a DE-only almanac would otherwise get a field
+/// that fails deep inside the first integration step with an opaque lookup error.
+/// This probes every body's position at a reference epoch up front and returns a
+/// clear [`EphemerisError::Translate`] naming the missing kernel — the
+/// "an incomplete field is a wrong field" doctrine [`tier1_perturber_field`] holds
+/// for GMs, applied here to positions, since `sb441` is the optional 646 MB kernel
+/// (see [`crate::kernels::KernelPair::small_bodies`]) whose absence is a real case.
+pub fn sb441_perturber_field(
+    eph: &Arc<Ephemeris>,
+) -> Result<PointMassGravity, EphemerisError> {
+    // A reference epoch well inside every relevant kernel's coverage (de440s
+    // 1849–2150, sb441 1550–2650) — J2000 — at which to prove the positions
+    // resolve before the field is ever handed to the integrator.
+    let probe = AniseEpoch::from_gregorian(2000, 1, 1, 0, 0, 0, 0, TimeScale::TDB);
+
+    let mut perturbers = Vec::with_capacity(SB441_PERTURBER_GM_AU3_DAY2.len());
+    for &(id, name, gm_au3_day2) in &SB441_PERTURBER_GM_AU3_DAY2 {
+        let frame = anise::prelude::Frame::from_ephem_j2000(id);
+        // Liveness probe: a failure here means sb441 is not mounted (or lacks this
+        // body), so say exactly that rather than letting the integrator fail later.
+        eph.position_km(frame, SSB_J2000, probe).map_err(|e| {
+            EphemerisError::Translate(format!(
+                "asteroid perturber {name} ({id}) has no position — is the sb441-n16 \
+                 small-body kernel mounted on this ephemeris? (underlying: {e})"
+            ))
+        })?;
+        let mu = gm_au3_day2 * AU3_DAY2_TO_KM3_S2 * KM3_S2_TO_M3_S2;
+        let source = EphemerisPerturber::new(Arc::clone(eph), frame);
+        perturbers.push(Perturber::new(mu, source));
+    }
+    Ok(PointMassGravity::new(perturbers))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +417,149 @@ mod tests {
             a.x < 0.0 && a.x.abs() > a.y.abs().max(a.z.abs()),
             "acceleration at +x 1 AU should point predominantly sunward (−x): {a:?}"
         );
+    }
+
+    /// The sb441 asteroid GM table is well-formed **without any kernel**: sixteen
+    /// bodies, NAIF ids strictly ascending and on the `2000000 + number`
+    /// convention, every GM finite and positive, Ceres the heaviest by a wide
+    /// margin, and the au³/day² → km³/s² conversion landing each mass in a sane
+    /// main-belt band (Ceres ~63, the smallest ~0.1). This is the transcription /
+    /// unit guard that needs no kernel: a stray digit or a wrong conversion factor
+    /// throws a body out of the band.
+    #[test]
+    fn sb441_gm_table_is_well_formed() {
+        assert_eq!(SB441_PERTURBER_GM_AU3_DAY2.len(), 16);
+
+        let mut prev_id = 0;
+        let mut ceres_km3_s2 = 0.0;
+        for &(id, name, gm) in &SB441_PERTURBER_GM_AU3_DAY2 {
+            assert!(id > prev_id, "ids must be strictly ascending: {name} ({id})");
+            assert!(
+                (2_000_001..=2_999_999).contains(&id),
+                "{name} id {id} is not on the 2000000+number convention"
+            );
+            prev_id = id;
+
+            assert!(gm > 0.0 && gm.is_finite(), "GM for {name} = {gm} au³/day²");
+            let km3_s2 = gm * AU3_DAY2_TO_KM3_S2;
+            assert!(
+                (0.01..=100.0).contains(&km3_s2),
+                "{name} GM {km3_s2:.3} km³/s² is outside the main-belt band — \
+                 transcription or unit error?"
+            );
+            if id == 2000001 {
+                ceres_km3_s2 = km3_s2;
+            }
+        }
+
+        // Ceres is the most massive belt asteroid; its GM must dominate.
+        assert!(
+            (60.0..=65.0).contains(&ceres_km3_s2),
+            "Ceres GM {ceres_km3_s2:.3} km³/s² is not the expected ~62.6"
+        );
+        for &(id, name, gm) in &SB441_PERTURBER_GM_AU3_DAY2 {
+            if id != 2000001 {
+                assert!(
+                    gm * AU3_DAY2_TO_KM3_S2 < ceres_km3_s2,
+                    "{name} GM exceeds Ceres'"
+                );
+            }
+        }
+    }
+
+    /// Kernel-gated end-to-end: with the sb441 small-body kernel mounted, the
+    /// asteroid field builds all sixteen perturbers, and the hardcoded DE440 GMs
+    /// for the three **best-determined** bodies (Ceres, Pallas, Vesta) agree with
+    /// the independently-sourced pck11 SPICE constants to <1%.
+    ///
+    /// The three-body check is the real unit-conversion guard: a wrong au³/day²
+    /// factor would miss pck11 by orders of magnitude, and Vesta in particular
+    /// matches to ~4 significant figures. The other thirteen sb441 GMs are DE440's
+    /// own free-fit solution and *legitimately* differ from pck11's later
+    /// spacecraft/occultation determinations by tens of percent (pck11 resolves
+    /// only 6 of the 16 at all) — which is exactly why the table hardcodes the
+    /// self-consistent DE440 set rather than resolving GMs through ANISE. Asserting
+    /// the loosely-determined bodies against pck11 would encode a disagreement that
+    /// is not this code's to reconcile, so the guard deliberately checks only the
+    /// three that share a determination.
+    ///
+    /// Skips (passes) when no sb441 kernel resolves; `ASTEROID_REQUIRE_KERNELS`
+    /// turns that skip into a failure.
+    #[test]
+    fn sb441_field_builds_and_well_determined_gms_match_pck11() {
+        let Some(k) = crate::kernels::resolve_for_test("the sb441 perturber field build") else {
+            return;
+        };
+        let Some(sb) = k.small_bodies.clone() else {
+            // The DE pair resolved but no sb441 alongside it — a real, allowed
+            // configuration (sb441 is the optional 646 MB kernel), so there is
+            // nothing to build here. REQUIRE_KERNELS gates the DE pair, not sb441.
+            return;
+        };
+        let (bsp, pca) = k.as_strs();
+        let eph = Arc::new(
+            Ephemeris::load(bsp)
+                .expect("load DE kernel")
+                .with_constants(pca)
+                .expect("load constants")
+                .with_constants(&sb)
+                .expect("mount sb441"),
+        );
+
+        let field = sb441_perturber_field(&eph).expect("build sb441 field");
+        assert_eq!(field.len(), 16, "all sixteen asteroids enrolled");
+
+        // pck11 resolves these three to the SAME determination the DE440 fit
+        // adopted, so the hardcoded GM must match ANISE's to <1%.
+        for &(id, name) in &[(2000001, "Ceres"), (2000002, "Pallas"), (2000004, "Vesta")] {
+            let frame = anise::prelude::Frame::from_ephem_j2000(id);
+            let pck_km3_s2 = eph
+                .gm_km3_s2(frame)
+                .unwrap_or_else(|e| panic!("pck11 GM for {name} did not resolve: {e}"));
+            let hardcoded_au3_day2 = SB441_PERTURBER_GM_AU3_DAY2
+                .iter()
+                .find(|(fid, _, _)| *fid == id)
+                .map(|(_, _, gm)| *gm)
+                .expect("body in table");
+            let hardcoded_km3_s2 = hardcoded_au3_day2 * AU3_DAY2_TO_KM3_S2;
+            let rel = (hardcoded_km3_s2 - pck_km3_s2).abs() / pck_km3_s2;
+            assert!(
+                rel < 0.01,
+                "{name}: hardcoded DE440 GM {hardcoded_km3_s2:.4} km³/s² vs pck11 \
+                 {pck_km3_s2:.4} km³/s² differ by {:.2}% (unit or transcription error?)",
+                rel * 100.0
+            );
+        }
+    }
+
+    /// The asteroid field **fails loud** when the sb441 kernel is not mounted:
+    /// positions for the `2000000+` NAIF ids do not resolve against a DE-only
+    /// almanac, so building the field must return a clear error naming the missing
+    /// small-body kernel — never a field that silently omits perturbers or defers
+    /// the failure to an opaque mid-integration lookup error. Kernel-gated on the
+    /// DE pair only (no sb441 needed — the point is its *absence*).
+    #[test]
+    fn sb441_field_without_the_small_body_kernel_fails_loud() {
+        let Some(k) = crate::kernels::resolve_for_test("the sb441 fail-loud check") else {
+            return;
+        };
+        let (bsp, pca) = k.as_strs();
+        // DE + constants only — deliberately no `.with_constants(sb441)`.
+        let eph = Arc::new(
+            Ephemeris::load(bsp)
+                .expect("load DE kernel")
+                .with_constants(pca)
+                .expect("load constants"),
+        );
+        match sb441_perturber_field(&eph) {
+            Err(EphemerisError::Translate(msg)) => {
+                assert!(
+                    msg.contains("sb441"),
+                    "error should name the missing small-body kernel: {msg}"
+                );
+            }
+            Err(other) => panic!("expected a Translate error naming sb441, got {other}"),
+            Ok(_) => panic!("built an asteroid field with no small-body kernel mounted"),
+        }
     }
 }

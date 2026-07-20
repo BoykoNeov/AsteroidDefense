@@ -44,7 +44,7 @@ use crate::forces::relativity::Relativity1PN;
 use crate::forces::yarkovsky::YarkovskyA2;
 use crate::forces::CompositeForce;
 use crate::geometry::BPlaneEncounter;
-use crate::perturber_field::{tier1_perturber_field, EphemerisPerturber};
+use crate::perturber_field::{sb441_perturber_field, tier1_perturber_field, EphemerisPerturber};
 use crate::{
     geometry, Clock, DeflectionError, DeflectionScenario, Dop853, DvSolveTol, Epoch, Integrator,
     ScanOptions, StateVector,
@@ -96,6 +96,17 @@ pub struct Tier2Config {
     /// manufacture a visible shift — that is the display-grade lie this project
     /// keeps catching.
     pub yarkovsky_a2: Option<f64>,
+    /// Enable the 16 sb441 main-belt asteroids as point-mass force perturbers
+    /// ([`sb441_perturber_field`](crate::perturber_field::sb441_perturber_field)) —
+    /// the belt bodies ASSIST integrates against, the residual floor the Tier-1
+    /// capstone measured (HANDOFF §5). Requires the `sb441-n16.bsp` small-body
+    /// kernel to be mounted on the scenario's ephemeris: [`RealFieldScenario::build`]
+    /// mounts it when this is set, and [`build_with`](RealFieldScenario::build_with)
+    /// requires the caller to have chained it on — either way [`compose_force`]
+    /// fails loud if it is missing rather than silently dropping the perturbers.
+    /// Over the default ~12 yr campaign the sixteen shift the predicted b-plane
+    /// perigee by a small, measured amount (reported, never asserted to a magnitude).
+    pub asteroid_perturbers: bool,
 }
 
 /// The knobs that define a designer impactor and the campaign around it.
@@ -201,6 +212,11 @@ fn compose_force(
     if let Some(a2) = tier2.yarkovsky_a2 {
         let sun = EphemerisPerturber::new(Arc::clone(eph), SUN_J2000);
         force = force.with(Box::new(YarkovskyA2::standard(a2, sun)));
+    }
+    if tier2.asteroid_perturbers {
+        // Fails loud if `eph` lacks the sb441 kernel — `build` mounts it when the
+        // flag is set, and a `build_with` caller must have chained it on.
+        force = force.with(Box::new(sb441_perturber_field(eph)?));
     }
     Ok(force)
 }
@@ -402,10 +418,26 @@ impl RealFieldScenario {
         let k = crate::kernels::resolve()
             .ok_or_else(|| ScenarioError::KernelsNotFound(crate::kernels::not_found_message()))?;
 
-        let eph = Ephemeris::load(&k.bsp)
+        let mut eph = Ephemeris::load(&k.bsp)
             .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?
             .with_constants(&k.pca)
             .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
+        // The asteroid perturbers read positions from the sb441 small-body kernel;
+        // chain it on here so `compose_force` finds it. Fail loud if the flag is set
+        // but the (optional, 646 MB) kernel was not resolved alongside the DE pair —
+        // an enabled-but-absent field is a wrong field, not a silently smaller one.
+        if cfg.tier2.asteroid_perturbers {
+            let sb = k.small_bodies.as_ref().ok_or_else(|| {
+                ScenarioError::Ephemeris(
+                    "asteroid perturbers enabled but no sb441-n16 small-body kernel was \
+                     found next to the DE kernel"
+                        .into(),
+                )
+            })?;
+            eph = eph
+                .with_constants(sb)
+                .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
+        }
         Self::build_with(cfg, Arc::new(eph))
     }
 
@@ -1357,6 +1389,7 @@ mod tests {
             .nominal_encounter_with(&Tier2Config {
                 relativity: true,
                 yarkovsky_a2: None,
+                ..Tier2Config::default()
             })
             .expect("GR re-fly")
             .expect("GR pass is still an encounter");
@@ -1387,6 +1420,7 @@ mod tests {
             .nominal_encounter_with(&Tier2Config {
                 relativity: false,
                 yarkovsky_a2: Some(1.0e-13),
+                ..Tier2Config::default()
             })
             .expect("Yarkovsky re-fly")
             .expect("Yarkovsky pass is still an encounter");
@@ -1399,6 +1433,85 @@ mod tests {
             yar_shift > 0.0 && yar_shift.is_finite(),
             "a physical Yarkovsky A2 should move the perigee by a nonzero finite amount, got {:.3e} m",
             yar_shift
+        );
+    }
+
+    /// The 16 sb441 asteroid perturbers, wired the same way GR and Yarkovsky are:
+    /// enrolling them leaves the b-plane **unchanged when off** (the shipping demo
+    /// invariant) and **shifts it by a measured amount when on**.
+    ///
+    /// Measured GR-style, on a **fixed Tier-1 seed**: the scenario is built all-off
+    /// (so its seed is the shipping Tier-1 impactor) but on an ephemeris that *has*
+    /// the sb441 kernel mounted, so `nominal_encounter_with` can re-compose the
+    /// field with the asteroids added. Re-flying that one seed with the perturbers
+    /// on is the direct measurement of how much the belt moves the predicted impact
+    /// — reported, never asserted to a hand-derived magnitude (the shift is small;
+    /// the belt is the residual *floor*, not a headline term).
+    ///
+    /// Kernel-gated **and** sb441-gated: skips (passes) if the DE pair or the
+    /// optional small-body kernel is absent.
+    #[test]
+    fn asteroid_perturbers_leave_the_bplane_unchanged_off_and_shift_it_on() {
+        let Some(k) = crate::kernels::resolve_for_test("asteroid_perturbers_…_shift_it_on") else {
+            return;
+        };
+        let Some(sb) = k.small_bodies.clone() else {
+            return; // sb441 is the optional 646 MB kernel; nothing to measure without it.
+        };
+        let (bsp, pca) = k.as_strs();
+        // A Tier-1 seed (default config, asteroids off) but on an sb441-mounted
+        // almanac, so the measurement path can add the perturbers to the same seed.
+        let eph = Arc::new(
+            Ephemeris::load(bsp)
+                .expect("load DE kernel")
+                .with_constants(pca)
+                .expect("load constants")
+                .with_constants(&sb)
+                .expect("mount sb441"),
+        );
+        let sc = RealFieldScenario::build_with(&ImpactorConfig::default(), eph)
+            .expect("Tier-1 scenario builds on an sb441-mounted almanac");
+
+        // The shipping Tier-1 baseline: the nominal hit the built (all-off) scenario
+        // reports, on an almanac that merely *has* sb441 available.
+        let baseline = sc
+            .deflection()
+            .expect("deflection")
+            .nominal_encounter()
+            .expect("nominal reduces")
+            .expect("nominal is a hit");
+
+        // (a) Off re-fly == that baseline, to the last bit — the belt is not silently
+        //     already in the field just because the kernel is mounted.
+        let off = sc
+            .nominal_encounter_with(&Tier2Config::default())
+            .expect("off re-fly")
+            .expect("off pass is still an encounter");
+        assert_eq!(
+            off.perigee, baseline.perigee,
+            "asteroids-off re-fly must match the shipping Tier-1 perigee bit-for-bit"
+        );
+
+        // (b) Asteroids on shifts the perigee by a nonzero finite, measured amount.
+        let ast = sc
+            .nominal_encounter_with(&Tier2Config {
+                asteroid_perturbers: true,
+                ..Tier2Config::default()
+            })
+            .expect("asteroid re-fly")
+            .expect("asteroid pass is still an encounter");
+        let shift = (ast.perigee - baseline.perigee).abs();
+        println!(
+            "16 sb441 asteroid perturbers: perigee shift over the campaign {:.3} km \
+             (baseline {:.1} km → +belt {:.1} km, capture {:.1} km)",
+            shift / 1e3,
+            baseline.perigee / 1e3,
+            ast.perigee / 1e3,
+            ast.capture_radius / 1e3,
+        );
+        assert!(
+            shift > 0.0 && shift.is_finite(),
+            "the belt should move the perigee by a nonzero finite amount, got {shift:.3e} m"
         );
     }
 }

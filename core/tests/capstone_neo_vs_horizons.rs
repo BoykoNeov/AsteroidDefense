@@ -14,13 +14,19 @@
 //! # It is a residual *curve*, not a "match"
 //!
 //! Nothing here claims we reproduce Horizons. JPL's solution carries physics we
-//! do not — every planet's relativity (we model the Sun's 1PN only), the main
-//! belt (the sixteen sb441 bodies are scenery here, **not** enrolled as forces),
-//! and a radial non-grav term `A1` we do not model at all. So there is a residual
-//! **floor** set by what our field omits, and the residual against JPL is a
-//! function of arc length. The result is the *shape* of that curve as terms
-//! switch on, and the honest reading of where each term rises above the floor —
-//! never an amplified "it matches."
+//! do not — every planet's relativity (we model the Sun's 1PN only) and a radial
+//! non-grav term `A1` we do not model at all. So there is a residual **floor** set
+//! by what our field omits, and the residual against JPL is a function of arc
+//! length. The result is the *shape* of that curve as terms switch on, and the
+//! honest reading of where each term rises above the floor — never an amplified
+//! "it matches."
+//!
+//! The sixteen sb441 main-belt bodies *are* enrolled here when the small-body
+//! kernel is present — as an optional fourth column (`+belt`), the "next menu item"
+//! this test used to defer. Measured, they perturb the trajectory by a real sub-km
+//! amount but do **not** clear the floor (see the table below): the belt is a floor
+//! *contributor*, not the dominant omission, which the radial `A1` and the planets'
+//! relativity remain.
 //!
 //! # The discriminator is a control run
 //!
@@ -55,12 +61,14 @@
 //! # What it measures (de440s, 8-year arc, this machine)
 //!
 //! ```text
-//! yr   Tier-1(km)   +GR(km)   +GR+Yk(km)   GR factor   Yk helps by
-//!  1       22.8        1.5         2.2         15x         −0.7   (Yk below floor)
-//!  3      100.0        0.6         7.8        175x         −7.3
-//!  5      297.2       12.9        17.2         23x         −4.2
-//!  8      176.8       37.8        18.6          5x        +19.2   (Yk clears floor)
+//! yr   Tier-1(km)   +GR(km)   +GR+Yk(km)   +belt(km)   GR factor   Yk helps by   belt helps by
+//!  1       22.8        1.5         2.2         2.2         15x         −0.7          +0.1  (belt sub-km)
+//!  3      100.0        0.6         7.8         7.5        175x         −7.3          +0.4
+//!  5      297.2       12.9        17.2        16.7         23x         −4.2          +0.4
+//!  8      176.8       37.8        18.6        18.7          5x        +19.2          −0.0  (belt in the floor)
 //! ```
+//! (`+belt` present only when the sb441 kernel is mounted; else the first five
+//! columns run and it is skipped.)
 //!
 //! 1PN relativity is the headline: it cuts the residual against JPL by 5×–175× at
 //! every epoch — the term is not merely self-consistent, it pulls a real NEO's
@@ -68,9 +76,16 @@
 //! Yarkovsky is a **secular** signal: below the model's floor for the first few
 //! years (where it adds noise, not skill), it clears the floor as its along-track
 //! drift grows, halving the residual by the end of the arc. That it only emerges
-//! over a multi-year baseline is itself the measured result — and the thing that
-//! motivates the next menu item, enrolling the sixteen perturbers to lower the
-//! floor.
+//! over a multi-year baseline is itself the measured result.
+//!
+//! The sixteen sb441 belt perturbers — once the "next menu item," now enrolled as
+//! the `+belt` column — are a **sub-km** term: they nudge the residual by a real,
+//! nonzero amount at every epoch (a few hundred metres) but never clear the floor,
+//! sitting inside its km-scale noise by the arc end. That is the honest result the
+//! b-plane wiring predicted, and it says the residual floor is dominated by the
+//! omissions we *cannot* cheaply add — the planets' relativity and JPL's radial
+//! `A1` — not by the belt. The test asserts only that the belt *acts*, never that
+//! it helps.
 //!
 //! The endpoint reduction is *correlational* — it is the term's drift outgrowing
 //! the floor, not a proof of its sign in isolation (which the `⟨da/dt⟩` oracle
@@ -85,7 +100,8 @@ use asteroid_core::ephemeris::Ephemeris;
 use asteroid_core::forces::relativity::Relativity1PN;
 use asteroid_core::forces::yarkovsky::YarkovskyA2;
 use asteroid_core::{
-    tier1_perturber_field, Clock, CompositeForce, Dop853, EphemerisPerturber, Epoch, StateVector,
+    sb441_perturber_field, tier1_perturber_field, Clock, CompositeForce, Dop853, EphemerisPerturber,
+    Epoch, StateVector,
 };
 
 /// One AU in metres.
@@ -113,9 +129,22 @@ fn apophis_own_integration_converges_to_horizons_as_tier2_terms_switch_on() {
         return;
     };
     let (bsp, pca) = k.as_strs();
-    let eph = Ephemeris::load(bsp)
+    let mut eph = Ephemeris::load(bsp)
         .and_then(|e| e.with_constants(pca))
         .expect("load DE pair");
+    // Chain the sb441 small-body kernel on when it is present, so the +belt field
+    // below can read the sixteen asteroid positions. It is the optional 646 MB
+    // kernel: absent on a fresh clone, in which case the +belt column is skipped and
+    // the three-field capstone runs unchanged. Mounting it does not touch the Sun /
+    // planet / Moon positions the other three fields read.
+    let has_asteroids = if let Some(sb) = k.small_bodies.as_ref() {
+        eph = eph
+            .with_constants(sb)
+            .expect("mount sb441 small-body kernel");
+        true
+    } else {
+        false
+    };
     let eph = Arc::new(eph);
     let mu_sun = eph.gm_km3_s2(SUN_J2000).expect("sun gm") * 1e9;
 
@@ -165,6 +194,15 @@ fn apophis_own_integration_converges_to_horizons_as_tier2_terms_switch_on() {
     let field_yk = tier1()
         .with(Box::new(Relativity1PN::new(mu_sun, sun_term())))
         .with(Box::new(YarkovskyA2::standard(APOPHIS_A2_SI, sun_term())));
+    // The floor-lowering candidate: +GR +Yk **+ the 16 sb441 belt bodies** as force
+    // perturbers — the "scenery, not enrolled" line in the module doc, now enrolled.
+    // Only when sb441 is mounted; otherwise this column is skipped.
+    let field_ast = has_asteroids.then(|| {
+        tier1()
+            .with(Box::new(Relativity1PN::new(mu_sun, sun_term())))
+            .with(Box::new(YarkovskyA2::standard(APOPHIS_A2_SI, sun_term())))
+            .with(Box::new(sb441_perturber_field(&eph).expect("build sb441 field")))
+    });
 
     // Tight integrator so integration error (~0.1 m over the arc) stays far below
     // the km-scale physics residual we are measuring. Same stepper for all three:
@@ -176,12 +214,18 @@ fn apophis_own_integration_converges_to_horizons_as_tier2_terms_switch_on() {
         Clock::propagate(&dop, f, epoch0, seed, cadence, n).expect("integration")
     };
     let (c_t1, c_gr, c_yk) = (fly(&field_t1), fly(&field_gr), fly(&field_yk));
+    let c_ast = field_ast.as_ref().map(fly);
 
     // Residual against JPL's raw held-out states at each checkpoint.
     let mut r_t1 = Vec::new();
     let mut r_gr = Vec::new();
     let mut r_yk = Vec::new();
-    eprintln!("yr   Tier-1(km)   +GR(km)   +GR+Yk(km)   GR factor   Yk helps by");
+    let mut r_ast = Vec::new();
+    if has_asteroids {
+        eprintln!("yr   Tier-1(km)   +GR(km)   +GR+Yk(km)   +belt(km)   GR factor   Yk helps by   belt helps by");
+    } else {
+        eprintln!("yr   Tier-1(km)   +GR(km)   +GR+Yk(km)   GR factor   Yk helps by   (belt: sb441 absent)");
+    }
     for (y, &idx) in checks.iter().enumerate() {
         let epoch = Epoch::from_tdb_seconds_past_j2000(apophis.sample_epoch_tdb(idx));
         let sun = sun_ssb(&eph, epoch);
@@ -191,12 +235,24 @@ fn apophis_own_integration_converges_to_horizons_as_tier2_terms_switch_on() {
             ((ssb - sun.position) - truth).norm() / 1000.0
         };
         let (a, b, d) = (resid(&c_t1), resid(&c_gr), resid(&c_yk));
-        eprintln!(
-            "{:<4} {a:>9.3} {b:>9.3} {d:>11.3} {:>10.1}x {:>+12.3}",
-            y + 1,
-            a / b,
-            b - d,
-        );
+        if let Some(c) = c_ast.as_ref() {
+            let e = resid(c);
+            eprintln!(
+                "{:<4} {a:>9.3} {b:>9.3} {d:>11.3} {e:>10.3} {:>10.1}x {:>+12.3} {:>+13.3}",
+                y + 1,
+                a / b,
+                b - d,
+                d - e,
+            );
+            r_ast.push(e);
+        } else {
+            eprintln!(
+                "{:<4} {a:>9.3} {b:>9.3} {d:>11.3} {:>10.1}x {:>+12.3}",
+                y + 1,
+                a / b,
+                b - d,
+            );
+        }
         r_t1.push(a);
         r_gr.push(b);
         r_yk.push(d);
@@ -248,6 +304,41 @@ fn apophis_own_integration_converges_to_horizons_as_tier2_terms_switch_on() {
          {yk_end:.1} km vs GR-only {gr_end:.1} km — the real transverse non-grav should \
          reduce it once its secular signal has grown"
     );
+
+    // --- The 16 sb441 belt bodies: measured and reported, not asserted to help ---
+    // The b-plane wiring test already showed the belt is a sub-km term over a decade;
+    // the capstone residual floor here is tens of km (set mostly by JPL's unmodelled
+    // radial A1 and the planets' relativity we omit). So the honest expectation is
+    // that enrolling the belt *perturbs* the trajectory by a real, nonzero amount but
+    // need not clear that floor — exactly the shape Yarkovsky showed in its early
+    // years. Assert only that the perturbers act and stay bounded; the printed
+    // `belt helps by` column is the result, whichever sign it takes.
+    if has_asteroids {
+        for (y, &e) in r_ast.iter().enumerate() {
+            assert!(
+                e.is_finite() && e < 80.0,
+                "year {}: +belt residual {e:.2} km is non-finite or larger than measured — \
+                 the sb441 perturber field has regressed",
+                y + 1
+            );
+        }
+        let ast_end = *r_ast.last().unwrap();
+        let belt_change = (yk_end - ast_end).abs();
+        assert!(
+            belt_change > 0.0,
+            "enrolling the 16 belt bodies changed the arc-end residual by 0 km — the \
+             perturbers are not acting on the trajectory at all"
+        );
+        eprintln!(
+            "belt: arc-end residual {ast_end:.3} km vs GR+Yk {yk_end:.3} km — {} (Δ {:+.3} km)",
+            if ast_end < yk_end {
+                "below the floor, helps"
+            } else {
+                "within the unmodelled A1 floor, no net help"
+            },
+            yk_end - ast_end,
+        );
+    }
 }
 
 /// SSB-relative Sun state (m, m/s) — the single conversion axis shared by seeding

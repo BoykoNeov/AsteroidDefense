@@ -1495,6 +1495,32 @@ mod tests {
     /// position in a heliocentric view is not a glitch — `Vector3::ZERO` *is* the
     /// Sun. This project has shipped that confusion three times.
     ///
+    /// The display scenery list [`SB441_BODIES`] and the core's canonical
+    /// **force-perturber** table (`asteroid_core::SB441_PERTURBER_GM_AU3_DAY2`) are
+    /// two hand-written spellings of the same sixteen bodies — one for drawing, one
+    /// for gravity. They must never drift: a body the map labels that the force
+    /// field omits (or vice-versa) is exactly the kind of silent inconsistency this
+    /// project keeps paying for. This pins them together by `(id, name)`, kernel-free,
+    /// so an edit to either list that desyncs the two fails at `cargo test` rather
+    /// than shipping a scene whose scenery and physics disagree about the belt.
+    #[test]
+    fn scenery_and_force_perturber_lists_agree() {
+        let force = asteroid_core::SB441_PERTURBER_GM_AU3_DAY2;
+        assert_eq!(
+            SB441_BODIES.len(),
+            force.len(),
+            "the scenery and force-perturber lists have different lengths"
+        );
+        for (scenery, (fid, fname, _gm)) in SB441_BODIES.iter().zip(force.iter()) {
+            assert_eq!(
+                (scenery.0, scenery.1),
+                (*fid, *fname),
+                "scenery body {scenery:?} does not match force perturber ({fid}, {fname}) \
+                 — the two sb441 lists have drifted"
+            );
+        }
+    }
+
     /// The positive half also pins the ids: `SB441_BODIES` was read out of the
     /// kernel's segment table, and a wrong id would resolve to nothing (or, worse,
     /// to some other body) rather than announce itself.

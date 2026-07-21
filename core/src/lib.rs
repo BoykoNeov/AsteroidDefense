@@ -28,6 +28,7 @@ pub mod geometry;
 pub mod horizons;
 pub mod integrator;
 pub mod kernels;
+pub mod lambert;
 pub mod perturber_field;
 pub mod propagator;
 pub mod scenario;
@@ -53,6 +54,7 @@ pub use geometry::{
     BPlaneEncounter, GeometryError, EARTH_EQUATORIAL_RADIUS_M, EARTH_MEAN_RADIUS_M,
 };
 pub use integrator::{propagate_fixed, DenseSegment, Dop853, Integrator, IntegratorError, Rk4};
+pub use lambert::{lambert_universal, LambertError, LambertSolution};
 pub use perturber_field::{
     sb441_perturber_field, tier1_perturber_field, EphemerisPerturber,
     SB441_PERTURBER_GM_AU3_DAY2, TIER1_PERTURBER_FRAMES,

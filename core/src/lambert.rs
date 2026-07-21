@@ -140,10 +140,13 @@ const SIN_DNU_EPS: f64 = 1e-9;
 /// parameter `mu` (SI: metres, seconds, m³/s²).
 ///
 /// `prograde = true` selects the transfer whose angular momentum points along
-/// `+z` (the short way for `Δν < π`) — the right choice for the heliocentric
-/// ICRF frame, where Earth and the target orbit counter-clockwise viewed from
-/// ecliptic/equatorial north. `prograde = false` gives the retrograde/long-way
-/// branch. This first cut is single-revolution only.
+/// the **`+z` axis of the frame `r1`/`r2` are given in** (the short way for
+/// `Δν < π`). For heliocentric **ICRF** inputs that is celestial north, and
+/// Earth and near-ecliptic targets orbit prograde about it — so `true` is the
+/// right default here. (The distinction from the ecliptic pole is a ~23.4°
+/// tilt; it does not matter for the sign of `+z`·`ĥ` on near-ecliptic transfers,
+/// but the reference is ICRF, not the ecliptic.) `prograde = false` gives the
+/// retrograde / long-way branch. This first cut is single-revolution only.
 ///
 /// Returns the departure/arrival velocities, or a [`LambertError`] for a
 /// degenerate geometry (collinear endpoints), a non-converging solve (a geometry
@@ -158,14 +161,14 @@ pub fn lambert_universal(
     // Fail closed on non-finite / non-positive inputs (NaN fails every `>`).
     let r1n = r1.norm();
     let r2n = r2.norm();
-    if !(tof_seconds.is_finite() && tof_seconds > 0.0)
-        || !(mu.is_finite() && mu > 0.0)
-        || !(r1n > 0.0 && r2n > 0.0)
-    {
-        return Err(LambertError::InvalidInput {
-            tof_seconds,
-            mu,
-        });
+    let inputs_ok = tof_seconds.is_finite()
+        && tof_seconds > 0.0
+        && mu.is_finite()
+        && mu > 0.0
+        && r1n > 0.0
+        && r2n > 0.0;
+    if !inputs_ok {
+        return Err(LambertError::InvalidInput { tof_seconds, mu });
     }
 
     // Transfer angle Δν, resolved into [0, 2π) by the requested direction. The

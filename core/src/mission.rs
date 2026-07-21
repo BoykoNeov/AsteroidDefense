@@ -580,11 +580,12 @@ mod tests {
     }
 
     #[test]
-    fn no_transfer_when_arrival_precedes_launch() {
-        // A non-positive time of flight is a grid gap, surfaced as InvalidInput
-        // from Lambert and mapped to Ok(None) here would be wrong — transfer_metrics
-        // forwards the InvalidInput; the grid guards tof ≥ min_tof upstream. Assert
-        // the Lambert InvalidInput propagates so the grid's guard is load-bearing.
+    fn zero_time_of_flight_is_rejected_not_silently_gapped() {
+        // A non-positive time of flight is invalid input, not a Lambert "gap":
+        // transfer_metrics forwards Lambert's InvalidInput (it does *not* swallow
+        // it to Ok(None)). This is why the grid guards tof ≥ min_tof upstream —
+        // that guard, not this function, is what turns "arrival ≤ launch" into a
+        // NoTransfer cell.
         let earth = StateVector::new(Vector3::new(AU, 0.0, 0.0), Vector3::new(0.0, 29_780.0, 0.0));
         let ast = StateVector::new(Vector3::new(0.0, AU, 0.0), Vector3::new(-29_780.0, 0.0, 0.0));
         assert!(transfer_metrics(earth, ast, 0.0, MU_SUN, true).is_err());
@@ -628,62 +629,214 @@ mod tests {
 
     // --- Kernel-gated: the grid + on-demand verify over a real scenario ------
 
+    /// A helper: the deflected perigee for one cell at a given impactor mass,
+    /// folding a clean miss (`None`, left the scan gate) into `+∞` so the checks
+    /// can compare it as a scalar.
+    fn perigee_of(
+        ds: &DeflectionScenario,
+        arrival: Epoch,
+        metrics: &TransferMetrics,
+        beta: f64,
+        m_sc: f64,
+        m_ast: f64,
+    ) -> f64 {
+        match verify_cell(ds, arrival, metrics, beta, m_sc, m_ast).expect("verify runs") {
+            Some(bp) => bp.perigee,
+            None => f64::INFINITY,
+        }
+    }
+
+    // --- The mass solver, kernel-free (fast, deterministic) ------------------
+    //
+    // Mirrors deflection.rs's own kernel-free `required_dv` test: a
+    // zero-acceleration straight-line pass past a massless Earth, so the solver's
+    // bracket / bisect / cap logic is exercised against exact geometry with no
+    // ephemeris cost. This is the proper home for the algorithm — the real-field
+    // test below only needs to prove the *composition*, not re-derive convergence.
+
+    /// Earth GM (m³/s²), DE440-consistent — the literal the kernel-free
+    /// close_approach/geometry/deflection tests share.
+    const MU_EARTH: f64 = 3.986_004_356e14;
+    const R_EARTH: f64 = crate::geometry::EARTH_EQUATORIAL_RADIUS_M;
+
+    struct ZeroForce;
+    impl crate::forces::ForceModel for ZeroForce {
+        fn acceleration(
+            &self,
+            _epoch: Epoch,
+            _state: &StateVector,
+        ) -> Result<Vector3<f64>, crate::forces::ForceError> {
+            Ok(Vector3::zeros())
+        }
+    }
+
+    fn straight_line_scenario<'a>(
+        force: &'a ZeroForce,
+        earth: &'a (dyn crate::close_approach::GeocentricState + 'a),
+    ) -> DeflectionScenario<'a> {
+        use crate::close_approach::ScanOptions;
+        use crate::integrator::Dop853;
+        let x0 = 1.0e10; // start 0.067 AU back along −x
+        let b0 = 4.0e6; // 4000 km perpendicular offset → a conditioned nominal hit
+        let v = 20_000.0; // 20 km/s closing speed (> v_esc keeps the pass hyperbolic)
+        let seed = StateVector::from_components(-x0, b0, 0.0, v, 0.0, 0.0);
+        let scan = ScanOptions {
+            max_sample_dt: 1_800.0,
+            time_tol_seconds: 1.0e-3,
+            max_distance: Some(5.0e8),
+        };
+        DeflectionScenario::new(
+            Dop853::new(),
+            force,
+            earth,
+            Epoch::from_tdb_seconds_past_j2000(0.0),
+            seed,
+            1.0e4,
+            100,
+            scan,
+            MU_EARTH,
+            R_EARTH,
+        )
+        .expect("scenario builds")
+    }
+
     #[test]
-    fn porkchop_grid_and_verify_over_the_real_field() {
+    fn required_impactor_mass_converges_is_monotone_and_caps() {
+        let force = ZeroForce;
+        let earth = |_e: Epoch| Ok(StateVector::new(Vector3::zeros(), Vector3::zeros()));
+        let sc = straight_line_scenario(&force, &earth);
+        let e0 = Epoch::from_tdb_seconds_past_j2000(0.0);
+
+        // A cross-track arrival relative velocity: the coupled impulse pushes +y,
+        // raising the pass's perpendicular offset (perigee) monotonically with the
+        // delivered mass — the clean regime the solver assumes.
+        let metrics = TransferMetrics {
+            c3_km2_s2: 20.0,
+            arrival_v_rel_ms: 5000.0,
+            along_track_proj_ms: 0.0,
+            v_rel_vec: Vector3::new(0.0, 5000.0, 0.0),
+        };
+        let m_ast = 2.0e10;
+        let beta = 3.6;
+
+        let nominal = sc.nominal_encounter().unwrap().unwrap();
+        assert!(nominal.perigee < nominal.capture_radius, "nominal is a hit");
+
+        // Solve for a 15 000 km perigee (a clean miss), and confirm the returned
+        // mass ACTUALLY delivers it — the mis-bracket catch the advisor flagged.
+        let target = 1.5e7;
+        let m_star = match required_impactor_mass(
+            &sc, e0, &metrics, beta, m_ast, target, /*seed*/ 1.0e3, /*cap*/ 1.0e9,
+        )
+        .unwrap()
+        {
+            MassSolveOutcome::Feasible { impactor_mass_kg } => impactor_mass_kg,
+            other => panic!("expected Feasible, got {other:?}"),
+        };
+        let achieved = perigee_of(&sc, e0, &metrics, beta, m_star, m_ast);
+        assert!(
+            (achieved - target).abs() <= 5.0e-3 * target || achieved > target,
+            "solved mass {m_star} kg gives perigee {achieved}, target {target}"
+        );
+
+        // A larger required miss must cost more mass (coupling live + monotone).
+        let m_far = match required_impactor_mass(
+            &sc, e0, &metrics, beta, m_ast, 3.0e7, 1.0e3, 1.0e9,
+        )
+        .unwrap()
+        {
+            MassSolveOutcome::Feasible { impactor_mass_kg } => impactor_mass_kg,
+            other => panic!("expected Feasible, got {other:?}"),
+        };
+        assert!(m_far > m_star, "a bigger miss needs more mass ({m_far} vs {m_star})");
+
+        // The cap guard: a mass cap far below what's needed returns InfeasibleAtCap
+        // (the degenerate-direction case, and any under-powered window), never a
+        // runaway bisection.
+        let capped =
+            required_impactor_mass(&sc, e0, &metrics, beta, m_ast, target, 1.0, 100.0).unwrap();
+        assert!(
+            matches!(capped, MassSolveOutcome::InfeasibleAtCap { .. }),
+            "a 100 kg cap can't reach a 15 000 km miss; expected InfeasibleAtCap, got {capped:?}"
+        );
+    }
+
+    // --- The real-field composition, kernel-gated (cheap: ~2 propagations) ----
+
+    #[test]
+    fn coupled_deflection_flips_the_real_field_hit() {
+        // The discriminating real-field check (not a smoke test): the coupled
+        // pipeline must (1) reduce to the *nominal* hit at zero impactor mass —
+        // catches a wrong epoch / frame / un-applied impulse — and (2) turn that
+        // hit into a MISS once a real mass is delivered. Kept to two full-field
+        // propagations; the solver's convergence is covered kernel-free above.
         use crate::scenario::{ImpactorConfig, RealFieldScenario};
-        if crate::kernels::resolve_for_test("porkchop_grid_and_verify_over_the_real_field").is_none()
+        if crate::kernels::resolve_for_test("coupled_deflection_flips_the_real_field_hit").is_none()
         {
             return;
         }
         let sc = RealFieldScenario::build(&ImpactorConfig::default()).expect("scenario builds");
 
-        // A small launch/arrival grid inside the campaign: launch in the first
-        // portion, arrive with enough lead before impact.
         let t0 = sc.epoch0().tdb_seconds_past_j2000();
         let t_impact = sc.impact_epoch().tdb_seconds_past_j2000();
         let span = t_impact - t0;
         let day = 86_400.0;
 
-        let launch_epochs: Vec<Epoch> = (0..5)
+        let launch_epochs: Vec<Epoch> = (0..4)
             .map(|i| Epoch::from_tdb_seconds_past_j2000(t0 + 0.05 * span + (i as f64) * 30.0 * day))
             .collect();
-        let arrival_epochs: Vec<Epoch> = (0..5)
-            .map(|j| {
-                Epoch::from_tdb_seconds_past_j2000(t0 + 0.35 * span + (j as f64) * 40.0 * day)
-            })
+        let arrival_epochs: Vec<Epoch> = (0..4)
+            .map(|j| Epoch::from_tdb_seconds_past_j2000(t0 + 0.35 * span + (j as f64) * 40.0 * day))
             .collect();
 
         let pork = porkchop_grid(&sc, &launch_epochs, &arrival_epochs, 30.0 * day, true)
             .expect("grid builds");
 
-        // At least one real transfer, and every C3 finite and non-negative.
-        let mut feasible: Option<(usize, usize, TransferMetrics)> = None;
-        for (i, row) in pork.cells.iter().enumerate() {
+        // Pick the feasible cell with the strongest along-track coupling.
+        let mut best: Option<(usize, TransferMetrics)> = None;
+        for row in &pork.cells {
             for (j, cell) in row.iter().enumerate() {
                 if let PorkchopCell::Transfer(m) = cell {
                     assert!(m.c3_km2_s2.is_finite() && m.c3_km2_s2 >= 0.0);
-                    assert!(m.arrival_v_rel_ms.is_finite() && m.arrival_v_rel_ms >= 0.0);
-                    if feasible.is_none() {
-                        feasible = Some((i, j, *m));
+                    let better = best
+                        .map(|(_, b)| m.along_track_proj_ms.abs() > b.along_track_proj_ms.abs())
+                        .unwrap_or(true);
+                    if better {
+                        best = Some((j, *m));
                     }
                 }
             }
         }
-        let (_, j, metrics) = feasible.expect("grid should contain at least one transfer");
-
-        // Deliver a Falcon-Heavy-class impactor and verify the coupled full-field
-        // encounter runs and returns a finite perigee (or a clean miss).
-        let m_ast = 2.0e10; // ~sub-km rock
-        let delivery = cell_delivery(&metrics, &FALCON_HEAVY_EXPENDABLE, 3.6, m_ast);
-        let m_sc = delivery.payload_kg.max(1.0);
+        let (j, metrics) = best.expect("grid should contain at least one transfer");
+        let arrival = arrival_epochs[j];
 
         let ds = sc.deflection().expect("deflection scenario");
-        let outcome = verify_cell(&ds, arrival_epochs[j], &metrics, 3.6, m_sc, m_ast)
-            .expect("verify runs");
-        if let Some(bp) = outcome {
-            assert!(bp.perigee.is_finite() && bp.perigee >= 0.0);
-        }
-        // Either a finite perigee or a clean miss (None) is acceptable; the point
-        // is the on-demand full-field path composes end to end.
+        let m_ast = 2.0e10; // ~sub-km rock
+        let beta = 3.6;
+
+        let nominal = ds
+            .nominal_encounter()
+            .expect("nominal scan")
+            .expect("nominal is a close approach");
+        let capture = nominal.capture_radius;
+        assert!(nominal.perigee < capture, "nominal must be a hit");
+
+        // (1) Zero mass ⇒ zero impulse ⇒ the pipeline reproduces the nominal hit.
+        let p_zero = perigee_of(&ds, arrival, &metrics, beta, 0.0, m_ast);
+        assert!(
+            (p_zero - nominal.perigee).abs() / nominal.perigee < 1e-3,
+            "zero-mass perigee {p_zero} should reproduce nominal {}",
+            nominal.perigee
+        );
+
+        // (2) A delivered impactor mass sized for ~50 m/s (huge over years of
+        // lead) flips the hit into a clean miss through the coupled pipeline.
+        let m_big = 50.0 * m_ast / (beta * metrics.arrival_v_rel_ms);
+        let p_big = perigee_of(&ds, arrival, &metrics, beta, m_big, m_ast);
+        assert!(
+            p_big > capture,
+            "a delivered {m_big:.2e} kg impactor should turn the hit into a miss: \
+             perigee {p_big} vs capture {capture}"
+        );
     }
 }

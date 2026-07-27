@@ -3327,9 +3327,31 @@ mod tests {
              curve still needs {easiest:.4} m/s = {:.0}x that",
             easiest / intact_ceiling
         );
+        // Bounded on **both** sides. A lower bound alone would pass more
+        // emphatically the more wrong the coefficient was — a `C_m` error that
+        // inflated the gap a hundredfold would read as a stronger result instead of
+        // a failure. The band is wide because the claim is an order of magnitude,
+        // not a number.
+        let gap = easiest / intact_ceiling;
         assert!(
-            easiest > 10.0 * intact_ceiling,
-            "the gap to intact nuclear deflection should be large and stated, not marginal"
+            (10.0..=100.0).contains(&gap),
+            "the gap to intact nuclear deflection should be large, stated, and \
+             *bounded* — got {gap:.0}x, expected order 10–100x"
+        );
+
+        // And the lead carrying that headline must be pinned to the recorded
+        // curve, not merely printed. `required_dv_matches_curve_json` pins 0.5,
+        // 1.0 and 2.0 periods; the 8-period point is the cheapest Δv on the whole
+        // sweep and the one every "32x" claim in HANDOFF and the commit message
+        // rests on, so without this it would move with the force model and only the
+        // prose would notice. Straight from curve.json, same bar, no extra solve.
+        const CURVE_JSON_DV_AT_8_PERIODS: f64 = 0.066_218_75;
+        let rel = (easiest - CURVE_JSON_DV_AT_8_PERIODS).abs() / CURVE_JSON_DV_AT_8_PERIODS;
+        assert!(
+            rel < 0.02,
+            "the 8-period lead this test's headline rests on drifted from curve.json: \
+             live {easiest:.6} vs recorded {CURVE_JSON_DV_AT_8_PERIODS:.6} (rel {rel:.3}) \
+             — regenerate curve.json and restate the ratio"
         );
     }
 

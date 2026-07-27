@@ -15,7 +15,9 @@
 //! expensive-on-demand):
 //!
 //! - **The cheap grid** ([`porkchop_grid`]) is pure scalar math over precomputed
-//!   Earth and asteroid state arrays: per cell it solves one Lambert transfer and
+//!   Earth and asteroid state arrays: per cell it solves the Lambert transfer —
+//!   the direct arc, plus both branches of every lapping alternative up to
+//!   `max_revolutions`, keeping the cheapest ([`best_transfer_metrics`]) — and
 //!   records the departure `C3`, the arrival relative speed, and the
 //!   **along-track projection** of the impact — a first-order *effectiveness*
 //!   proxy computed for free from `v2` and the asteroid's velocity. It is
@@ -101,8 +103,14 @@ pub struct TransferMetrics {
 /// feasible transfer with its vehicle-independent metrics.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PorkchopCell {
-    /// No single-rev transfer for this (launch, arrival) pair: the arrival is at
-    /// or before launch, or the geometry is degenerate / non-converging.
+    /// No transfer at **any** allowed revolution count for this (launch, arrival)
+    /// pair: the arrival is at or before launch, the arrival epoch falls outside
+    /// the propagated span, or every `N ≤ max_revolutions` is degenerate,
+    /// non-converging, or too short to fit that many laps.
+    ///
+    /// Note this is a *stronger* condition than it once was: the cell is filled by
+    /// [`best_transfer_metrics`], so a blank cell means the direct arc **and** every
+    /// lapping alternative failed — not merely that the direct arc did.
     NoTransfer,
     /// A transfer exists; its launch-energy and impact metrics.
     Transfer(TransferMetrics),
@@ -325,9 +333,33 @@ fn helio(sun_ssb: StateVector, body_ssb: StateVector) -> StateVector {
 /// here restores those cheap transfers deliberately, with
 /// [`TransferMetrics::revolutions`] saying which one a cell actually is.
 ///
-/// Ties and gaps: each `N ≥ 1` contributes both of its branches; whichever feasible
-/// candidate has the lowest `C3` wins; `Ok(None)` only if *no* `N` yields a
-/// transfer.
+/// # The selection criterion is `C3` alone — and that is a real choice
+/// Each `N ≥ 1` contributes both of its branches; whichever feasible candidate has
+/// the lowest `C3` wins; `Ok(None)` only if *no* `N` yields a transfer.
+///
+/// **Ranking on `C3` ranks on deliverability, not on aim** — which sits in tension
+/// with this module's own thesis that *deliverable ≠ well-aimed*. Two transfers to
+/// the same (launch, arrival) pair can differ in `along_track_proj_ms` as well as
+/// in launch energy, so the cheapest one is not necessarily the one that deflects
+/// best, and a cell reports the along-track projection **of its cheapest option**.
+///
+/// `C3` is nonetheless the right primary key, because it is the *hard* constraint:
+/// a transfer above a launcher's energy limit delivers zero mass, and zero mass
+/// deflects nothing however beautifully it is aimed. Aim trades continuously;
+/// deliverability falls off a cliff. But the caveat is real, so a caller doing
+/// serious window selection should compare candidates itself via
+/// [`transfer_metrics_for_revolutions`] rather than treat this cell value as
+/// "the best transfer" in any richer sense.
+///
+/// # Cost
+/// Each `N ≥ 1` is a scan-and-bisect over its band, so this is far from free:
+/// measured at **0.6 µs/cell** at `max_revolutions = 0` against **44.7 µs/cell** at
+/// `1` and 87 µs at `2` (`core/examples/bench_porkchop_cell.rs`) — a ~70× step for
+/// the first lap. A 200×200 grid is 23 ms direct-only versus 1.8 s allowing one
+/// lap: fine for a grid built once on a worker, not something to rebuild per frame.
+/// A ~2× saving is available whenever it matters, by scanning each band once and
+/// solving both of its branches from that single scan instead of rescanning per
+/// branch.
 pub fn best_transfer_metrics(
     earth_helio: StateVector,
     asteroid_helio: StateVector,

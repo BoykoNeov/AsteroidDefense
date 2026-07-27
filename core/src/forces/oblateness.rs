@@ -60,15 +60,37 @@
 //! one is the reference radius `J2E` is defined against. Keeping them separate is
 //! the pairing rule above, not duplication.
 //!
-//! # Validity boundary, stated rather than hidden
-//! The `J2` expansion is a solution of Laplace's equation **outside** the body; it
-//! diverges from reality inside `R_eq`, where the real field tends toward a
-//! solid-body interior solution. This term evaluates the same formula everywhere,
-//! which matters only for the nominal *impact* case whose trajectory passes below
-//! the surface — where point-mass gravity is equally unphysical already. Nothing
-//! downstream reads the sub-surface arc (the b-plane geometry is fixed by the
-//! incoming hyperbola), so this is a documented modelling boundary, not a
-//! correction to apply.
+//! # Validity boundary — and it is NOT harmless here (measured)
+//! The `J2` expansion solves Laplace's equation **outside** the body and diverges
+//! from reality inside `R_eq`, where the true field tends toward a solid-body
+//! interior solution. This term evaluates the same formula everywhere, which only
+//! arises for a trajectory that passes below the surface — the shipping scenario's
+//! nominal *impact*, whose closest approach is 3000 km from Earth's centre, well
+//! inside `R_eq`.
+//!
+//! An earlier version of this note claimed that was harmless, on the reasoning that
+//! nothing downstream reads the sub-surface arc. **That was wrong, and measuring it
+//! is what showed it.** The b-plane reduction samples the encounter state *at*
+//! closest approach and infers the hyperbolic excess from the **point-mass** energy
+//! `v_∞² = v² − 2μ/r`. At `r = 3000 km` the `J2` correction to the potential is
+//! ~`J2·(R_eq/r)² ≈ 4.9e-3` of `μ/r`, and since `2μ/r` is a large fraction of `v²`
+//! there, that leverages into a ~1% shift in the inferred `v_∞` — which shows up
+//! as the **capture radius moving 11 311.3 → 11 389.0 km** with `J2` on, a 78 km
+//! (0.69%) change, against a perigee shift of only 1.33 km.
+//!
+//! The control that identifies the mechanism: 1PN relativity also perturbs the
+//! potential but leaves the capture radius at 11 311.3 km to the digit — its
+//! correction at that radius is ~1e-9 relative, against `J2`'s ~5e-3. So this is
+//! `J2`'s `1/r⁴` growth inside the body, not something generic about the b-plane
+//! reduction.
+//!
+//! **What that means for reading the numbers.** For any geometry whose perigee lies
+//! *outside* `R_eq` — every deflected, missing trajectory, which is the case the
+//! project actually cares about — the term is inside its valid domain and this does
+//! not arise. For the designed sub-surface impact it does, so the quoted 1.33 km
+//! `J2` perigee shift should be read as "of order a kilometre, on a geometry that
+//! grazes the model's validity boundary", not as a clean number. Measuring the term
+//! on a genuine miss geometry is the honest follow-up.
 //!
 //! # Kernel-free by construction
 //! Pure geometry over a caller-supplied `μ`, `J2`, `R_eq`, planet state and pole —

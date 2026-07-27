@@ -1633,6 +1633,18 @@ mod tests {
     /// all of its effect is bought in the minutes the asteroid spends inside a few
     /// Earth radii. Whatever comes out is the honest size of that, reported.
     ///
+    /// **Read the `J2` line with its caveat.** This scenario's nominal is a designed
+    /// *impact*, so its closest approach (3000 km) is **inside** `R_eq`, where the
+    /// `J2` expansion is outside its domain of validity. The print therefore also
+    /// reports the **capture radius**, which moves 11 311.3 → 11 389.0 km with `J2`
+    /// on: the b-plane reduction infers `v_∞` from the point-mass energy at that
+    /// sub-surface sample point, and `J2`'s potential correction there is large
+    /// enough to bias it ~1%. 1PN, whose correction at that radius is ~1e-9
+    /// relative, leaves the capture radius unchanged to the digit — the control that
+    /// says this is `J2`'s `1/r⁴` growth inside the body, not the reduction. For any
+    /// *miss* geometry (perigee outside `R_eq`) the term is in its valid domain and
+    /// this does not arise. See `forces::oblateness`.
+    ///
     /// **Pluto.** HANDOFF parked "Pluto in the shipping field" on a missing GM,
     /// which the DE440 header supplies, and on an unmeasured cost — batch-2c's
     /// ~55 m over two years for a main-belt particle, *growing with lead time*.
@@ -1678,10 +1690,11 @@ mod tests {
         let j2_shift = (j2.perigee - baseline.perigee).abs();
         println!(
             "Earth J2 (DE440 J2E, real spin axis): perigee shift over the campaign {:.4} km \
-             (baseline {:.1} km → +J2 {:.1} km, capture {:.1} km)",
+             (baseline {:.1} km → +J2 {:.1} km); capture radius {:.1} → {:.1} km",
             j2_shift / 1e3,
             baseline.perigee / 1e3,
             j2.perigee / 1e3,
+            baseline.capture_radius / 1e3,
             j2.capture_radius / 1e3,
         );
         assert!(

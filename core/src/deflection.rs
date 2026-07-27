@@ -960,10 +960,10 @@ impl<'a> DeflectionScenario<'a> {
     /// This is the cap the duration solve brackets against, and it is a physical
     /// bound rather than a numerical convenience. Two things break past it:
     ///
-    /// - **Monotonicity.** Perigee grows with tow duration only while the extra
-    ///   tugging still has time to translate into displacement. Tugging *after*
-    ///   the encounter cannot move a flyby that has already happened, so the
-    ///   response flattens, and a bisection on a flat function returns noise.
+    /// - **The response flattens.** Tugging *after* the encounter cannot move a
+    ///   flyby that has already happened, so past the cap the perigee stops
+    ///   responding to duration at all, and a bisection on a flat function returns
+    ///   noise rather than an answer.
     /// - **The encounter itself.** A window edge landing inside the flyby perturbs
     ///   the very geometry being measured.
     ///
@@ -1042,9 +1042,27 @@ impl<'a> DeflectionScenario<'a> {
     /// clears, because there is no a-priori largest sensible impulse. A tow
     /// duration *has* an upper bound — the lead time before the encounter
     /// ([`max_tow_duration_seconds`](Self::max_tow_duration_seconds)) — so the
-    /// bracket is `[0, cap]` from the start and no expansion loop is needed. That
-    /// also removes the failure mode where an expansion silently walks past the
-    /// region in which the response is monotone.
+    /// bracket is `[0, cap]` from the start and no expansion loop is needed.
+    ///
+    /// # What the bracket actually requires, which is *not* monotonicity
+    /// Perigee is **not** monotone in tow duration, and assuming it were would be
+    /// wrong on the shipping campaign specifically. A nominal impact is rarely
+    /// dead-centre, so a *small* tow walks the track **toward** Earth's centre
+    /// before carrying it out the far side: measured on the campaign's own rock, a
+    /// 20-tonne tractor towing the full lead moves the perigee from ≈3000 km to
+    /// ≈2812 km — 188 km the *wrong* way. Perigee is a distance, so it dips toward
+    /// zero and comes back up.
+    ///
+    /// What bisection needs is weaker and does hold here: that the *target level*
+    /// is crossed exactly once on `[0, cap]`. Since the dip goes further **below**
+    /// the nominal — and any sane target sits well **above** it (the campaign's bar
+    /// is 20 000 km against a 3000 km nominal) — the target is crossed once, on the
+    /// way out. The invariant the loop maintains (`lo` below, `hi` at-or-above)
+    /// then converges on that crossing.
+    ///
+    /// A target chosen *below* the nominal perigee would violate this — but such a
+    /// target is already answered by the zero-duration early return, since the
+    /// nominal clears it without any tow at all.
     ///
     /// # Running out of lead time is an error, not an answer
     /// If the full-cap window still falls short, this returns
@@ -1803,8 +1821,17 @@ mod tests {
         );
     }
 
-    /// Perigee grows with tow duration over the capped bracket — the monotonicity
-    /// the bisection assumes, checked rather than asserted in prose.
+    /// Perigee grows with tow duration **in this scenario**, where the nominal
+    /// passes 4000 km to one side and a prograde tug only ever widens that offset.
+    ///
+    /// Deliberately *not* claimed in general: on the real campaign the nominal is a
+    /// near-centre hit, and a small tow first walks the perigee **inward** before
+    /// carrying it out the far side (measured: 3000 km → 2812 km under a 20 t
+    /// tractor). See [`required_tow_duration`](DeflectionScenario::required_tow_duration)
+    /// for why the bisection needs only a single crossing of the target, not
+    /// monotonicity. What this test pins is that the solver's bracket behaves as
+    /// expected in the clean case, so a failure here is a solver bug rather than
+    /// encounter geometry.
     #[test]
     fn a_longer_tow_raises_the_perigee() {
         let force = ZeroForce;

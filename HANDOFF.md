@@ -301,7 +301,7 @@ That MVP delivers the whole lesson *and* an honest hit→miss flip. Everything b
 - **Godot 3D view** (gdext): SubViewport composition (2D schematic/HUD over 3D, or vice versa); floating origin / double-precision as needed (§7)
 - **Tier 2 force model**: enable 1PN relativity, Yarkovsky, SRP, J2, and the 16 asteroid perturbers (on top of the DE440/441 ephemeris perturber field already used in the MVP) — validated against **ASSIST**, then **Horizons** on real asteroids
 - Real NEOs from the JPL Small-Body Database (§9): Apophis, Bennu, Didymos/Dimorphos
-- Nuclear standoff + gravity-tractor methods — **half done**: the standoff term shipped 2026-07-27 (core-only, no frontend); the **gravity tractor is still open**, and is a `forces/` term rather than an impulse. See *The deflection spectrum, nuclear half*.
+- Nuclear standoff + gravity-tractor methods — **DONE 2026-07-27** (core-only, no frontend for either): the standoff term as an impulse sibling of the kinetic model, the **gravity tractor** as a windowed `forces/` term with its own duration solve. §5's spectrum is closed. See *The deflection spectrum, nuclear half* and *…tractor half*.
 - Lambert / porkchop mission design (makes the impulse *deliverable*, not assumed)
 - **Tier 3 uncertainty**: orbit covariance → b-plane → impact probability; keyholes; covariance ellipse shrinking with observations
 
@@ -386,7 +386,7 @@ Three commits close out the Tier-2 force menu the §5 spec asked for; the tree i
 - **Solar radiation pressure shipped and validated in isolation** (`core/src/forces/srp.rs`, commit `80498f7`). The *radial* sibling of Yarkovsky's transverse recoil: `a = a₁·(r₀/r)²·r̂` with `r₀ = 1 AU`, pushing directly away from the Sun. Constructed from physical inputs — `SolarRadiationPressure::from_physical(Cr, A/m)` — rather than a bare coefficient, so the term reads in the same units a real body's data comes in. Reuses the 1PN/Yarkovsky `CentralBodyState` provider for heliocentric `r`; one more `.with(...)` term on the same [`CompositeForce`], zero structural change (§5). **Validated by the effective-μ identity** — a pure `(1/r²)` radial push away from the Sun is indistinguishable from *weakening the Sun's gravity*, so the isolation test asserts a body under Sun-gravity + SRP orbits exactly as a body under a reduced `μ_eff = μ_sun·(1 − β)` — an algebraic invariant, not a hand-tuned number. Kernel-free.
 - **The Apophis capstone: our *own* integration vs JPL Horizons** (`core/tests/capstone_neo_vs_horizons.rs`, commits `15a1a09` + `b91607e`). The payoff the whole force model was built to earn (§6 real-asteroid rung): integrate Apophis in our field and diff against its Horizons `.neo` truth table, **per force term**, GR measured not asserted. Results, honest: **1PN relativity cuts the residual 5–175×** across the arc (the low-perihelion body §167 predicted would need it); **Yarkovsky at Apophis's real `A2 = −2.902e-14 au/d²` roughly halves the year-8 residual** once the signal clears the model floor; the **belt** perturbs +0.07…+0.43 km through years 1–7 but at year 8 sits *within* the unmodelled radial-A1 floor (Δ −0.037 km) — it does not clear it, exactly as the sub-km wiring result predicted. The capstone asserts direction and bound, never a hand-derived magnitude, and **fails loud** (not skip-green) when the Apophis tables are absent — a tables-but-no-Apophis run must error, per `b91607e`.
 - **The live force-model menu — see the shift on screen** (`godot/`, commits `1dc0646` + `7397869`). The frontend `[P]` menu toggles each Tier-2 term (`[G]` GR / `[Y]` Yarkovsky / `[A]` asteroid belt / `[S]` SRP) and re-solves the b-plane **on demand**, reporting each term's perigee shift live. Measured, all **inward**: GR **+55.55 km**, Yarkovsky **+5.10 km**, belt **+0.55 km**, SRP **+8.36 km**. On-demand, *not* on scenario build — chaining the terms into the build path was measured at >200 s and blocked the threat solution, so it pivoted to an Arc-shared scenario (gated behind a `RealFieldScenario: Sync` bound) driven over a second mpsc worker channel. Verified two ways: the `_shot.gd` harness drives the real keys and screenshots the shifted perigee, and an FFI gate pins the per-term deltas.
-- **Where the force model stands.** The Tier-2 term list (§166) was complete but for **J2** and **Pluto-in-shipping**, both of which **landed 2026-07-27** — so the list is now closed: `J2` is validated against the closed-form nodal regression and shifts the perigee 1.33 km, and Pluto ships as a toggle measured at 0.6 m (the shipping field deliberately stays at ten bodies). Everything ASSIST carries, we carry, validated per-term against the closed form or Horizons. **The next spec beats are the Phase-2 deflection-method spectrum (§5: nuclear standoff + gravity tractor, beyond the MVP's kinetic-only) and Tier 3 uncertainty (§175 — covariance → b-plane → impact probability, keyholes, and where the deferred b-vector sign/ξζ convention at the open-questions list finally gets settled).**
+- **Where the force model stands.** The Tier-2 term list (§166) was complete but for **J2** and **Pluto-in-shipping**, both of which **landed 2026-07-27** — so the list is now closed: `J2` is validated against the closed-form nodal regression and shifts the perigee 1.33 km, and Pluto ships as a toggle measured at 0.6 m (the shipping field deliberately stays at ten bodies). Everything ASSIST carries, we carry, validated per-term against the closed form or Horizons. **The deflection-method spectrum (§5) closed on 2026-07-27 with the nuclear and tractor halves, so the one remaining spec beat is Tier 3 uncertainty (§175 — covariance → b-plane → impact probability, keyholes, and where the deferred b-vector sign/ξζ convention at the open-questions list finally gets settled).**
 
 ### Phase-2 mission design — 2026-07-21 session (Lambert + porkchop + launch vehicles, core)
 
@@ -491,6 +491,175 @@ Phase 2's checklist is down to two unstarted items; this is the first half of on
 - **Kernel-free, and the suite was run with `ASTEROID_REQUIRE_KERNELS=1`.** The new term composes nothing that needs an ephemeris, so its seven tests are pure arithmetic against published numbers. The full workspace nonetheless ran under the require-kernels flag — 165 core in **111 s**, the capstone in 36 s, 23 gdext in 173 s — because the silent-skip trap has made two verification claims here vacuous before, and *runtime is the only tell*.
 - **Not yet on the frontend.** This batch is core-only: no `[N]` key, no force-menu row, no panel. The porkchop view produced three bugs in two batches that every test passed and only a screenshot caught, so a display for this is its own batch with its own picture. (Keys already taken: `1`–`4`, `C`, `P`, `E`, `M`, `L`, `O`.)
 - **What the tractor batch already knows, so it is not rediscovered.** Checked while scoping this half, and it is the one thing that will actually cost time: **`DeflectionScenario<'a>` holds `force: &'a dyn ForceModel` for the whole scenario lifetime** (`deflection.rs:223`, used by `deflected_trajectory`). Every solver here varies the *initial state* under a fixed field. A tractor duration solve is the opposite — each probe re-propagates under a **different force model** (the thrust window changes), not a different state. So the tractor needs an API that takes a force per probe; the `*_with(force, …)` constructors already in the file are the precedent to follow rather than an invention, but it is a real signature change and should be scoped deliberately rather than discovered mid-batch. That is also where the advisor's *"don't fork bracket-and-bisect three ways"* warning finally bites: nuclear escaped it because a chosen direction makes yield a closed-form invert, and duration has no such escape.
+
+### The deflection spectrum, tractor half — 2026-07-27 session (§5's gentle end, and the solve axis `required_dv` structurally could not express)
+
+Closes the deflection-method spectrum, and with it the first of Phase 2's two
+remaining checklist items. §5 asks for deflection modelled *as a spectrum across
+lead time* — gravity tractor at the gentle end, kinetic impactor in the middle,
+nuclear standoff at the top. The nuclear half landed earlier the same day; this
+is the other end, and it is a different *shape* of thing rather than a third
+entry in the same list.
+
+- **Nuclear was an impulse, the tractor is a force — and it is the first term in
+  `forces/` with a time window.** Gravity and sunlight do not switch off, so every
+  existing term is on for the whole integration. A tractor is a *mission*: it
+  arrives, tugs, and leaves. `TowWindow` is that parameter, and it is why the
+  deflection layer needed a new solve axis rather than a new coefficient.
+
+- **There was no coefficient to source, and recognising that early saved the
+  batch a repeat of the nuclear source hunt.** The standoff term needed Dearborn
+  because momentum-per-joule is simulation-derived and unobtainable from first
+  principles. A tractor's tow is `G·m_sc/d²` — Newton, nothing fitted. Lu & Love
+  2005's quoted rate turns out to *be* that: their
+  `Δv = 4.2e-3·(m/2e4 kg)·(d/100 m)^-2 m/s per year` reproduces our
+  `G·m/d²·yr` to **0.30 %**, the gap being their two-significant-figure rounding
+  of 4.212. So the paper was fetched for its **configuration** (20 t hovering at
+  `d/r = 1.5` over a 200 m, 2 g/cm³ body) and its **cant bookkeeping**, and both
+  halves get an independent published anchor: the tow rate above, and
+  `T = G·M·m/(d²·cos[sin⁻¹(r/d)+φ]) = 1.052 N` against the paper's stated
+  *"total thrust T = 1 N"*.
+
+- **The cant angle is a thrust penalty, never a weaker tug — and the paper's own
+  equation says so.** `T·cos[sin⁻¹(r/d)+φ] = G·M·m/d²` puts the cant on the left
+  with the thrust; the gravitational attraction on the right has no `φ` in it.
+  Canting makes the *engines work harder*, it does not make the *gravity weaker*,
+  because gravity does not know where the nozzles point. A `cos(cant)` factor on
+  the tow would look conservative while silently understating every delivered Δv
+  in the project — the `payload_kg`-means-two-things defect in a new place. The
+  split is enforced by signatures rather than by comment: `tow_acceleration()`
+  cannot see the cant angle *or* the asteroid mass it would need, and
+  `station_keeping_thrust_n()` is the one place asteroid mass legitimately enters
+  the module. A test pins that widening the plume moves the thrust and leaves the
+  tow bit-for-bit identical.
+
+- **"It is just Yarkovsky with a window" is the validation asset, not the
+  criticism it sounds like.** Station-keeping holds `d` fixed by construction, so
+  unlike Yarkovsky and SRP the tow does *not* fade with heliocentric distance —
+  which makes it exactly the `d = 0` case of the Yarkovsky `A2·(r₀/r)^d`
+  parametrization. So the term needs **no new oracle**: the Gauss-planetary-
+  equation machinery, with its uniform-in-mean-anomaly weighting already validated
+  against a closed form, judges both. It moved out of `yarkovsky.rs`'s private
+  test module into `forces/secular_oracle.rs` — one implementation, two callers,
+  rather than two copies free to drift (the reason `SB441_BODIES` has a drift test).
+  A `d = 0` circular closed form (`da/dt = 2·a_T/n`) was added so the tractor's
+  exponent is not being exercised for the first time by the very test it judges.
+
+- **The window edge was measured rather than assumed, and the measurement is
+  sharper than the worry.** A hard on/off edge is a derivative discontinuity
+  landing inside whatever sub-step the adaptive driver is taking. Measured on a
+  free particle where nothing but the edges can be responsible:
+
+  ```
+                       rtol/atol 1e-9 (shipping)   rtol 1e-13 / atol 1e-6
+   edges inside steps          -1.0e-4                     +6.3e-3
+   edges on boundaries         -9.2e-10                    -9.2e-10
+  ```
+
+  A discontinuity does **not** defeat the error controller — it converts a
+  *tolerance* into a *systematic* Δv error. Aligned to a step boundary no step
+  contains a discontinuity at all and the answer is exact at any tolerance; five
+  orders separate the rows at one tolerance. That decided the solver's design:
+  **leave window edges free**. The `-1.0e-4` is the pessimistic end (six enormous
+  steps, no gravity), it is ~1e-6 m/s on the campaign's tow, and snapping edges to
+  the snapshot cadence would buy it back only by *quantizing the duration
+  bisection to the cadence*. Recorded so it reads as a decision.
+
+- **`DeflectionScenario` could not express this solve, and the fix was scoped
+  before the batch rather than discovered inside it.** The type holds
+  `force: &'a dyn ForceModel` for its whole lifetime; every solver on it varies
+  the *initial state* under a fixed field. A tow-duration probe is the opposite —
+  same state, a **different field** each time. `propagate_and_reduce(force, start,
+  seed)` is the extracted body of `deflected_trajectory` that takes the field as
+  an argument, and it is what made the second kind expressible.
+
+- **`ForceSum`, not the `ForceRef` that was planned.** The intent was to box a
+  borrowed base field into a `CompositeForce` alongside the tractor. That does not
+  compile and the reason is worth recording: `CompositeForce` holds
+  `Box<dyn ForceModel>`, which is implicitly `Box<dyn ForceModel + 'static>`, so a
+  *borrowed* field cannot go in it at all — and Rust has no default lifetime
+  parameters, so giving `CompositeForce` a `'a` would ripple through every use
+  site. Summing two references (`ForceSum(base, tow)`) sidesteps it entirely and
+  allocates nothing. It is still the decorator `forces/mod.rs` names as the reason
+  `ForceModel` carries `Sync`; only its shape changed.
+
+- **The duration solve is a *bounded* bisection, which is why the advisor's
+  "don't fork bracket-and-bisect three ways" warning bit less hard than expected.**
+  `required_dv` grows its impulse geometrically because there is no a-priori
+  largest sensible impulse. A tow duration *has* an upper bound — the lead time
+  before the encounter — so the bracket is `[0, cap]` from the outset: no seed to
+  pick, no growth factor, and no expansion loop that could silently walk past the
+  region where the response is monotone. What the two solvers genuinely share, the
+  mapping from an encounter outcome onto the perigee scale (`NotHyperbolic` ⇒ a
+  dead-centre hit, off-gate ⇒ `+∞`), was extracted to `perigee_scale` rather than
+  copied, since two copies would be two places for that mapping to start reading a
+  hit as an error.
+
+- **The cap is anchored to the *nominal* encounter, and running out of it is an
+  error rather than an answer.** Past the encounter, extra towing cannot move a
+  flyby that has already happened, so the response flattens and a bisection on a
+  flat function returns noise; a window edge inside the flyby would also perturb
+  the geometry being measured. Hitting the cap raises `TowDurationCapped` carrying
+  the cap *and* the perigee it reached. Returning the cap as "the required
+  duration" would repeat a defect this codebase has already shipped once —
+  `required_impactor_mass` handing back its seed mass verbatim when the seed
+  already cleared, an upper bound reported as the requirement. A caller that
+  cannot distinguish *"3.1 years is enough"* from *"12 years is not"* will read the
+  second as the first, and the kernel-free suite pins the distinction with the
+  same shape of test that caught it the first time.
+
+- **Measured on the campaign's own rock, and the headline is a *different kind* of
+  failure from the nuclear one.** The threat is 300 m / 2.83e10 kg at 2.00 g/cm³ —
+  the same density Lu & Love assume, so the literature row and this one differ only
+  in size. A 20-tonne tractor hovering at `d/r = 1.5` (225 m):
+
+  | quantity | Lu & Love's 200 m body | this campaign's 300 m body |
+  |---|---|---|
+  | tow `G·m/d²` | 5.93e-11 m/s² | **2.64e-11 m/s²** (0.832 mm/s per year) |
+  | station-keeping thrust | 1.05 N (paper: ~1 N) | **1.58 N** (cant 61.8°) |
+  | Δv over the full 6.32 yr lead | — | **5.26 mm/s** |
+  | Δv the curve requires at that lead | — | **66.2 mm/s** → **12.6× short** |
+
+  The lead used is 8 orbital periods — the *cheapest* Δv on the whole sweep — so
+  the shortfall is a **best** case, not a representative one. The nuclear term
+  failed as the **wrong tool**: a burst sized for this rock exceeds its 0.159 m/s
+  escape speed and disperses it, a regime change. The tractor fails as the **right
+  tool at the wrong scale**: nothing about it is unphysical here, it is simply an
+  order of magnitude too small, and the shortfall is a spacecraft-mass number. Of
+  the three methods it is the one that comes closest to closing on its own terms.
+
+- **And a feeble tractor does not merely fail — it deepens the hit.** Towing the
+  full lead at 20 t moves the b-plane perigee from **3000.0 km to 2811.6 km**:
+  188 km the *wrong* way. The nominal is a near-centre impact, so a tug this small
+  walks the track *toward* Earth's centre rather than out the far side; perigee is a
+  distance, so it dips toward zero before coming back up. This is asserted, not
+  merely printed, because it is the concrete counter-example to *"perigee grows with
+  tow duration"* — an assumption the solver is documented as **not** making. An
+  earlier draft of that doc claimed monotonicity over the capped bracket; the real
+  field falsified it and the doc was corrected to state what bisection actually
+  needs: a **single crossing of the target level**, which holds because the dip goes
+  further *below* the nominal while any sane target sits well *above* it (20 000 km
+  against a 3000 km nominal).
+
+- **The scale that does close it, and how it was reached without a third solver.**
+  The tow is *exactly* linear in spacecraft mass, so the closing mass is arithmetic
+  rather than a search: 20 t × 12.6 ≈ **252 t**. That is an estimate of the mass
+  matching the required *Δv*, and slightly optimistic about the *perigee* bar, since
+  a distributed tug arrives later on average than an impulse. So it is checked
+  rather than trusted: at 2× that (504 t) the duration solve wants **3.81 yr of
+  towing**, 60 % of the available lead, and the answer round-trips on the shipping
+  force model — 3.81 yr reaches **20 008.8 km** against the 20 000 km bar, while
+  20 % less reaches only 16 655 km. Converging within 9 km of the bar is the
+  bisection working.
+
+- **Cost was measured before a solve was wired on top of it**, which changed the
+  test's design. One tow probe is **12.4 s** (a bare propagation), but one
+  `required_dv_along_track` at this lead is **236.6 s** — the dv solve, not the tow
+  probes, would have dominated. Since the nuclear comparison already solves this
+  exact lead live and pins it against `curve.json`, the tractor test **reuses** that
+  constant instead of re-paying 237 s for an identical number, and the constant was
+  promoted from a local `const` inside one test to module scope so the two cannot
+  drift. Whole test: **171 s**.
 
 ### Resolved by the 2026-07-20 session (Phase-2 3D, real bodies — Horizons NEO half)
 

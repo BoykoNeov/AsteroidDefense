@@ -62,12 +62,21 @@ func _run() -> void:
 
 	# Flip each term ON with its REAL key (panel is open, so the guarded branches
 	# fire) — the numbers branch of _draw, reached through the action handlers.
-	for pair in [[KEY_G, "relativity"], [KEY_Y, "yarkovsky"], [KEY_A, "belt"], [KEY_S, "srp"]]:
-		var before: bool = Sim.tier2_on[pair[1]]
-		main._input(_key(pair[0]))
-		print("TIER2SHOT  key -> tier2_on[%s] %s -> %s (expect flipped)"
-			% [pair[1], before, Sim.tier2_on[pair[1]]])
-		assert(Sim.tier2_on[pair[1]] != before, "term key must flip %s" % pair[1])
+	#
+	# The key/id pairs are read out of TIER2_TERMS rather than restated here. A
+	# hand-kept second list is how a newly added term gets a panel row, a core
+	# measurement and an InputMap action while nothing ever presses its key — the
+	# check reads as coverage and is not.
+	for term: Array in Sim.TIER2_TERMS:
+		var id: String = term[1]
+		var keycode := OS.find_keycode_from_string(term[0])
+		assert(keycode != 0, "no keycode for menu key %s" % term[0])
+		var before: bool = Sim.tier2_on[id]
+		main._input(_key(keycode))
+		print("TIER2SHOT  [%s] -> tier2_on[%s] %s -> %s (expect flipped)"
+			% [term[0], id, before, Sim.tier2_on[id]])
+		assert(Sim.tier2_on[id] != before,
+			"term key [%s] must flip %s (is the InputMap action wired?)" % [term[0], id])
 	await _settle(6)   # _draw runs here for the now-visible panel
 
 	# Echo exactly what the panel formats, so the console and the picture can be
@@ -79,6 +88,24 @@ func _run() -> void:
 		print("TIER2SHOT  %-11s avail=%s shift=%s km"
 			% [id, avail, ("N/A" if is_nan(shift) else "%+.2f" % shift)])
 	print("TIER2SHOT  nominal_perigee=%.1f km capture=%.0f km" % [Sim.nom_perigee_km, Sim.cap_km])
+
+	# The J2 footnote's number. It is the only figure on the panel that does not come
+	# from the on-demand measurement, so it is the one that could quietly be missing
+	# while everything else reads fine — and a missing one takes the whole caveat off
+	# screen, leaving J2's out-of-domain number sitting under GR's looking alike.
+	var miss := Sim.j2_miss_shift_km()
+	print("TIER2SHOT  j2 miss-geometry shift=%s km  footnote_drawn=%s"
+		% [("N/A" if is_nan(miss) else "%+.2f" % miss), main.tier2_panel._show_j2_note()])
+	assert(is_finite(miss) and absf(miss) > 0.0,
+		"the core must supply a finite non-zero in-domain J2 shift for the footnote")
+	assert(main.tier2_panel._show_j2_note(),
+		"the J2 footnote must draw while the J2 term is revealed")
+	# The footnote is a constant and the row above it is a measurement — two
+	# independent sources. If the measurement path failed for J2 alone the row would
+	# read "-- toggle to reveal --" with a confident caveat printed underneath it,
+	# which is worse than either failing on its own.
+	assert(Sim.tier2_available("j2"),
+		"the J2 footnote must not caption a row that has no measured shift")
 
 	await _shot("tier2_menu_all_on")
 	get_tree().quit(0)

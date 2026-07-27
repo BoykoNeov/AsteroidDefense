@@ -508,13 +508,24 @@ pub fn mount_small_bodies(
         .map_err(|e| ScenarioError::Ephemeris(e.to_string()))
 }
 
+/// Every term id [`MissionCore::tier2_shifted_perigee_m`] answers to, in panel
+/// order — the frontend's `TIER2_TERMS` table names the same five.
+///
+/// Exists so a new term cannot be measured, wired and displayed while the tests
+/// quietly keep checking the old set: the preview test loops over *this*, so adding
+/// a field to [`Tier2Shifts`] without adding it here leaves a visibly short list
+/// rather than a green run that never touched the new physics. That is not
+/// hypothetical — the `J2` term was added with the loop still reading
+/// `["relativity", "yarkovsky", "srp"]`, and it passed.
+pub const TIER2_TERM_IDS: [&str; 5] = ["relativity", "yarkovsky", "belt", "srp", "j2"];
+
 /// The shipping Yarkovsky `A2` the Tier-2 preview toggles on (m/s² at 1 AU) — a
 /// physically plausible sub-km value, deliberately **un-amplified** (matches the
 /// core `tier2_terms_…_shift_it_on` measurement test). A larger value would inflate
 /// the displayed shift into the display-grade lie this project keeps catching.
 pub const PREVIEW_YARKOVSKY_A2: f64 = 1.0e-13;
 
-/// The four single-term Tier-2 b-plane perigees, measured on demand when the
+/// The five single-term Tier-2 b-plane perigees, measured on demand when the
 /// frontend opens the force-model menu ([`measure_tier2_shifts`]).
 ///
 /// Each is the nominal perigee the **fixed shipping seed** reaches when *one*
@@ -526,7 +537,7 @@ pub const PREVIEW_YARKOVSKY_A2: f64 = 1.0e-13;
 /// `nominal_perigee − this`; the sign says which way (inward = smaller perigee =
 /// pulled closer to Earth).
 ///
-/// Each measurement is a full ~16 s propagation, so all four together are the ~64 s
+/// Each measurement is a full ~16 s propagation, so all five together are the ~80 s
 /// this preview costs — paid **once**, off-thread, only when the flag is set.
 #[derive(Debug, Clone, Copy)]
 pub struct Tier2Shifts {
@@ -541,6 +552,21 @@ pub struct Tier2Shifts {
     pub belt_perigee_m: Option<f64>,
     /// Nominal perigee with SRP ([`SrpParams::sub_km_rock`]) alone on, m.
     pub srp_perigee_m: f64,
+    /// Nominal perigee with Earth's `J2` oblateness alone on, m.
+    ///
+    /// Measured on the *same* fixed shipping seed as its four siblings, because the
+    /// frontend subtracts every one of them from the *same* baseline — a term
+    /// measured on some other geometry would difference two unrelated numbers and
+    /// print something that looks like a shift and is not.
+    ///
+    /// That is also what makes this entry the one with a caveat: the shipping
+    /// nominal is a designed **impact** whose closest approach is 3000 km, inside
+    /// Earth, and the `J2` expansion is only valid *outside* `R_eq`. The number is
+    /// real and it is what this geometry does; the in-domain companion is measured
+    /// on a deflected miss by the core
+    /// ([`J2_DEFLECTED_MISS_PERIGEE_SHIFT_KM`](asteroid_core::scenario::J2_DEFLECTED_MISS_PERIGEE_SHIFT_KM)),
+    /// which is what the panel's footnote cites.
+    pub j2_perigee_m: f64,
 }
 
 /// A finished scenario and everything fixed at build time, ready to be handed to a
@@ -643,7 +669,7 @@ impl BuiltScenario {
     }
 }
 
-/// Measure the four single-term Tier-2 b-plane shifts off a built scenario
+/// Measure the five single-term Tier-2 b-plane shifts off a built scenario
 /// (HANDOFF §5). Each term is re-flown in isolation on the **fixed shipping seed**
 /// via [`RealFieldScenario::nominal_encounter_with`] — the honest "how far does this
 /// piece of physics move the impact" measurement, never a rebuild that would
@@ -652,7 +678,7 @@ impl BuiltScenario {
 /// `&RealFieldScenario` rather than `&BuiltScenario` so the frontend can call it on
 /// a **worker thread holding an `Arc` clone** of the exact scenario the threat was
 /// flown in (the render thread keeps reading the same scenario meanwhile — the
-/// reason it is `Sync`). ~16 s per term, ~64 s total.
+/// reason it is `Sync`). ~16 s per term, ~80 s total.
 ///
 /// The belt is measured only when `small_bodies_mounted`: `compose_force` fails
 /// loud if asked for the sb441 perturbers without the kernel, so its perigee is
@@ -687,6 +713,10 @@ pub fn measure_tier2_shifts(
         srp: Some(SrpParams::sub_km_rock()),
         ..Tier2Config::default()
     })?;
+    let j2_perigee_m = measure(&Tier2Config {
+        earth_j2: true,
+        ..Tier2Config::default()
+    })?;
     let belt_perigee_m = if small_bodies_mounted {
         Some(measure(&Tier2Config {
             asteroid_perturbers: true,
@@ -701,6 +731,7 @@ pub fn measure_tier2_shifts(
         yarkovsky_perigee_m,
         belt_perigee_m,
         srp_perigee_m,
+        j2_perigee_m,
     })
 }
 
@@ -753,7 +784,7 @@ pub struct MissionCore {
     /// The pre-plan encounter picture, sampled once at build time (see
     /// [`BuiltScenario`]). The nominal track never changes, so neither does this.
     nominal_frame: Option<EncounterFrame>,
-    /// The four single-term Tier-2 shifts, present only after the on-demand preview
+    /// The five single-term Tier-2 shifts, present only after the on-demand preview
     /// has landed ([`adopt_tier2_shifts`](Self::adopt_tier2_shifts)). `None` means
     /// the frontend never opened the menu (or a new scenario was just installed);
     /// belt-within-`Some` may still be `None` when the small-body kernel is absent
@@ -978,7 +1009,7 @@ impl MissionCore {
         self.scenario.is_some()
     }
 
-    /// Whether the four single-term Tier-2 shifts have been measured for the current
+    /// Whether the five single-term Tier-2 shifts have been measured for the current
     /// scenario — the frontend's cue that the menu's numbers are ready rather than
     /// still `-1`. False right after a build; set once the on-demand preview lands
     /// ([`adopt_tier2_shifts`](Self::adopt_tier2_shifts)).
@@ -1009,7 +1040,7 @@ impl MissionCore {
     /// zero. The frontend forms the shift as
     /// [`nominal_perigee_m`](Self::nominal_perigee_m) − this.
     ///
-    /// `term` is one of `"relativity"`, `"yarkovsky"`, `"belt"`, `"srp"`.
+    /// `term` is one of `"relativity"`, `"yarkovsky"`, `"belt"`, `"srp"`, `"j2"`.
     pub fn tier2_shifted_perigee_m(&self, term: &str) -> Option<f64> {
         let s = self.tier2_shifts?;
         match term {
@@ -1017,6 +1048,7 @@ impl MissionCore {
             "yarkovsky" => Some(s.yarkovsky_perigee_m),
             "belt" => s.belt_perigee_m,
             "srp" => Some(s.srp_perigee_m),
+            "j2" => Some(s.j2_perigee_m),
             _ => None,
         }
     }
@@ -3218,7 +3250,7 @@ mod tests {
     ///   `-1` sentinel rather than a `0` km "belt does nothing" is the whole reason
     ///   its field is an `Option`.
     #[test]
-    fn tier2_preview_measures_three_terms_and_leaves_belt_unavailable_unmounted() {
+    fn tier2_preview_measures_every_kernel_free_term_and_leaves_belt_unavailable_unmounted() {
         if !have_kernels() {
             eprintln!("skipping tier2_preview_*: no DE kernel");
             return;
@@ -3240,7 +3272,7 @@ mod tests {
         let baseline = mc.nominal_perigee_m().expect("baseline perigee");
 
         // Now the on-demand path: measure off an Arc clone of the installed scenario
-        // (what the preview worker holds) and adopt the result — the ~64 s, paid only
+        // (what the preview worker holds) and adopt the result — the ~80 s, paid only
         // when the operator opens the menu, never on the build.
         let scenario = mc.scenario_arc().expect("installed scenario is Arc-shareable");
         let shifts = measure_tier2_shifts(&scenario, mc.small_bodies_mounted())
@@ -3248,9 +3280,12 @@ mod tests {
         mc.adopt_tier2_shifts(shifts);
         assert!(mc.has_tier2_preview(), "adopted preview must light the menu");
 
-        // The three always-available terms: finite, and each genuinely moved the
-        // perigee off the baseline (not a dead toggle).
-        for term in ["relativity", "yarkovsky", "srp"] {
+        // Every term except the belt: finite, and each genuinely moved the perigee off
+        // the baseline (not a dead toggle). Driven off `TIER2_TERM_IDS` rather than a
+        // list written here, so a term added to the preview cannot be missed — this
+        // loop read `["relativity", "yarkovsky", "srp"]` while `J2` shipped, and was
+        // green throughout.
+        for term in TIER2_TERM_IDS.iter().filter(|t| **t != "belt") {
             let shifted = mc
                 .tier2_shifted_perigee_m(term)
                 .unwrap_or_else(|| panic!("{term} shift should be available"));

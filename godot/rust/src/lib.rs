@@ -446,7 +446,7 @@ impl Mission {
     ///
     /// The worker gets an `Arc` clone of the built scenario (a refcount bump, not a
     /// rebuild — the shifts come off the *exact* scenario the threat was flown in),
-    /// measures the four single-term shifts ([`measure_tier2_shifts`]) and sends them
+    /// measures the five single-term shifts ([`measure_tier2_shifts`]) and sends them
     /// back for [`poll_tier2_preview`](Self::poll_tier2_preview) to adopt. Returns
     /// `false` (a no-op) if the preview is already measured or already in flight, or
     /// if there is no scenario to measure against yet.
@@ -944,8 +944,8 @@ impl Mission {
             .unwrap_or(-1.0)
     }
 
-    /// Whether the four single-term Tier-2 shifts were measured for this scenario
-    /// — the frontend's cue that the GR/Yarkovsky/belt/SRP menu holds real numbers
+    /// Whether the five single-term Tier-2 shifts were measured for this scenario
+    /// — the frontend's cue that the GR/Yarkovsky/belt/SRP/J2 menu holds real numbers
     /// rather than the `-1` "not ready" sentinel. `true` only after a build that
     /// opted into the preview (the frontend's worker build does).
     #[func]
@@ -955,10 +955,10 @@ impl Mission {
 
     /// The **shifted nominal perigee**, m, that the fixed shipping seed reaches with
     /// a single Tier-2 term switched on — `term` ∈ {`"relativity"`, `"yarkovsky"`,
-    /// `"belt"`, `"srp"`}. `-1.0` when the preview was not run, `term` is unknown,
-    /// or — **belt only** — the small-body kernel is absent, so the belt shift is
-    /// genuinely *unavailable* rather than zero (a 0 would read as "the belt does
-    /// nothing"). The GDScript menu forms the shift as
+    /// `"belt"`, `"srp"`, `"j2"`}. `-1.0` when the preview was not run, `term` is
+    /// unknown, or — **belt only** — the small-body kernel is absent, so the belt
+    /// shift is genuinely *unavailable* rather than zero (a 0 would read as "the belt
+    /// does nothing"). The GDScript menu forms the shift as
     /// `nominal_perigee_m() − this` and formats the km.
     #[func]
     fn tier2_shifted_perigee_m(&self, term: GString) -> f64 {
@@ -966,6 +966,28 @@ impl Mission {
             .as_ref()
             .and_then(|c| c.tier2_shifted_perigee_m(&term.to_string()))
             .unwrap_or(-1.0)
+    }
+
+    /// The `J2` perigee shift measured on a genuine **miss** geometry, km — the
+    /// in-domain companion to the `"j2"` entry of
+    /// [`tier2_shifted_perigee_m`](Self::tier2_shifted_perigee_m), which the panel's
+    /// footnote cites.
+    ///
+    /// Every term in that menu is measured on the fixed shipping seed, and that seed
+    /// is a designed **impact** whose closest approach is 3000 km — *inside* Earth,
+    /// where the `J2` expansion is not valid. The menu number is what this geometry
+    /// really does and it stays as measured; this is the number from the geometry
+    /// that matters (a deflected pass, perigee outside `R_eq`), so the display can
+    /// say which is which instead of printing one and implying the other.
+    ///
+    /// A recorded constant rather than a live measurement: it costs a full
+    /// propagation pair and never changes for a given scenario. It is pinned to the
+    /// core's own measurement by `earth_j2_on_a_deflected_miss_is_in_domain`, so this
+    /// cannot silently drift from what the physics says — the treatment
+    /// `SB441_BODIES` and `threat_mass_kg()` already get.
+    #[func]
+    fn j2_miss_geometry_shift_km(&self) -> f64 {
+        asteroid_core::scenario::J2_DEFLECTED_MISS_PERIGEE_SHIFT_KM
     }
 
     /// The nominal pass's b-plane impact parameter `b`, m (`-1.0` if no scenario) —

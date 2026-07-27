@@ -217,7 +217,7 @@ func _input(event: InputEvent) -> void:
 	elif planner.visible and event.is_action_pressed("plan_commit"):
 		Sim.try_commit()
 	elif event.is_action_pressed("tier2_toggle"):
-		# Gated on `mission_online` for the same reason the planner is: the four
+		# Gated on `mission_online` for the same reason the planner is: the five
 		# shifts ride the scenario build, so there is nothing to show until the
 		# threat solution lands.
 		if not Sim.mission_online:
@@ -237,6 +237,8 @@ func _input(event: InputEvent) -> void:
 		Sim.toggle_tier2("belt")
 	elif tier2_panel.visible and event.is_action_pressed("tier2_term_srp"):
 		Sim.toggle_tier2("srp")
+	elif tier2_panel.visible and event.is_action_pressed("tier2_term_j2"):
+		Sim.toggle_tier2("j2")
 
 
 ## Show exactly one of the full-frame overlay views (or `null` for the 3D world),

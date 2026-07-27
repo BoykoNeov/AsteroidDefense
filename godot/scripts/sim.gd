@@ -171,30 +171,38 @@ const PAD_D := 2.0                     # minimum days between "now" and launch
 ## physics cannot use different Earths. The literal is only a pre-build fallback.
 var R_E := 6378.137
 
-## Tier-2 physics menu ([P]): the four force terms whose b-plane shift the core
+## Tier-2 physics menu ([P]): the five force terms whose b-plane shift the core
 ## measured once at build time (`Mission.has_tier2_preview`). Each entry is an
-## on/off toggle — flipped by [G]/[Y]/[A]/[S] — and when ON the panel reveals that
-## term's isolated perigee shift. Off by default so switching a term on is the act
-## that *shows* its contribution (the "toggle to show the shift" the panel is for).
-## The numbers are precomputed and fixed per scenario, so a toggle reads instantly.
-## The four terms in panel order: [menu key, core id, display name]. The id is the
-## string the core keys `tier2_shifted_perigee_m` on, so this table is the single
-## place the frontend names them.
+## on/off toggle — flipped by [G]/[Y]/[A]/[S]/[O] — and when ON the panel reveals
+## that term's isolated perigee shift. Off by default so switching a term on is the
+## act that *shows* its contribution (the "toggle to show the shift" the panel is
+## for). The numbers are precomputed and fixed per scenario, so a toggle reads
+## instantly. The five terms in panel order: [menu key, core id, display name]. The
+## id is the string the core keys `tier2_shifted_perigee_m` on, so this table is the
+## single place the frontend names them.
+##
+## `J2` carries a `*` because it is the one term whose *validity* depends on the
+## geometry it was measured on: the shipping nominal is a designed impact 3000 km
+## from Earth's centre, inside the body, and the J2 expansion holds only outside
+## `R_eq`. It is measured on that seed anyway — every shift here is subtracted from
+## the same nominal baseline, so measuring one term somewhere else would print a
+## difference between two unrelated geometries. The in-domain companion reaches the
+## panel's footnote through `j2_miss_shift_km` instead (see `Tier2Panel`).
 const TIER2_TERMS := [
 	["G", "relativity", "GR (1PN RELATIVITY)"],
 	["Y", "yarkovsky", "YARKOVSKY (A2)"],
 	["A", "belt", "MAIN-BELT (16x SB441)"],
 	["S", "srp", "SOLAR RAD. PRESSURE"],
+	["O", "j2", "EARTH J2 (OBLATENESS) *"],
 ]
-var tier2_ready := false                # the core has measured the four shifts
+var tier2_ready := false                # the core has measured the five shifts
 var tier2_measuring := false            # the on-demand ~2 min measurement is running
 var tier2_panel_open := false           # the physics panel is showing
-var tier2_on := {                       # per-term reveal state (mnemonic keys)
-	"relativity": false,
-	"yarkovsky": false,
-	"belt": false,
-	"srp": false,
-}
+## Per-term reveal state, keyed by core id — **populated from `TIER2_TERMS` in
+## `_ready`**, never written out a second time. `toggle_tier2` ignores an unknown
+## key, so a term listed in the table but missing here would silently do nothing
+## when its key was pressed; deriving the dict is what makes that impossible.
+var tier2_on := {}
 ## The nominal (un-deflected) b-plane perigee, km — the baseline every Tier-2 shift
 ## is measured against (`shift = nominal − shifted`). Read from the core at
 ## `_install_threat`, same source as `cap_km`, so the menu and the encounter view
@@ -285,6 +293,9 @@ func _ready() -> void:
 	mono_font = SystemFont.new()
 	mono_font.font_names = PackedStringArray(
 		["Consolas", "Cascadia Mono", "Courier New", "Lucida Console"])
+
+	for term: Array in TIER2_TERMS:
+		tier2_on[term[1]] = false
 
 	_load_field()
 	_build_planets()
@@ -920,7 +931,7 @@ func _plan_edit_blocked() -> bool:
 	return false
 
 
-## Kick off the on-demand Tier-2 shift measurement — the ~2 min (four ~16 s
+## Kick off the on-demand Tier-2 shift measurement — the ~2 min (five ~16 s
 ## propagations) that fills the force-model menu. Called when the panel opens.
 ## Off the build critical path by design: the threat solution never waits on it.
 ## A no-op if the threat is not up yet, the shifts are already measured, or a
@@ -943,15 +954,15 @@ func _poll_tier2_preview() -> void:
 		tier2_measuring = false
 		tier2_ready = mission.has_tier2_preview()
 		if tier2_ready:
-			event_logged.emit(_stamp(t) + "  TIER-2 FORCE SHIFTS READY - GR/YARK/BELT/SRP")
+			event_logged.emit(_stamp(t) + "  TIER-2 FORCE SHIFTS READY - GR/YARK/BELT/SRP/J2")
 		else:
 			event_logged.emit(_stamp(t) + "  TIER-2 MEASUREMENT FAILED - " + str(mission.last_error()))
 
 
 ## Flip one Tier-2 term's reveal state. `term` is a core id
-## ("relativity"/"yarkovsky"/"belt"/"srp"). Switching a term ON that the core could
-## not measure (the belt with no small-body kernel mounted) is called out rather
-## than silently revealing nothing.
+## ("relativity"/"yarkovsky"/"belt"/"srp"/"j2"). Switching a term ON that the core
+## could not measure (the belt with no small-body kernel mounted) is called out
+## rather than silently revealing nothing.
 func toggle_tier2(term: String) -> void:
 	if not tier2_on.has(term):
 		return
@@ -978,6 +989,21 @@ func tier2_shift_km(term: String) -> float:
 	if not tier2_available(term):
 		return NAN
 	return nom_perigee_km - mission.tier2_shifted_perigee_m(term) / 1000.0
+
+
+## The J2 perigee shift measured on a genuine **miss** geometry, km — the in-domain
+## companion to the menu's own J2 entry, which (like every other term) is measured
+## on the nominal impact, 3000 km from Earth's centre and therefore *inside* the
+## body where the J2 expansion does not hold.
+##
+## Read from the core rather than written here, so the footnote and the physics
+## cannot drift: the constant is pinned to the core's own measurement by a test.
+## `NAN` before the extension loads, so the panel can omit the note rather than
+## print a zero that would read as "J2 does nothing out there".
+func j2_miss_shift_km() -> float:
+	if mission == null:
+		return NAN
+	return mission.j2_miss_geometry_shift_km()
 
 
 # ------------------------------------------------------- porkchop / delivery ---

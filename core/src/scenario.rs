@@ -114,6 +114,37 @@ impl SrpParams {
     }
 }
 
+/// Earth's `J2` b-plane perigee shift measured on a genuine **miss** geometry, km,
+/// signed the way the frontend menu signs every shift (`baseline − shifted`, so
+/// positive = the term pulls the perigee *inward*).
+///
+/// The companion to the `J2` figure the force-model menu shows. Every term in that
+/// menu is measured on the shipping nominal — which it must be, since they are all
+/// differenced against the same baseline — but that nominal is a designed **impact**
+/// whose closest approach is 3000 km, *inside* Earth, and the `J2` expansion is only
+/// valid outside `R_eq`. So `J2` alone among the five is measured out of its own
+/// domain there. This is the same term on the geometry that actually matters: a
+/// deflected pass, along-track, one year before impact, whose perigee lands at
+/// **3.0 `R_eq`** and whose `|B|` clears the capture disc — a clean miss (the
+/// impulse and the geometry it reaches are named in
+/// `earth_j2_on_a_deflected_miss_is_in_domain`, which measures this and would fail
+/// if the constant drifted from what the physics says).
+///
+/// Measured: **−0.1196 km** — `J2` eases that pass ~120 m *outward*, where the same
+/// term on the impact geometry shows +1.33 km *inward*. Different magnitude and
+/// different sign, and the sign is not by itself evidence of the domain problem:
+/// the term carries a Legendre factor in the latitude of closest approach, which
+/// two different passes have no reason to share. What the two numbers establish is
+/// the narrower, sufficient point — the menu's 1.33 km is *this geometry's* number
+/// and not "what `J2` does to a deflection", which is why the panel captions it.
+/// The domain claim is carried by the capture-radius bias, which collapses ~480×
+/// between them (0.687 % → 0.0014 %), tracking the `1/r³` its mechanism predicts.
+///
+/// A recorded constant rather than something computed at run time: it costs a pair
+/// of full propagations, it never changes for a given scenario, and the frontend
+/// needs it to caption a number rather than to fly anything.
+pub const J2_DEFLECTED_MISS_PERIGEE_SHIFT_KM: f64 = -0.1196;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Tier2Config {
     /// Enable the 1PN relativistic Sun term (PPN Schwarzschild, β=γ=1). Its μ is
@@ -732,6 +763,61 @@ impl RealFieldScenario {
         &self,
         tier2: &Tier2Config,
     ) -> Result<Option<BPlaneEncounter>, ScenarioError> {
+        self.with_toggled_field(tier2, |ds| Ok(ds.nominal_encounter()?))
+    }
+
+    /// Re-fly this scenario's built seed through a `tier2`-toggled field **and
+    /// apply `delta_v` at `deflection_epoch`**, reporting the encounter the
+    /// deflected pass reaches — the [`nominal_encounter_with`] measurement carried
+    /// onto a *miss* geometry.
+    ///
+    /// Why this exists as a separate entry point: `nominal_encounter_with` can only
+    /// ever measure a term on the shipping nominal, and that nominal is a designed
+    /// **impact** whose closest approach is well inside Earth. For a term whose
+    /// validity has a radial boundary — Earth's `J2`, whose expansion holds only
+    /// outside `R_eq` — a number measured there is out of domain. A deflected pass
+    /// is the geometry that actually matters (every successful deflection is one),
+    /// and it is the only way to reach a wide perigee at all: [`build`](Self::build)
+    /// verifies its designed impact round-trips, so a `b_offset_km` beyond the
+    /// capture radius is rejected as "not a hit" rather than built as a miss.
+    ///
+    /// Same contract as the nominal sibling and for the same reason: the seed **and
+    /// the impulse** are held fixed, and only the forward field changes, so the
+    /// perigee difference between two calls is attributable to the term rather than
+    /// to a re-planned deflection. Passing `&Tier2Config::default()` gives the
+    /// baseline this scenario's own field would reach with that same impulse.
+    ///
+    /// `None` means the deflected pass left the scan's distance gate — a miss so
+    /// wide there is no finite perigee to compare, which is a *successful*
+    /// deflection but not a measurable one. Pick a smaller impulse.
+    ///
+    /// Cost: one full nominal propagation (the impulse is applied to the nominal
+    /// state at `deflection_epoch`, so the nominal must be re-flown in this field
+    /// too) plus the post-deflection arc — seconds, same as the sibling.
+    ///
+    /// [`nominal_encounter_with`]: Self::nominal_encounter_with
+    pub fn deflected_encounter_with(
+        &self,
+        tier2: &Tier2Config,
+        deflection_epoch: Epoch,
+        delta_v: Vector3<f64>,
+    ) -> Result<Option<BPlaneEncounter>, ScenarioError> {
+        self.with_toggled_field(tier2, |ds| Ok(ds.evaluate(deflection_epoch, delta_v)?))
+    }
+
+    /// Build a [`DeflectionScenario`] over this scenario's **fixed seed** flown
+    /// through a `tier2`-toggled field, and hand it to `f`.
+    ///
+    /// The single place a re-flown field is assembled, so the nominal and deflected
+    /// measurement entry points above cannot drift apart in what "GR on" means or
+    /// in which seed/cadence/scan they use — the same argument [`compose_force`]
+    /// makes for the build and measurement paths. A closure rather than a returned
+    /// value because the `DeflectionScenario` borrows the force built here.
+    fn with_toggled_field<R>(
+        &self,
+        tier2: &Tier2Config,
+        f: impl FnOnce(&DeflectionScenario<'_>) -> Result<R, ScenarioError>,
+    ) -> Result<R, ScenarioError> {
         let force = compose_force(&self.ephemeris, tier2)
             .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
         let nominal = Clock::propagate(
@@ -755,7 +841,7 @@ impl RealFieldScenario {
             self.mu_earth,
             self.earth_radius,
         )?;
-        Ok(ds.nominal_encounter()?)
+        f(&ds)
     }
 
     /// Free-propagate an arbitrary seed state through this scenario's validated
@@ -1721,6 +1807,208 @@ mod tests {
         assert!(
             pluto_shift > 0.0 && pluto_shift.is_finite(),
             "Pluto should move the perigee by a nonzero finite amount, got {pluto_shift:.3e} m"
+        );
+    }
+
+    /// Lead time of the miss-geometry impulse before impact, seconds — one year.
+    ///
+    /// Deliberately *not* the campaign's full ~12 yr lead, and the reason is cost,
+    /// not physics: the solve that picked this geometry
+    /// (`examples/probe_miss_geometry.rs`) re-propagates from the impulse to the
+    /// span end on every bisection step, so an impulse at the campaign start makes
+    /// each of ~30 steps a full 12 yr flight. What is being fixed here is a
+    /// *perigee*; the lead time only sets how much Δv buys it.
+    const MISS_LEAD_SECONDS: f64 = 365.25 * 86_400.0;
+    /// Along-track impulse magnitude, m/s, solved by that probe to put the deflected
+    /// perigee at 3.0 `R_eq`. Hardcoded rather than re-solved so the geometry is
+    /// fixed by construction and the test costs three propagations, not thirty.
+    const MISS_DV_M_S: f64 = 0.399_625;
+
+    /// Measure Earth's `J2` on a geometry where it is **valid** — and show that the
+    /// capture-radius anomaly the impact geometry produces is bought inside `R_eq`.
+    ///
+    /// The sibling test above measures `J2` on the shipping nominal and records
+    /// 1.33 km. That number grazes a validity boundary: the nominal is a designed
+    /// impact with closest approach 3000 km, *inside* Earth, while the `J2`
+    /// expansion holds only outside `R_eq`. Its visible symptom is the b-plane
+    /// reduction, which infers `v_∞` from **point-mass** energy at the sampled
+    /// closest approach and so picks up `J2`'s potential correction there — moving
+    /// the capture radius by 0.69 % against a perigee shift of 1.33 km.
+    ///
+    /// The claim in the module docs is *causal*: that anomaly is `J2` evaluated deep
+    /// inside the body, not a defect in the reduction. So the assertion that would
+    /// **fail if the explanation were wrong** is not "the shift is nonzero" (true
+    /// anywhere) but that the anomaly *collapses with distance*: the correction goes
+    /// as `(μ/r)·J2·(R_eq/r)²`, i.e. `1/r³`, so at a perigee 6.4× wider it must fall
+    /// by ~260×. A reduction that were simply biased would not care about `r`.
+    ///
+    /// The geometry is a deflected pass, which is both the only way to reach a wide
+    /// perigee ([`RealFieldScenario::build`] rejects a designed miss as "not a hit")
+    /// and the case that actually matters, since every successful deflection is one.
+    #[test]
+    fn earth_j2_on_a_deflected_miss_is_in_domain() {
+        if crate::kernels::resolve_for_test("earth_j2_on_a_deflected_miss_is_in_domain").is_none() {
+            return;
+        }
+
+        let sc = RealFieldScenario::build(&ImpactorConfig::default()).expect("scenario builds");
+        let ds = sc.deflection().expect("deflection");
+        let nominal = ds
+            .nominal_encounter()
+            .expect("nominal reduces")
+            .expect("nominal is a hit");
+
+        let t_d = sc.impact_epoch().shifted_by_seconds(-MISS_LEAD_SECONDS);
+        let dir = crate::deflection::along_track_unit(
+            ds.nominal().state_at(t_d).expect("nominal state at t_d"),
+        )
+        .expect("along-track direction");
+        let dv = MISS_DV_M_S * dir;
+
+        // (a) The new entry point, terms off, reproduces the scenario's own deflected
+        // pass bit-for-bit — the same "unchanged with them off" identity the nominal
+        // sibling relies on, and what makes a difference between two of its calls
+        // attributable to the term rather than to a second code path.
+        let direct = ds
+            .evaluate(t_d, dv)
+            .expect("deflected pass")
+            .expect("deflected pass is still an encounter");
+        let base = sc
+            .deflected_encounter_with(&Tier2Config::default(), t_d, dv)
+            .expect("all-off deflected re-fly")
+            .expect("all-off deflected pass is still an encounter");
+        assert_eq!(
+            base.perigee, direct.perigee,
+            "all-off deflected re-fly must match the scenario's own deflected perigee bit-for-bit"
+        );
+
+        // (b) The preconditions, asserted rather than assumed: this pass really is a
+        // miss, and its perigee really is outside Earth. Without both, the
+        // measurement below is just the sibling test in a longer costume.
+        assert!(
+            base.impact_parameter > base.capture_radius,
+            "the chosen impulse must open a clean miss: |B| {:.1} km vs capture {:.1} km",
+            base.impact_parameter / 1e3,
+            base.capture_radius / 1e3,
+        );
+        assert!(
+            base.perigee > base.earth_radius,
+            "the miss geometry must sit outside R_eq for J2 to be in domain: perigee {:.1} km \
+             vs R_eq {:.1} km",
+            base.perigee / 1e3,
+            base.earth_radius / 1e3,
+        );
+
+        // (c) J2 on that miss — the in-domain number, signed as the frontend signs
+        // every shift (positive = pulled inward).
+        let j2_miss = sc
+            .deflected_encounter_with(
+                &Tier2Config {
+                    earth_j2: true,
+                    ..Tier2Config::default()
+                },
+                t_d,
+                dv,
+            )
+            .expect("J2 deflected re-fly")
+            .expect("J2 deflected pass is still an encounter");
+        let miss_shift_km = (base.perigee - j2_miss.perigee) / 1e3;
+
+        // (d) The same term on the impact geometry, measured here rather than quoted,
+        // so the comparison below is between two numbers from one run.
+        let j2_hit = sc
+            .nominal_encounter_with(&Tier2Config {
+                earth_j2: true,
+                ..Tier2Config::default()
+            })
+            .expect("J2 nominal re-fly")
+            .expect("J2 nominal pass is still an encounter");
+        let hit_shift_km = (nominal.perigee - j2_hit.perigee) / 1e3;
+
+        let rel_hit =
+            (j2_hit.capture_radius - nominal.capture_radius).abs() / nominal.capture_radius;
+        let rel_miss = (j2_miss.capture_radius - base.capture_radius).abs() / base.capture_radius;
+
+        // (e) The control that names the mechanism: 1PN on the *same* miss geometry.
+        // Its correction at closest approach is ~1e-9 relative, so if the capture
+        // radius moved for any reason other than the term's own potential reaching
+        // into the reduction, it would move here too.
+        let gr_miss = sc
+            .deflected_encounter_with(
+                &Tier2Config {
+                    relativity: true,
+                    ..Tier2Config::default()
+                },
+                t_d,
+                dv,
+            )
+            .expect("1PN deflected re-fly")
+            .expect("1PN deflected pass is still an encounter");
+        let rel_gr = (gr_miss.capture_radius - base.capture_radius).abs() / base.capture_radius;
+
+        println!(
+            "Earth J2, two geometries, one scenario:\n  \
+             IMPACT (nominal, out of domain): perigee {:.1} km = {:.3} R_eq, shift {:+.4} km, \
+             capture {:.1} → {:.1} km ({:.4} %)\n  \
+             MISS ({:.6} m/s along-track, {:.1} yr lead, IN domain): perigee {:.1} km = \
+             {:.3} R_eq, shift {:+.4} km, capture {:.1} → {:.1} km ({:.5} %)\n  \
+             1PN control on the same miss: capture {:.1} → {:.1} km ({:.2e} relative)",
+            nominal.perigee / 1e3,
+            nominal.perigee / nominal.earth_radius,
+            hit_shift_km,
+            nominal.capture_radius / 1e3,
+            j2_hit.capture_radius / 1e3,
+            rel_hit * 100.0,
+            MISS_DV_M_S,
+            MISS_LEAD_SECONDS / (365.25 * 86_400.0),
+            base.perigee / 1e3,
+            base.perigee / base.earth_radius,
+            miss_shift_km,
+            base.capture_radius / 1e3,
+            j2_miss.capture_radius / 1e3,
+            rel_miss * 100.0,
+            base.capture_radius / 1e3,
+            gr_miss.capture_radius / 1e3,
+            rel_gr,
+        );
+
+        // The impact geometry is out of domain and says so.
+        assert!(
+            rel_hit > 1.0e-3,
+            "the impact geometry should show the out-of-domain capture-radius bias \
+             (expected ~0.69 %), got {:.3e} relative",
+            rel_hit
+        );
+        // The collapse, two ways. First model-free: an order of magnitude at least.
+        assert!(
+            rel_miss < rel_hit / 10.0,
+            "the capture-radius bias must collapse on a geometry outside R_eq: \
+             miss {rel_miss:.3e} vs impact {rel_hit:.3e} relative"
+        );
+        // Then against the 1/r³ the mechanism predicts, with slack for the Legendre
+        // factor, which depends on the latitude of closest approach and differs
+        // between the two passes. Only an upper bound: P₂ can shrink this to nothing
+        // but cannot inflate it past ~1.
+        let predicted = rel_hit * (nominal.perigee / base.perigee).powi(3);
+        assert!(
+            rel_miss < 3.0 * predicted,
+            "the bias should fall as (μ/r)·J2·(R_eq/r)² ∝ 1/r³: predicted ≲ {predicted:.3e}, \
+             measured {rel_miss:.3e} relative"
+        );
+        // And the control: nothing about the reduction itself moves the capture radius.
+        assert!(
+            rel_gr < 1.0e-5,
+            "1PN must leave the capture radius essentially untouched — a change here would \
+             mean the bias is not J2's potential reaching the reduction, got {rel_gr:.3e}"
+        );
+
+        // The frontend cites this number in the force-menu footnote; pin it so the
+        // caption cannot drift from the physics (the SB441_BODIES treatment).
+        let recorded = super::J2_DEFLECTED_MISS_PERIGEE_SHIFT_KM;
+        assert!(
+            (miss_shift_km - recorded).abs() <= 0.02 * recorded.abs().max(1.0e-3),
+            "J2_DEFLECTED_MISS_PERIGEE_SHIFT_KM is {recorded:+.4} km but the miss geometry \
+             measures {miss_shift_km:+.4} km — update the constant (the frontend prints it)"
         );
     }
 }

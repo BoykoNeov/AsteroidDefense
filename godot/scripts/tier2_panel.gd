@@ -1,10 +1,10 @@
 class_name Tier2Panel
 extends Control
-## Tier-2 force-model menu ([P]): switch the four non-Tier-1 perturbations on and
+## Tier-2 force-model menu ([P]): switch the five non-Tier-1 perturbations on and
 ## off and read how far each one moves the predicted b-plane perigee.
 ##
 ## The numbers are not computed here and they are not live-integrated on a keypress:
-## the core measured all four **once** at build time (`Mission.with_tier2_preview`),
+## the core measured all five **once** at build time (`Mission.with_tier2_preview`),
 ## each by re-flying the fixed shipping seed through one term in isolation — the
 ## honest "how much does this piece of physics move the impact" measurement (HANDOFF
 ## §5/§6), never a rebuild that would reproduce the hit by construction. So a toggle
@@ -32,7 +32,11 @@ func _process(_delta: float) -> void:
 
 func _draw() -> void:
 	var lh := _fs + 6.0
-	var rows := 11.0
+	# Derived from the term table, never a literal: the box grew from four terms to
+	# five with this change, and a hardcoded row count is exactly how a panel ends
+	# up drawing its last row outside its own frame. The J2 footnote adds two more
+	# lines, and only while that term is revealed.
+	var rows := 6.5 + float(Sim.TIER2_TERMS.size()) + (2.0 if _show_j2_note() else 0.0)
 	var ph := rows * lh + 2.0 * MARGIN + 4.0
 	var origin := Vector2(size.x * 0.5 - W * 0.5, size.y - ph - 60.0)
 	var bright := Color(1, 1, 1)
@@ -45,8 +49,16 @@ func _draw() -> void:
 	draw_rect(rect, Color(0, 0, 0, 0.88), true)
 	draw_rect(rect, mid, false, 1.2)
 	var x := origin.x + MARGIN
-	var xstate := x + 30.0 * _fs * 0.60       # ON/off column
-	var xval := x + 36.0 * _fs * 0.60         # shift-value column
+	# Columns sized off the font's own measurement of the longest left-hand label,
+	# not a guessed characters-times-0.6·font-size. The J2 row is the longest in the
+	# table and cleared the old guess by ~27 px; the pork readout's columns collided
+	# for exactly this reason last session, and were fixed the same way.
+	var label_w := 0.0
+	for term: Array in Sim.TIER2_TERMS:
+		label_w = maxf(label_w, _font.get_string_size(
+			"[%s] %s" % [term[0], term[2]], HORIZONTAL_ALIGNMENT_LEFT, -1, _fs).x)
+	var xstate := x + label_w + _fs         # ON/off column
+	var xval := xstate + _fs * 3.0          # shift-value column
 	var y := origin.y + MARGIN + _fs
 
 	_t(Vector2(x, y), "TIER-2 FORCE MODEL - PERTURBATION MENU", bright)
@@ -55,14 +67,14 @@ func _draw() -> void:
 	y += lh
 
 	# The shifts are measured on demand (opening this menu kicks it). Until they
-	# land, say what is happening plainly rather than draw four zeroes — a zero here
+	# land, say what is happening plainly rather than draw five zeroes — a zero here
 	# would read as "no effect".
 	if not Sim.tier2_ready:
 		var msg := ""
 		if not Sim.mission_online:
 			msg = "AWAITING THREAT SOLUTION"
 		elif Sim.tier2_measuring:
-			msg = "MEASURING FOUR FORCE-MODEL SHIFTS (~2 MIN) ..."
+			msg = "MEASURING %d FORCE-MODEL SHIFTS (~2 MIN) ..." % Sim.TIER2_TERMS.size()
 		else:
 			msg = "PRESS [P] AGAIN TO MEASURE FORCE-MODEL SHIFTS"
 		_t(Vector2(x, y), msg, dim)
@@ -88,11 +100,36 @@ func _draw() -> void:
 	y += lh * 0.35
 	_t(Vector2(x, y), "-".repeat(62), faint)
 	y += lh
+
+	# The one term whose number needs its own sentence. Every shift above is measured
+	# on the same fixed seed — which has to be the case, since they are all
+	# subtracted from the same baseline — and that seed is the designed impact,
+	# 3000 km from Earth's centre. J2's expansion is only valid outside R_eq, so
+	# unlike its four neighbours this figure is measured out of its own domain. It is
+	# still what this geometry does, and the in-domain number is right beside it.
+	if _show_j2_note():
+		var miss := Sim.j2_miss_shift_km()
+		_t(Vector2(x, y), "* J2 IS MEASURED ON THE NOMINAL - A 3000 KM IMPACT,", dim)
+		y += lh
+		_t(Vector2(x, y), "  INSIDE EARTH. ON A DEFLECTED MISS: %.2f KM %s" %
+			[absf(miss), "INWARD" if miss > 0.0 else "OUTWARD"], dim)
+		y += lh
+
 	_t(Vector2(x, y), "NOMINAL PERIGEE", dim)
 	_t(Vector2(xstate, y), "%8.1f KM  (CAPTURE %.0f KM)" %
 		[Sim.nom_perigee_km, Sim.cap_km], mid)
 	y += lh
-	_t(Vector2(x, y), "[G/Y/A/S] TOGGLE TERM        [P] CLOSE", dim)
+	_t(Vector2(x, y), "[G/Y/A/S/O] TOGGLE TERM      [P] CLOSE", dim)
+
+
+## Whether to draw the J2 domain footnote: only when that term is revealed (an
+## unexplained caveat under four other terms reads as applying to all of them), only
+## once there is a measured shift for it to qualify, and only when the core actually
+## handed over an in-domain number to cite. `_draw` sizes the box off this too, so
+## it must answer the same question the drawing does — one function, called twice.
+func _show_j2_note() -> bool:
+	return (Sim.tier2_ready and Sim.tier2_on.get("j2", false)
+		and is_finite(Sim.j2_miss_shift_km()))
 
 
 ## The right-hand cell for one term: its measured shift when switched on, or a

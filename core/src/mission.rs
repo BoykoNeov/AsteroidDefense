@@ -51,7 +51,7 @@ use nalgebra::Vector3;
 use crate::deflection::{DeflectionError, DeflectionScenario};
 use crate::epoch::Epoch;
 use crate::geometry::BPlaneEncounter;
-use crate::lambert::{lambert_universal, LambertError};
+use crate::lambert::{lambert_universal_multirev, LambertError, MultiRevBranch};
 use crate::launch_vehicle::LaunchVehicle;
 use crate::perturber_field::EphemerisPerturber;
 use crate::scenario::RealFieldScenario;
@@ -81,6 +81,19 @@ pub struct TransferMetrics {
     /// the difference is frame-invariant). This is the **impact direction**: the
     /// on-demand verify imparts the impulse along this vector.
     pub v_rel_vec: Vector3<f64>,
+    /// How many complete laps of the Sun this transfer makes before arrival.
+    ///
+    /// `0` is the direct arc. Anything higher is a genuine multi-revolution
+    /// transfer ([`lambert_universal_multirev`]) that the grid selected because it
+    /// costs *less* `C3` than the direct arc over the same span — which is common
+    /// at long times of flight, where the direct arc is forced onto a slow, high-
+    /// energy conic while a tighter orbit can lap and still arrive on time.
+    ///
+    /// Carried on the metrics (rather than left implicit) because a cell's `C3` is
+    /// only interpretable next to the trajectory that earns it: a mission that laps
+    /// the Sun once has a different cruise, different operations, and different
+    /// risk than a direct shot with the same launch energy.
+    pub revolutions: u32,
 }
 
 /// One cell of the porkchop grid: either no transfer exists (a Lambert gap or a
@@ -171,18 +184,52 @@ pub fn transfer_metrics(
     mu_sun: f64,
     prograde: bool,
 ) -> Result<Option<TransferMetrics>, LambertError> {
-    let sol = match lambert_universal(
+    transfer_metrics_for_revolutions(
+        earth_helio,
+        asteroid_helio,
+        tof_seconds,
+        mu_sun,
+        prograde,
+        0,
+        MultiRevBranch::LowZ,
+    )
+}
+
+/// The `N`-revolution generalisation of [`transfer_metrics`]: identical metrics,
+/// for the transfer that makes `revolutions` complete laps on the way (and, for
+/// `revolutions ≥ 1`, the requested `branch` of that revolution's two solutions).
+///
+/// `revolutions = 0` is exactly the direct arc, so [`transfer_metrics`] is this
+/// function with the multi-rev arguments pinned — one code path, no chance of the
+/// direct and lapping cases drifting apart in how they compute `C3` or the
+/// along-track projection.
+pub fn transfer_metrics_for_revolutions(
+    earth_helio: StateVector,
+    asteroid_helio: StateVector,
+    tof_seconds: f64,
+    mu_sun: f64,
+    prograde: bool,
+    revolutions: u32,
+    branch: MultiRevBranch,
+) -> Result<Option<TransferMetrics>, LambertError> {
+    let sol = match lambert_universal_multirev(
         earth_helio.position,
         asteroid_helio.position,
         tof_seconds,
         mu_sun,
         prograde,
+        revolutions,
+        branch,
     ) {
         Ok(s) => s,
-        // A degenerate/non-converging geometry is a grid gap, not an error.
-        Err(LambertError::DegenerateGeometry { .. }) | Err(LambertError::NonConvergence { .. }) => {
-            return Ok(None)
-        }
+        // A degenerate/non-converging geometry is a grid gap, not an error — and so
+        // is "this many laps do not fit in this time of flight". Matched variant by
+        // variant rather than with a wildcard, so a future Lambert failure mode
+        // fails this match at compile time instead of silently becoming one more
+        // blank porkchop cell.
+        Err(LambertError::DegenerateGeometry { .. })
+        | Err(LambertError::NonConvergence { .. })
+        | Err(LambertError::NoSolutionForRevolutions { .. }) => return Ok(None),
         Err(e @ LambertError::InvalidInput { .. }) => return Err(e),
     };
 
@@ -200,6 +247,7 @@ pub fn transfer_metrics(
     };
 
     Ok(Some(TransferMetrics {
+        revolutions,
         c3_km2_s2,
         arrival_v_rel_ms,
         along_track_proj_ms,
@@ -255,9 +303,76 @@ fn helio(sun_ssb: StateVector, body_ssb: StateVector) -> StateVector {
     )
 }
 
+/// The **cheapest** transfer for one launch window across the direct arc and every
+/// lapping alternative up to `max_revolutions` — the selection the porkchop grid
+/// makes per cell.
+///
+/// # Why a grid must consider laps at all
+/// The direct (`N = 0`) arc is the only transfer for short times of flight, but as
+/// the span grows it becomes a *worse and worse* deal: with the endpoints fixed,
+/// arriving later on a non-lapping conic means crawling along an ever-larger,
+/// higher-energy orbit. Past roughly one orbital period the sensible trajectory is
+/// usually to fly a tighter, faster orbit and let it lap the Sun once on the way —
+/// which is cheaper in `C3`, often dramatically. A grid that only ever solved
+/// `N = 0` would therefore paint its long-time-of-flight region as far more
+/// expensive than a real mission designer would find it.
+///
+/// This function is also the other half of a correctness fix, and the pairing is
+/// worth recording. [`lambert_universal`] once let its Newton iteration overshoot
+/// into the multi-revolution band, so long-time-of-flight cells were *accidentally*
+/// showing lapping transfers — the right kind of trajectory, arrived at by a bug,
+/// and mislabelled as direct. `SINGLE_REV_Z_MAX` closed that. Selecting over `N`
+/// here restores those cheap transfers deliberately, with
+/// [`TransferMetrics::revolutions`] saying which one a cell actually is.
+///
+/// Ties and gaps: each `N ≥ 1` contributes both of its branches; whichever feasible
+/// candidate has the lowest `C3` wins; `Ok(None)` only if *no* `N` yields a
+/// transfer.
+pub fn best_transfer_metrics(
+    earth_helio: StateVector,
+    asteroid_helio: StateVector,
+    tof_seconds: f64,
+    mu_sun: f64,
+    prograde: bool,
+    max_revolutions: u32,
+) -> Result<Option<TransferMetrics>, LambertError> {
+    let mut best: Option<TransferMetrics> = None;
+    for n in 0..=max_revolutions {
+        let branches: &[MultiRevBranch] = if n == 0 {
+            &[MultiRevBranch::LowZ] // ignored at N = 0; one call, not two
+        } else {
+            &[MultiRevBranch::LowZ, MultiRevBranch::HighZ]
+        };
+        for &branch in branches {
+            let candidate = transfer_metrics_for_revolutions(
+                earth_helio,
+                asteroid_helio,
+                tof_seconds,
+                mu_sun,
+                prograde,
+                n,
+                branch,
+            )?;
+            if let Some(m) = candidate {
+                let better = best.map(|b| m.c3_km2_s2 < b.c3_km2_s2).unwrap_or(true);
+                if better {
+                    best = Some(m);
+                }
+            }
+        }
+    }
+    Ok(best)
+}
+
 /// Build a launch-date × arrival-date porkchop over a real scenario: for every
 /// (launch, arrival) pair with `arrival − launch ≥ min_tof_seconds`, solve the
 /// heliocentric Lambert transfer and record its vehicle-independent metrics.
+///
+/// `max_revolutions` bounds how many complete laps a cell's transfer may make;
+/// each cell keeps the lowest-`C3` option across that range (see
+/// [`best_transfer_metrics`] for why a long-time-of-flight grid needs this, and
+/// [`TransferMetrics::revolutions`] for reading back which one won). Pass `0` for
+/// a strictly direct-arc grid.
 ///
 /// Endpoints are real: Earth from the scenario's ephemeris, the asteroid from its
 /// integrated nominal trajectory (the *pre-deflection* orbit — the spacecraft
@@ -270,6 +385,7 @@ pub fn porkchop_grid(
     arrival_epochs: &[Epoch],
     min_tof_seconds: f64,
     prograde: bool,
+    max_revolutions: u32,
 ) -> Result<Porkchop, MissionError> {
     if launch_epochs.is_empty() || arrival_epochs.is_empty() {
         return Err(MissionError::InvalidInput(
@@ -322,7 +438,14 @@ pub fn porkchop_grid(
             let tof = t_a.tdb_seconds_past_j2000() - t_l.tdb_seconds_past_j2000();
             let cell = match (&ast_helio[j], tof >= min_tof_seconds) {
                 (Some(ast), true) => {
-                    match transfer_metrics(earth_helio[i], *ast, tof, mu_sun, prograde) {
+                    match best_transfer_metrics(
+                        earth_helio[i],
+                        *ast,
+                        tof,
+                        mu_sun,
+                        prograde,
+                        max_revolutions,
+                    ) {
                         Ok(Some(m)) => PorkchopCell::Transfer(m),
                         // Lambert gap or (guarded above) invalid input → no cell.
                         Ok(None) | Err(_) => PorkchopCell::NoTransfer,
@@ -540,7 +663,7 @@ mod tests {
         // the arrival velocity, then *define* the asteroid's velocity to match it.
         let r2 = Vector3::new(-0.2 * AU, 1.3 * AU, 0.05 * AU);
         let tof = 0.35 * 365.25 * 86400.0;
-        let sol = lambert_universal(earth.position, r2, tof, MU_SUN, true).unwrap();
+        let sol = crate::lambert::lambert_universal(earth.position, r2, tof, MU_SUN, true).unwrap();
         let asteroid = StateVector::new(r2, sol.v2);
 
         let m = transfer_metrics(earth, asteroid, tof, MU_SUN, true)
@@ -568,7 +691,7 @@ mod tests {
         );
         let r2 = Vector3::new(0.1 * AU, 1.25 * AU, 0.0);
         let tof = 0.3 * 365.25 * 86400.0;
-        let sol = lambert_universal(earth.position, r2, tof, MU_SUN, true).unwrap();
+        let sol = crate::lambert::lambert_universal(earth.position, r2, tof, MU_SUN, true).unwrap();
         // Asteroid moving fast prograde-ish, so the transfer (slower at arrival)
         // meets it with a component opposing its velocity.
         let asteroid = StateVector::new(r2, sol.v2 * 1.4);
@@ -596,6 +719,7 @@ mod tests {
         // A cell at a Mars-class C3 delivers the vehicle's tabulated payload, and
         // the along-track Δv is β·(m/M)·proj on that mass.
         let metrics = TransferMetrics {
+            revolutions: 0,
             c3_km2_s2: 15.0,
             arrival_v_rel_ms: 6000.0,
             along_track_proj_ms: 4000.0,
@@ -616,6 +740,7 @@ mod tests {
         // Beyond Atlas V 551's tabulated C3, no mass is delivered — the cell is
         // honestly infeasible, not extrapolated.
         let metrics = TransferMetrics {
+            revolutions: 0,
             c3_km2_s2: ATLAS_V_551.max_c3_km2_s2() + 10.0,
             arrival_v_rel_ms: 5000.0,
             along_track_proj_ms: 3000.0,
@@ -711,6 +836,7 @@ mod tests {
         // raising the pass's perpendicular offset (perigee) monotonically with the
         // delivered mass — the clean regime the solver assumes.
         let metrics = TransferMetrics {
+            revolutions: 0,
             c3_km2_s2: 20.0,
             arrival_v_rel_ms: 5000.0,
             along_track_proj_ms: 0.0,
@@ -763,6 +889,91 @@ mod tests {
 
     // --- The real-field composition, kernel-gated (cheap: ~2 propagations) ----
 
+    /// **The long-time-of-flight selection, kernel-free.** At a span well past one
+    /// orbital period the lapping transfer should beat the direct arc on `C3`, and
+    /// [`best_transfer_metrics`] should pick it and *say so* via
+    /// [`TransferMetrics::revolutions`].
+    ///
+    /// This is the test that pins the coupling between two changes that only make
+    /// sense together: clamping [`lambert_universal`] to the single-revolution band
+    /// stopped long-span cells from accidentally showing lapping transfers, and
+    /// selecting over `N` puts them back deliberately and labelled. Asserting the
+    /// `N = 1` option is genuinely *cheaper* is what makes the selection meaningful
+    /// rather than decorative — a grid that merely offered the choice and always
+    /// took `N = 0` would pass a weaker test.
+    #[test]
+    fn a_long_span_prefers_the_lapping_transfer_and_labels_it() {
+        let au = 1.495_978_707e11;
+        let mu_sun = 1.327_124_400_18e20;
+        let year = 365.25 * 86400.0;
+
+        // Earth-like departure, a target further out and well round the Sun.
+        let earth = StateVector::new(
+            Vector3::new(au, 0.0, 0.0),
+            Vector3::new(0.0, 29_780.0, 0.0),
+        );
+        let ast = StateVector::new(
+            Vector3::new(-0.3 * au, 1.25 * au, 0.05 * au),
+            Vector3::new(-22_000.0, -6_000.0, 500.0),
+        );
+        let tof = 2.6 * year;
+
+        let direct = transfer_metrics(earth, ast, tof, mu_sun, true)
+            .expect("no invalid input")
+            .expect("the direct arc exists");
+        let best = best_transfer_metrics(earth, ast, tof, mu_sun, true, 1)
+            .expect("no invalid input")
+            .expect("some transfer exists");
+
+        println!(
+            "2.6 yr span: direct arc C3 = {:.2} km²/s² (N=0) → best C3 = {:.2} km²/s² (N={})",
+            direct.c3_km2_s2, best.c3_km2_s2, best.revolutions
+        );
+        assert_eq!(direct.revolutions, 0, "transfer_metrics is the direct arc");
+        assert_eq!(
+            best.revolutions, 1,
+            "over this span the lapping transfer should win (direct C3 {:.3}, best C3 {:.3})",
+            direct.c3_km2_s2, best.c3_km2_s2
+        );
+        assert!(
+            best.c3_km2_s2 < direct.c3_km2_s2,
+            "the selected transfer must be cheaper than the direct arc: \
+             {:.3} vs {:.3} km²/s²",
+            best.c3_km2_s2,
+            direct.c3_km2_s2
+        );
+    }
+
+    /// A short span has no room to lap, so raising `max_revolutions` must change
+    /// nothing — the selection cannot invent transfers, only choose among real
+    /// ones. Guards against a selector that returned a bogus `N ≥ 1` candidate
+    /// (which would then be *cheaper* than the truth and always win).
+    #[test]
+    fn a_short_span_is_unaffected_by_allowing_revolutions() {
+        let au = 1.495_978_707e11;
+        let mu_sun = 1.327_124_400_18e20;
+        let earth = StateVector::new(
+            Vector3::new(au, 0.0, 0.0),
+            Vector3::new(0.0, 29_780.0, 0.0),
+        );
+        let ast = StateVector::new(
+            Vector3::new(0.2 * au, 1.1 * au, 0.1 * au),
+            Vector3::new(-20_000.0, 8_000.0, 300.0),
+        );
+        let tof = 0.22 * 365.25 * 86400.0;
+
+        let direct = transfer_metrics(earth, ast, tof, mu_sun, true).unwrap().unwrap();
+        for max_rev in [0, 1, 3] {
+            let best = best_transfer_metrics(earth, ast, tof, mu_sun, true, max_rev)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                best, direct,
+                "a short span must stay the direct arc even with max_revolutions={max_rev}"
+            );
+        }
+    }
+
     #[test]
     fn coupled_deflection_flips_the_real_field_hit() {
         // The discriminating real-field check (not a smoke test): the coupled
@@ -789,7 +1000,7 @@ mod tests {
             .map(|j| Epoch::from_tdb_seconds_past_j2000(t0 + 0.35 * span + (j as f64) * 40.0 * day))
             .collect();
 
-        let pork = porkchop_grid(&sc, &launch_epochs, &arrival_epochs, 30.0 * day, true)
+        let pork = porkchop_grid(&sc, &launch_epochs, &arrival_epochs, 30.0 * day, true, 1)
             .expect("grid builds");
 
         // Pick the feasible cell with the strongest along-track coupling.

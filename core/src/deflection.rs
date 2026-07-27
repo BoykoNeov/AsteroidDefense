@@ -43,7 +43,7 @@ use nalgebra::Vector3;
 use crate::clock::{Clock, ClockError};
 use crate::close_approach::{closest_approach, GeocentricState, ScanOptions};
 use crate::epoch::Epoch;
-use crate::forces::ForceModel;
+use crate::forces::{ForceModel, GRAVITATIONAL_CONSTANT};
 use crate::geometry::{BPlaneEncounter, GeometryError};
 use crate::integrator::{Dop853, IntegratorError};
 use crate::state::StateVector;
@@ -279,12 +279,11 @@ impl StandoffNuclear {
 /// The bar the nuclear term is judged against: an impulse that is a large
 /// fraction of this does not deflect a body, it takes it apart.
 pub fn escape_speed_ms(mass_kg: f64, radius_m: f64) -> Option<f64> {
-    const G: f64 = 6.674_30e-11;
     let ok = mass_kg.is_finite() && mass_kg > 0.0 && radius_m.is_finite() && radius_m > 0.0;
     if !ok {
         return None;
     }
-    Some((2.0 * G * mass_kg / radius_m).sqrt())
+    Some((2.0 * GRAVITATIONAL_CONSTANT * mass_kg / radius_m).sqrt())
 }
 
 /// What a given Δv does to the body, in the terms the published simulations

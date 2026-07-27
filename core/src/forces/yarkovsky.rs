@@ -134,6 +134,10 @@ impl ForceModel for YarkovskyA2 {
 mod tests {
     use super::*;
     use crate::forces::point_mass::{FixedPerturber, PointMassGravity};
+    use crate::forces::secular_oracle::{
+        closed_form_inverse_square as secular_da_dt_closed_form, osculating_a, slope_per_step,
+        time_averaged as secular_da_dt_time_averaged,
+    };
     use crate::forces::CompositeForce;
     use crate::integrator::{Dop853, Integrator};
 
@@ -196,67 +200,6 @@ mod tests {
         ));
     }
 
-    /// Osculating semi-major axis from the heliocentric state, via vis-viva:
-    /// `a = 1/(2/r − v²/μ)`.
-    fn osculating_a(state: &StateVector, mu: f64) -> f64 {
-        let r = state.position.norm();
-        let v2 = state.velocity.norm_squared();
-        1.0 / (2.0 / r - v2 / mu)
-    }
-
-    /// Least-squares slope of `ys` against integer index `0..n`.
-    fn slope_per_step(ys: &[f64]) -> f64 {
-        let n = ys.len() as f64;
-        let mean_x = (n - 1.0) / 2.0;
-        let mean_y = ys.iter().sum::<f64>() / n;
-        let (mut num, mut den) = (0.0, 0.0);
-        for (i, &y) in ys.iter().enumerate() {
-            let dx = i as f64 - mean_x;
-            num += dx * (y - mean_y);
-            den += dx * dx;
-        }
-        num / den
-    }
-
-    /// The **time-averaged** (uniform-in-mean-anomaly) secular da/dt for a
-    /// transverse `A2·(r₀/r)^d` accel, computed straight from the Gauss planetary
-    /// equation — independently of [`YarkovskyA2`] (the transverse magnitude comes
-    /// from the `A2·(r₀/r)^d` scalar, never from the term's `acceleration()`), so
-    /// a magnitude/direction bug in the term cannot cancel against the oracle.
-    ///
-    /// Sampling uniformly in mean anomaly `M` is uniform in *time* by construction
-    /// — the weighting the advisor flagged as make-or-break: a uniform-in-true-
-    /// anomaly average would be wrong by ~10% at e≈0.2.
-    fn secular_da_dt_time_averaged(a2: f64, r0: f64, d: f64, a: f64, e: f64, mu: f64) -> f64 {
-        let n = (mu / (a * a * a)).sqrt(); // mean motion
-        let samples = 4000;
-        let mut sum = 0.0;
-        for i in 0..samples {
-            let m = std::f64::consts::TAU * (i as f64) / (samples as f64);
-            // Solve Kepler M = E − e·sinE for E (Newton; e is modest).
-            let mut ecc = m;
-            for _ in 0..60 {
-                let f = ecc - e * ecc.sin() - m;
-                let fp = 1.0 - e * ecc.cos();
-                ecc -= f / fp;
-            }
-            let r = a * (1.0 - e * ecc.cos());
-            // p/r = 1 + e·cosν, with p = a(1−e²).
-            let one_plus_ecos_nu = a * (1.0 - e * e) / r;
-            let a_t = a2 * (r0 / r).powf(d);
-            // Gauss: da/dt = (2/(n√(1−e²)))·[e·sinν·a_R + (p/r)·a_T], a_R = 0.
-            sum += 2.0 / (n * (1.0 - e * e).sqrt()) * one_plus_ecos_nu * a_t;
-        }
-        sum / (samples as f64)
-    }
-
-    /// Closed form of the same average (d = 2): `2·A2·r₀²/(n·a²·(1−e²))`. A cross-
-    /// check on the numerical time-average's weighting algebra.
-    fn secular_da_dt_closed_form(a2: f64, r0: f64, a: f64, e: f64, mu: f64) -> f64 {
-        let n = (mu / (a * a * a)).sqrt();
-        2.0 * a2 * r0 * r0 / (n * a * a * (1.0 - e * e))
-    }
-
     /// Integrate an orbit under Newtonian gravity + the Yarkovsky term and measure
     /// the secular da/dt by **stroboscopic** sampling of the osculating semi-major
     /// axis (once per period, so the intra-orbit wiggle cancels), least-squares
@@ -289,18 +232,9 @@ mod tests {
         slope_per_step(&samples) / period
     }
 
-    #[test]
-    fn oracle_time_average_matches_the_closed_form() {
-        // The two independent oracles must agree — validates the uniform-M
-        // weighting before either is trusted to judge the term.
-        for &e in &[0.0, 0.2, 0.45] {
-            let a = 1.1 * AU;
-            let num = secular_da_dt_time_averaged(1e-9, AU, 2.0, a, e, MU_SUN);
-            let cf = secular_da_dt_closed_form(1e-9, AU, a, e, MU_SUN);
-            let rel = (num - cf).abs() / cf.abs();
-            assert!(rel < 1e-4, "e={e}: numerical {num} vs closed form {cf} (rel {rel:.2e})");
-        }
-    }
+    // The oracle-vs-closed-form agreement check moved with the oracle itself, to
+    // `secular_oracle::tests::time_average_matches_the_inverse_square_closed_form`
+    // — it guards the shared machinery, not this term.
 
     #[test]
     fn circular_orbit_drifts_at_the_transverse_rate() {

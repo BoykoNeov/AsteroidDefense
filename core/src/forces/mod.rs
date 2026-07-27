@@ -35,11 +35,32 @@ pub mod oblateness;
 pub mod point_mass;
 pub mod relativity;
 pub mod srp;
+pub mod tractor;
 pub mod yarkovsky;
+
+/// Test-only oracles shared by the terms that produce a **secular** signature, so
+/// the Yarkovsky and gravity-tractor suites judge themselves against *one*
+/// implementation of the Gauss planetary equation rather than two copies that can
+/// drift apart. See [`secular_oracle`] for why the two terms can share it at all.
+#[cfg(test)]
+pub(crate) mod secular_oracle;
 
 use crate::epoch::Epoch;
 use crate::state::StateVector;
 use nalgebra::Vector3;
+
+/// Newton's gravitational constant, m³·kg⁻¹·s⁻² (CODATA 2018).
+///
+/// The one place `G` is written down. It appears in two unrelated-looking places
+/// that must not drift: the surface escape speed a nuclear nudge is judged against
+/// ([`crate::deflection::escape_speed_ms`]) and the gravity tractor's tow
+/// acceleration `G·m/d²` ([`tractor::GravityTractor`]).
+///
+/// Note this is **not** how the ephemeris perturbers get their gravity: those
+/// carry `GM` (μ) directly from the kernel headers, because `GM` is measured to
+/// far more digits than `G` and `M` separately are. `G` is only needed where a
+/// mass in kilograms is the natural input — a spacecraft's, or an asteroid's.
+pub const GRAVITATIONAL_CONSTANT: f64 = 6.674_30e-11;
 
 /// Failure modes of a force-model evaluation.
 ///
@@ -108,6 +129,32 @@ pub trait ForceModel: Send + Sync {
     /// relativity, Yarkovsky, SRP shadowing) need it, even though pure point-mass
     /// gravity uses only the position.
     fn acceleration(&self, epoch: Epoch, state: &StateVector) -> Result<Vector3<f64>, ForceError>;
+}
+
+/// A borrowed force model that satisfies [`ForceModel`] by delegation — the
+/// adapter that lets an owned [`CompositeForce`] be built *on top of* a field
+/// someone else owns.
+///
+/// [`CompositeForce`] holds `Box<dyn ForceModel>`, so composing with an existing
+/// `&dyn ForceModel` would otherwise require cloning or re-building that field.
+/// Wrapping the reference is enough, and it is the exact decorator the
+/// [`ForceModel`] trait's `Sync` bound was chosen to permit (see the note there:
+/// `&T: Send` requires `T: Sync`).
+///
+/// The motivating caller is the gravity tractor. A
+/// [`DeflectionScenario`](crate::deflection::DeflectionScenario) borrows the base
+/// field for its whole lifetime, but a tractor *duration* solve re-propagates
+/// under a **different** field on every probe — base + a tow window of the length
+/// currently being tried. `ForceRef` makes each probe's field
+/// `CompositeForce::new().with(ForceRef(base)).with(tractor)`, so the base field
+/// is borrowed rather than duplicated and the probes cannot drift from the
+/// nominal's physics.
+pub struct ForceRef<'a>(pub &'a dyn ForceModel);
+
+impl ForceModel for ForceRef<'_> {
+    fn acceleration(&self, epoch: Epoch, state: &StateVector) -> Result<Vector3<f64>, ForceError> {
+        self.0.acceleration(epoch, state)
+    }
 }
 
 /// The force model as a **sum of toggleable terms** (HANDOFF §5). Enabling a tier

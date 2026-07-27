@@ -82,8 +82,8 @@ pub fn along_track_unit(state: StateVector) -> Option<Vector3<f64>> {
 /// `beta` (β ≥ 1) is the momentum-enhancement factor from ejecta — β = 1 is pure
 /// momentum transfer, and DART measured β ≈ 3.6 at Dimorphos (§9). This produces
 /// the Δv *magnitude* the solver consumes; it is deliberately not a force term.
-/// The nuclear-standoff and gravity-tractor ends of the deflection spectrum
-/// (§5) are deferred — the MVP curve is kinetic-only.
+/// [`StandoffNuclear`] is the high-Δv end of the same spectrum (§5); the
+/// gravity-tractor end is a force term, not an impulse, and is not here.
 pub fn kinetic_impactor_dv(
     beta: f64,
     impactor_mass_kg: f64,
@@ -91,6 +91,248 @@ pub fn kinetic_impactor_dv(
     asteroid_mass_kg: f64,
 ) -> f64 {
     beta * (impactor_mass_kg / asteroid_mass_kg) * relative_speed_ms
+}
+
+/// The impactor mass (kg) that imparts `dv_ms` — the exact inverse of
+/// [`kinetic_impactor_dv`], so a required Δv can be quoted in kilograms.
+///
+/// This is a *closed-form* invert and deliberately not a root-find: the momentum
+/// model is linear in mass. [`crate::mission::required_impactor_mass`] solves
+/// rather than inverts because it works in the **coupled** direction, where the
+/// arrival `v_rel` is fixed by the transfer and only its along-track projection
+/// deflects — there the perigee-vs-mass curve runs through the full n-body field
+/// and has no inverse. Along a chosen direction, this is arithmetic.
+///
+/// Returns `None` for a non-positive or non-finite denominator (β, `v_rel`, or M).
+pub fn kinetic_impactor_mass_for_dv(
+    dv_ms: f64,
+    beta: f64,
+    relative_speed_ms: f64,
+    asteroid_mass_kg: f64,
+) -> Option<f64> {
+    let denom = beta * relative_speed_ms;
+    let ok = denom.is_finite()
+        && denom > 0.0
+        && asteroid_mass_kg.is_finite()
+        && asteroid_mass_kg > 0.0
+        && dv_ms.is_finite();
+    if !ok {
+        return None;
+    }
+    Some(dv_ms * asteroid_mass_kg / denom)
+}
+
+// --- Nuclear standoff burst (§5) ---------------------------------------------
+
+/// Joules per kilotonne of TNT equivalent. Definitional (1 kt ≡ 10⁹ cal at
+/// 4.184 J/cal), not measured — exact by convention.
+pub const JOULES_PER_KILOTONNE: f64 = 4.184e12;
+
+/// A standoff nuclear burst, modeled as **energy deposited → surface ablation →
+/// momentum → Δv** (§5) — deflection physics only, never device design.
+///
+/// # The model
+/// A device of yield `Y` detonated at a standoff height above one hemisphere
+/// radiates neutrons and X-rays into a thin surface layer. A fraction
+/// [`coupling_efficiency`](Self::coupling_efficiency) of the yield is absorbed;
+/// the ablated layer leaves at kilometres per second, and the recoil is
+///
+/// ```text
+///   Δv = C_m · η · Y / M
+/// ```
+///
+/// with `C_m` the momentum delivered per joule *absorbed*
+/// ([`momentum_coupling_ns_per_j`](Self::momentum_coupling_ns_per_j)) and `M` the
+/// asteroid mass. Both coefficients are pinned to published simulation output —
+/// see [`DEARBORN_2007`](Self::DEARBORN_2007).
+///
+/// # Why yield is the axis, and mass is not
+/// The knob here is **yield**, taken as an opaque scalar. Yield does not scale
+/// linearly with device mass, and the mass→yield map is precisely where §5's
+/// *"model this as deflection physics only — never weapon design"* bites. So a
+/// launch window's delivered mass never converts to a yield in this crate; it can
+/// only gate whether a device of some stated class is carriable at all, which is a
+/// payload question the mission layer already answers.
+///
+/// # Direction is chosen, and that is the physical difference from a kinetic impactor
+/// A kinetic impactor's Δv points along the arrival relative velocity — the
+/// geometry of the transfer picks the direction, and the mission layer can only
+/// take the along-track *projection* it happens to get
+/// ([`crate::mission::impact_impulse`]). A standoff burst ablates whichever
+/// hemisphere the device is placed over, so its impulse direction is a mission
+/// choice. That is why this term is modeled as a Δv **magnitude** applied along a
+/// direction the caller picks, and why the headline comparison quotes it
+/// along-track: not an idealization glossing over geometry, but the geometry
+/// actually being free.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StandoffNuclear {
+    /// Fraction of device yield absorbed by the surface (0 < η ≤ 1). Folds the
+    /// solid angle the body subtends at the burst height together with the
+    /// material's absorption of the neutron/X-ray flux.
+    pub coupling_efficiency: f64,
+    /// Momentum imparted per joule **absorbed**, N·s/J. The ablation physics:
+    /// how much of the deposited energy leaves as directed ejecta momentum
+    /// rather than radiation or internal heat.
+    pub momentum_coupling_ns_per_j: f64,
+}
+
+impl StandoffNuclear {
+    /// Coefficients derived from the **"Nudge Model"** of D. S. P. Dearborn,
+    /// *The Use of Nuclear Explosives To Disrupt or Divert Asteroids*,
+    /// UCRL-PROC-228569, Lawrence Livermore National Laboratory, 2007
+    /// (<https://www.osti.gov/servlets/purl/902607>).
+    ///
+    /// # The published case, in full
+    /// - Body: the paper's "standard structure" — **1000 m diameter**, 250 m
+    ///   granite core (2.63 g/cc) inside a 250 m tuff mantle (1.91 g/cc), total
+    ///   mass **1.05 × 10¹² kg**, surface escape speed ≈ **0.5 m/s**.
+    /// - Device: **100 kt** at **300 m** above the surface. That height is
+    ///   `d/R = 0.6`, which the same paper independently names as the **optimum
+    ///   height of burst**, so this fixture sits at the geometry the model is
+    ///   meant to describe rather than at an arbitrary one.
+    /// - Energy sourced into the surface zones: **11.5 kt** → η = 11.5/100 =
+    ///   **0.115**.
+    /// - Outcome: net speed change of the coalesced body **≈ 6.5 mm/s**, with
+    ///   **99 %** of the mass remaining bound.
+    ///
+    /// Inverting that single case for the momentum coupling gives
+    /// `C_m = M·Δv / E_abs = 1.05e12 × 6.5e-3 / (11.5 × 4.184e12)` =
+    /// **1.418 × 10⁻⁴ N·s/J**.
+    ///
+    /// # It is cross-checked against a different paper's different simulation
+    /// Dearborn & Bruck, *Limits on the use of nuclear explosives for asteroid
+    /// deflection*, LLNL-PROC-485160 (Planetary Defense Conference, 2011), report
+    /// for a separate run that *"[t]en kilotons deposition then converts about
+    /// 4000 tons of surface material into plasma expanding at over 2 km/s"* —
+    /// which is `C_m = 4.0e6 × 2000 / (10 × 4.184e12)` = **1.91 × 10⁻⁴ N·s/J**.
+    ///
+    /// The two disagree by **36 %**, and the 2011 figure is a *lower* bound
+    /// ("over 2 km/s"), so they bracket rather than contradict. **That spread is
+    /// the honest uncertainty of this term** — it is a coefficient good to well
+    /// under a factor of two, not to three digits, and nothing downstream should
+    /// quote it as though it were better. `1.418e-4` is used because it comes
+    /// from the fully-specified case (body, yield, height, absorbed energy and
+    /// outcome all stated together) rather than from one parenthetical clause.
+    pub const DEARBORN_2007: Self = Self {
+        coupling_efficiency: 0.115,
+        momentum_coupling_ns_per_j: 1.418e-4,
+    };
+
+    /// The along-burst Δv magnitude (m/s) a device of `yield_kilotonnes` imparts
+    /// to a body of `asteroid_mass_kg`.
+    ///
+    /// Returns `None` on non-finite or non-positive inputs. **Says nothing about
+    /// whether the body survives** — pair it with [`disruption_regime`], because
+    /// the published model is a small-nudge model and stops being one well before
+    /// the yield stops rising.
+    pub fn dv_ms(&self, yield_kilotonnes: f64, asteroid_mass_kg: f64) -> Option<f64> {
+        let ok = self.is_valid()
+            && yield_kilotonnes.is_finite()
+            && yield_kilotonnes >= 0.0
+            && asteroid_mass_kg.is_finite()
+            && asteroid_mass_kg > 0.0;
+        if !ok {
+            return None;
+        }
+        let absorbed_j = self.coupling_efficiency * yield_kilotonnes * JOULES_PER_KILOTONNE;
+        Some(self.momentum_coupling_ns_per_j * absorbed_j / asteroid_mass_kg)
+    }
+
+    /// The yield (kilotonnes) needed for `dv_ms` — the closed-form inverse of
+    /// [`dv_ms`](Self::dv_ms), which is what lets the required-Δv curve be quoted
+    /// in kilotonnes without a second root-find.
+    pub fn yield_kilotonnes_for_dv(&self, dv_ms: f64, asteroid_mass_kg: f64) -> Option<f64> {
+        let ok = self.is_valid()
+            && dv_ms.is_finite()
+            && dv_ms >= 0.0
+            && asteroid_mass_kg.is_finite()
+            && asteroid_mass_kg > 0.0;
+        if !ok {
+            return None;
+        }
+        let per_kt = self.momentum_coupling_ns_per_j
+            * self.coupling_efficiency
+            * JOULES_PER_KILOTONNE
+            / asteroid_mass_kg;
+        if !(per_kt.is_finite() && per_kt > 0.0) {
+            return None;
+        }
+        Some(dv_ms / per_kt)
+    }
+
+    fn is_valid(&self) -> bool {
+        self.coupling_efficiency.is_finite()
+            && self.coupling_efficiency > 0.0
+            && self.coupling_efficiency <= 1.0
+            && self.momentum_coupling_ns_per_j.is_finite()
+            && self.momentum_coupling_ns_per_j > 0.0
+    }
+}
+
+/// Surface escape speed (m/s) of a uniform sphere — `sqrt(2GM/R)`.
+///
+/// The bar the nuclear term is judged against: an impulse that is a large
+/// fraction of this does not deflect a body, it takes it apart.
+pub fn escape_speed_ms(mass_kg: f64, radius_m: f64) -> Option<f64> {
+    const G: f64 = 6.674_30e-11;
+    let ok = mass_kg.is_finite() && mass_kg > 0.0 && radius_m.is_finite() && radius_m > 0.0;
+    if !ok {
+        return None;
+    }
+    Some((2.0 * G * mass_kg / radius_m).sqrt())
+}
+
+/// What a given Δv does to the body, in the terms the published simulations
+/// actually report.
+///
+/// The sources are emphatic that a standoff nudge is only a *nudge* while Δv stays
+/// far below the escape speed, and they give two anchor points — no curve between
+/// them. This enum refuses to invent one: see [`disruption_regime`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisruptionRegime {
+    /// At or below the ratio a published run demonstrated leaves the body intact.
+    IntactDeflection,
+    /// Between the two published anchors — **the sources do not say**. Not a
+    /// prediction of marginality; an admission that this range is uncharacterised.
+    Uncharacterised,
+    /// At or above the ratio a published run demonstrated fragments the body.
+    LikelyDisruption,
+}
+
+/// Ratio of Δv to escape speed at or below which a published run kept the body
+/// intact: the UCRL-PROC-228569 "Nudge Model" — 6.5 mm/s against a ≈ 0.5 m/s
+/// escape speed, **99 % of the mass remaining bound**.
+pub const INTACT_DV_OVER_VESC: f64 = 0.013;
+
+/// Ratio of Δv to escape speed at or above which a published run reported
+/// fragmentation: LLNL-PROC-485160 — *"[a]t a size of 100 meters, the escape
+/// speed is near 5 cm/s, and inducing a 1 cm/s speed change will almost certainly
+/// result in extensive debris ejection or fragmentation."*
+pub const DISRUPTION_DV_OVER_VESC: f64 = 0.2;
+
+/// Classify an impulse against the body's own gravity.
+///
+/// # Why there is an `Uncharacterised` band instead of a threshold
+/// A single cut would have to be *chosen*, and nothing in the sources chooses it.
+/// What they supply is two demonstrated points fifteen-fold apart — intact at
+/// `Δv/v_esc = 0.013`, fragmented at `0.2` — so the honest classifier reports
+/// which side of *those* a case falls on and names the gap as a gap. A tidy
+/// midpoint would read as knowledge and would be invention.
+///
+/// Returns `None` if the escape speed is undefined (non-positive mass or radius).
+pub fn disruption_regime(dv_ms: f64, mass_kg: f64, radius_m: f64) -> Option<DisruptionRegime> {
+    let v_esc = escape_speed_ms(mass_kg, radius_m)?;
+    if !(dv_ms.is_finite() && dv_ms >= 0.0) {
+        return None;
+    }
+    let ratio = dv_ms / v_esc;
+    Some(if ratio <= INTACT_DV_OVER_VESC {
+        DisruptionRegime::IntactDeflection
+    } else if ratio >= DISRUPTION_DV_OVER_VESC {
+        DisruptionRegime::LikelyDisruption
+    } else {
+        DisruptionRegime::Uncharacterised
+    })
 }
 
 /// Tuning for the [`DeflectionScenario::required_dv`] root-find.
@@ -912,5 +1154,242 @@ mod tests {
             "the thesis: earlier deflection must cost meaningfully less Δv \
              (early {dv_early:.4e} m/s vs late {dv_late:.4e} m/s)"
         );
+    }
+
+    // --- Nuclear standoff (§5) -----------------------------------------------
+    //
+    // The published bodies these tests quote, in one place so no test restates
+    // them. Both come from the LLNL papers cited on `StandoffNuclear`; neither is
+    // a body this project invented.
+
+    /// UCRL-PROC-228569's "standard structure": 1000 m diameter, 1.05e12 kg.
+    const DEARBORN_BODY_MASS_KG: f64 = 1.05e12;
+    const DEARBORN_BODY_RADIUS_M: f64 = 500.0;
+    /// LLNL-PROC-485160's Apophis-sized non-porous model: 270 m across,
+    /// "27.8 million tons".
+    const APOPHIS_SIZED_MASS_KG: f64 = 2.78e10;
+    const APOPHIS_SIZED_RADIUS_M: f64 = 135.0;
+
+    /// The fixture the coefficient was derived from: 100 kt at the optimum height
+    /// of burst over the 1 km body gives the paper's 6.5 mm/s.
+    ///
+    /// This is a **self-consistency** check, not independent validation — the
+    /// coupling constant was inverted from this very case. Its job is to catch a
+    /// typo'd constant or a units slip (kt↔J, mm/s↔m/s), and to make the
+    /// provenance executable rather than only documented.
+    #[test]
+    fn standoff_nuclear_reproduces_the_published_nudge_model() {
+        let dv = StandoffNuclear::DEARBORN_2007
+            .dv_ms(100.0, DEARBORN_BODY_MASS_KG)
+            .expect("valid inputs");
+        assert!(
+            (dv - 6.5e-3).abs() <= 0.01 * 6.5e-3,
+            "UCRL-PROC-228569 Nudge Model: 100 kt at d/R = 0.6 over a 1.05e12 kg \
+             body settles at ≈6.5 mm/s; got {:.4} mm/s",
+            dv * 1e3
+        );
+
+        // And the escape speed the paper states independently (≈0.5 m/s) must fall
+        // out of its own stated mass and diameter — the check that 1 km is the
+        // body's *diameter*, not its radius. Reading it the other way would make
+        // every Δv in this module wrong by ~8x.
+        let v_esc = escape_speed_ms(DEARBORN_BODY_MASS_KG, DEARBORN_BODY_RADIUS_M).expect("v_esc");
+        assert!(
+            (v_esc - 0.5).abs() < 0.05,
+            "the paper's own ≈0.5 m/s escape speed pins 1 km as the diameter; got {v_esc:.4} m/s"
+        );
+    }
+
+    /// The coefficient must stay inside the spread the two independent papers
+    /// bracket — a guard on *provenance*, which no numerical test of the model
+    /// itself would catch.
+    ///
+    /// LLNL-PROC-485160 reports a separate run: 10 kt deposited ablates ~4000 t at
+    /// "over 2 km/s", i.e. `C_m = 1.91e-4 N·s/J`. Nothing forces two different
+    /// simulation series to agree, so if a future edit moves the shipped constant
+    /// outside this band it has left the published range and needs a new citation.
+    #[test]
+    fn momentum_coupling_brackets_the_independent_2011_figure() {
+        let ours = StandoffNuclear::DEARBORN_2007.momentum_coupling_ns_per_j;
+        let from_2011 = 4.0e6 * 2000.0 / (10.0 * JOULES_PER_KILOTONNE);
+
+        assert!(
+            (from_2011 - 1.91e-4).abs() < 1.0e-6,
+            "the 2011 figure recomputes to 1.91e-4 N·s/J; got {from_2011:.4e}"
+        );
+        let spread = (from_2011 - ours).abs() / ours;
+        assert!(
+            spread < 0.40,
+            "the two published series must agree to well under a factor of two \
+             (ours {ours:.4e} vs 2011 {from_2011:.4e} = {:.0} %)",
+            spread * 100.0
+        );
+        // Ours is the smaller of the two, and that direction matters: a smaller
+        // momentum coupling means *more* yield is required for a given Δv, so the
+        // requirement this term reports errs high rather than flattering itself.
+        assert!(
+            ours < from_2011,
+            "the shipped coefficient should be the conservative end of the spread"
+        );
+    }
+
+    /// **The independent check.** A different paper, a different body, a different
+    /// yield, and a case this coefficient was never fitted to: LLNL-PROC-485160
+    /// deposits 17 kt into a 270 m, 2.78e10 kg non-porous body and reports it
+    /// "completely fragmented" (Ke/Pe > 1).
+    ///
+    /// The model must independently land that case above the escape speed — the
+    /// assertion that fails if the coefficient is wrong by the order of magnitude
+    /// a dimensional-plausibility check would happily let through.
+    #[test]
+    fn standoff_nuclear_predicts_the_published_fragmentation_case() {
+        // The paper states energy *absorbed*, not device yield, so the coupling
+        // factor is bypassed rather than guessed at (η = 1 with the same C_m).
+        let absorbed_only = StandoffNuclear {
+            coupling_efficiency: 1.0,
+            ..StandoffNuclear::DEARBORN_2007
+        };
+        let dv = absorbed_only
+            .dv_ms(17.0, APOPHIS_SIZED_MASS_KG)
+            .expect("valid inputs");
+        let v_esc = escape_speed_ms(APOPHIS_SIZED_MASS_KG, APOPHIS_SIZED_RADIUS_M).expect("v_esc");
+        let ratio = dv / v_esc;
+
+        println!(
+            "17 kt absorbed into the 270 m body: Δv = {:.3} m/s vs v_esc = {:.3} m/s \
+             → Δv/v_esc = {ratio:.2}",
+            dv, v_esc
+        );
+        assert!(
+            ratio > 1.0,
+            "the paper reports this case completely fragmented (Ke/Pe > 1), so the \
+             model must put Δv above the escape speed; got Δv/v_esc = {ratio:.2}"
+        );
+        assert_eq!(
+            disruption_regime(dv, APOPHIS_SIZED_MASS_KG, APOPHIS_SIZED_RADIUS_M),
+            Some(DisruptionRegime::LikelyDisruption)
+        );
+    }
+
+    /// The other end of the same classifier: the Nudge Model kept 99 % of the mass
+    /// bound, so its own Δv must read as intact. Both anchors are asserted, so the
+    /// band between them cannot quietly swallow either.
+    #[test]
+    fn the_nudge_model_case_is_classified_intact() {
+        let dv = StandoffNuclear::DEARBORN_2007
+            .dv_ms(100.0, DEARBORN_BODY_MASS_KG)
+            .expect("valid inputs");
+        assert_eq!(
+            disruption_regime(dv, DEARBORN_BODY_MASS_KG, DEARBORN_BODY_RADIUS_M),
+            Some(DisruptionRegime::IntactDeflection)
+        );
+
+        // And the uncharacterised band is genuinely reachable — a three-state enum
+        // whose middle state no input produces is a two-state enum with a lie in it.
+        let v_esc = escape_speed_ms(DEARBORN_BODY_MASS_KG, DEARBORN_BODY_RADIUS_M).expect("v_esc");
+        let between = 0.5 * (INTACT_DV_OVER_VESC + DISRUPTION_DV_OVER_VESC) * v_esc;
+        assert_eq!(
+            disruption_regime(between, DEARBORN_BODY_MASS_KG, DEARBORN_BODY_RADIUS_M),
+            Some(DisruptionRegime::Uncharacterised)
+        );
+    }
+
+    /// Both inverts are exact, so both round-trip. This is what lets the headline
+    /// Δv curve be requoted in kilotonnes and kilograms with no extra propagation.
+    #[test]
+    fn method_inverts_round_trip() {
+        let nuke = StandoffNuclear::DEARBORN_2007;
+        let y = nuke
+            .yield_kilotonnes_for_dv(6.5e-3, DEARBORN_BODY_MASS_KG)
+            .expect("invert");
+        assert!(
+            (y - 100.0).abs() < 1.0,
+            "6.5 mm/s on the 1 km body must invert back to ≈100 kt; got {y:.3} kt"
+        );
+        let back = nuke.dv_ms(y, DEARBORN_BODY_MASS_KG).expect("forward");
+        assert!((back - 6.5e-3).abs() < 1.0e-9);
+
+        let m = kinetic_impactor_mass_for_dv(6.5e-3, 3.6, 1.0e4, DEARBORN_BODY_MASS_KG)
+            .expect("invert");
+        let dv_back = kinetic_impactor_dv(3.6, m, 1.0e4, DEARBORN_BODY_MASS_KG);
+        assert!((dv_back - 6.5e-3).abs() < 1.0e-12);
+    }
+
+    /// **The comparison, at one bar.** The point of adding a second method is not
+    /// a second formula — it is that the two can be quoted against the *same* Δv,
+    /// on the *same* body, and read side by side. Three methods quoted against
+    /// three different bars would look comparable and would not be.
+    ///
+    /// Everything here is either published or explicitly stated: the body is
+    /// UCRL-PROC-228569's, the required Δv is that paper's own 6.5 mm/s, and the
+    /// interception geometry (β = 3.6 from DART, 10 km/s relative speed) is a
+    /// stated assumption rather than a derived result — labelled as such, because
+    /// the ratio depends on it.
+    #[test]
+    fn deflection_methods_compared_at_one_bar() {
+        let dv_required = 6.5e-3_f64;
+        let beta = 3.6_f64;
+        let v_rel = 1.0e4_f64;
+
+        let mass = kinetic_impactor_mass_for_dv(dv_required, beta, v_rel, DEARBORN_BODY_MASS_KG)
+            .expect("kinetic invert");
+        let yield_kt = StandoffNuclear::DEARBORN_2007
+            .yield_kilotonnes_for_dv(dv_required, DEARBORN_BODY_MASS_KG)
+            .expect("nuclear invert");
+
+        // 14 714 kg is the heaviest mass any vehicle in `launch_vehicle.rs`
+        // delivers at its cheapest C3 (Falcon Heavy expendable) — the same figure
+        // the porkchop layer seeds its mass solve from. Quoted, not recomputed,
+        // because that table lives above this crate.
+        const HEAVIEST_DELIVERABLE_KG: f64 = 14_714.0;
+        let launches = mass / HEAVIEST_DELIVERABLE_KG;
+
+        println!(
+            "one bar — Δv = {:.2} mm/s on a {:.2e} kg body:\n  \
+             kinetic impactor (β = {beta}, v_rel = {:.0} km/s): {mass:.0} kg = {launches:.1} × \
+             the heaviest single launch\n  \
+             standoff nuclear: {yield_kt:.1} kt",
+            dv_required * 1e3,
+            DEARBORN_BODY_MASS_KG,
+            v_rel / 1e3
+        );
+
+        assert!(
+            launches > 10.0,
+            "the lesson: against a 1 km body the kinetic route needs many launches \
+             ({launches:.1} here), which is why §5 puts a nuclear term at the other \
+             end of the spectrum"
+        );
+        assert!(
+            (yield_kt - 100.0).abs() < 1.0,
+            "and the nuclear route asks for one device of a stated, published class \
+             ({yield_kt:.1} kt)"
+        );
+
+        // The comparison is only honest if the nuclear option is also *survivable*
+        // at this bar — a bigger Δv that shatters the body is not a better answer.
+        assert_eq!(
+            disruption_regime(dv_required, DEARBORN_BODY_MASS_KG, DEARBORN_BODY_RADIUS_M),
+            Some(DisruptionRegime::IntactDeflection)
+        );
+    }
+
+    /// Invalid inputs return `None` rather than a `NaN` that would poison a display
+    /// (the porkchop layer's sentinel-not-`NaN` rule, applied one module earlier).
+    #[test]
+    fn nuclear_rejects_degenerate_inputs() {
+        let nuke = StandoffNuclear::DEARBORN_2007;
+        assert_eq!(nuke.dv_ms(100.0, 0.0), None);
+        assert_eq!(nuke.dv_ms(f64::NAN, 1.0e12), None);
+        assert_eq!(nuke.dv_ms(-1.0, 1.0e12), None);
+        assert_eq!(nuke.yield_kilotonnes_for_dv(1.0, -1.0), None);
+        assert_eq!(escape_speed_ms(1.0e12, 0.0), None);
+        assert_eq!(disruption_regime(1.0, 0.0, 100.0), None);
+
+        let bad = StandoffNuclear {
+            coupling_efficiency: 1.5,
+            momentum_coupling_ns_per_j: 1.418e-4,
+        };
+        assert_eq!(bad.dv_ms(100.0, 1.0e12), None, "η > 1 is not a coupling");
     }
 }

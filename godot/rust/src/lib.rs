@@ -27,10 +27,12 @@ use asteroid_core::scenario::{ImpactorConfig, ScenarioError, SAFE_PERIGEE_TARGET
 use asteroid_core::{Epoch, OrbitalElements};
 use mission_core::{
     display_comet, heaviest_deliverable_kg, launch_vehicle, launch_vehicle_count, load_neo_bodies,
-    measure_tier2_shifts, mount_small_bodies, required_cell_mass, seed_orrery_body,
-    verify_porkchop_cell, BuiltScenario, CellVerdict, MissionCore, OrreryBody, PorkchopView,
-    Tier2Shifts, SB441_BODIES,
+    measure_tier2_shifts, mount_small_bodies, probe_tow_plan, required_cell_mass, seed_orrery_body,
+    tractor_readout as score_tractor_plan, verify_porkchop_cell, BuiltScenario, CellVerdict,
+    MissionCore, OrreryBody, PorkchopView, Tier2Shifts, TractorPlan, REQUIRED_DV_LAW_MIN_PERIODS,
+    SB441_BODIES, THREAT_RADIUS_M, TRACTOR_HOVER_RADII,
 };
+use mission_core::tractor_min_hover_radii;
 
 /// The launcher at a GDScript-supplied index, or `None` for a negative or
 /// out-of-range one. A free function so every `#[func]` that takes a `vehicle`
@@ -118,6 +120,22 @@ struct Mission {
     /// same reason as the fourth: it is fired repeatedly against a grid that stays
     /// put and must not disturb the verify, the grid, or the build.
     mass_build: Option<mpsc::Receiver<Result<MassSolveOutcome, String>>>,
+    /// The in-flight gravity-tractor probe — a **sixth** independent channel, on
+    /// the same principle as the fourth and fifth: the tractor panel fires probes
+    /// repeatedly against a scenario that stays put, and must not be able to
+    /// disturb (or be disturbed by) the grid, the verify, the mass solve or the
+    /// build.
+    tow_build: Option<mpsc::Receiver<Result<(f64, f64), String>>>,
+    /// The plan the in-flight probe is for. Held here, not sent through the
+    /// channel, for the reason `pending_verify` documents: the worker computes
+    /// physics, not identity, and pairing them on arrival is what stops a perigee
+    /// being labelled with knobs it was not solved for.
+    pending_tow: Option<TractorPlan>,
+    /// The last probe result and the plan it belongs to — `(plan, towed perigee,
+    /// nominal perigee)`. The frontend compares the plan against its live knobs
+    /// so it can grey a result the operator has since tuned away from, rather
+    /// than presenting it as current.
+    tow_probe: Option<(TractorPlan, f64, f64)>,
     /// Which cell the in-flight mass solve is for, `(launch, arrival)`.
     ///
     /// **No vehicle index, and that is the point.** The requirement is a property of
@@ -1077,6 +1095,260 @@ impl Mission {
     #[func]
     fn heaviest_deliverable_kg(&self) -> f64 {
         heaviest_deliverable_kg()
+    }
+
+    // --- The gravity tractor -------------------------------------------------
+
+    /// The shipping tractor configuration and the bounds the panel's knobs move
+    /// within: `hover_radii`, `rock_radius_m`, `law_min_periods`.
+    ///
+    /// Exists so GDScript never restates a physics constant. The frontend already
+    /// learned this lesson the expensive way — every drawn body must name a
+    /// source — and a panel that hard-coded `1.5` beside a core that had moved on
+    /// would be the same bug wearing a different hat.
+    #[func]
+    fn tractor_defaults(&self) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        d.set("hover_radii", TRACTOR_HOVER_RADII);
+        // The bound a hover control must clamp to — `1/cos(plume)`, ~1.064 radii,
+        // NOT 1.0. Supplied because the intuitive bound is the surface and the
+        // surface is wrong: between them lies a band that tows and cannot be
+        // flown.
+        d.set("min_hover_radii", tractor_min_hover_radii());
+        d.set("rock_radius_m", THREAT_RADIUS_M);
+        d.set("law_min_periods", REQUIRED_DV_LAW_MIN_PERIODS);
+        d.set("target_perigee_m", SAFE_PERIGEE_TARGET_M);
+        d
+    }
+
+    /// Score one tractor configuration with **arithmetic only** — free, exact,
+    /// and safe to call every frame while a knob is turning.
+    ///
+    /// One call returning one dictionary rather than eight getters, so that
+    /// adding a knob is one field on each side instead of a new FFI entry point.
+    ///
+    /// Keys: `flyable` (false when the spacecraft would be inside the body — the
+    /// geometric wall that `1/d²` alone never reveals), `tow_accel_m_s2`,
+    /// `thrust_n`, `cant_deg`, `rock_mass_kg`, `delivered_dv_m_s`,
+    /// `equivalent_dv_m_s`, `lead_periods`, and — **only when the lead is inside
+    /// the law's validity range** — `required_dv_m_s` and `margin`.
+    ///
+    /// # The two Δv keys are not interchangeable
+    ///
+    /// `delivered_dv_m_s` is `a·T`, what the tow delivers, and a true *upper
+    /// bound* on what it is worth. `equivalent_dv_m_s` is the impulsive
+    /// equivalent, which is what may be compared against a requirement. A display
+    /// that computed its margin from the delivered figure would overstate every
+    /// deflection by up to a factor of two — measured at +21 % on the one
+    /// configuration with a real-field answer. `margin` is supplied here, already
+    /// formed from the right one, so no caller has to make that choice.
+    ///
+    /// `required_dv_m_s` and `margin` are **absent**, not zero or `NaN`, below
+    /// `law_min_periods` — the estimate declines to answer where it would be the
+    /// wrong shape rather than merely imprecise.
+    #[func]
+    fn tractor_readout(
+        &self,
+        spacecraft_mass_kg: f64,
+        hover_radii: f64,
+        rock_radius_m: f64,
+        lead_seconds: f64,
+        duration_seconds: f64,
+        retrograde: bool,
+    ) -> VarDictionary {
+        let plan = TractorPlan {
+            spacecraft_mass_kg,
+            hover_radii,
+            rock_radius_m,
+            lead_seconds,
+            duration_seconds,
+            retrograde,
+        };
+        let period = self.core.as_ref().map_or(0.0, MissionCore::period_seconds);
+        let r = score_tractor_plan(&plan, period);
+        let mut d = VarDictionary::new();
+        d.set("flyable", plan.is_flyable());
+        d.set("holds_station", r.holds_station);
+        d.set("tow_accel_m_s2", r.tow_acceleration_m_s2.unwrap_or(0.0));
+        d.set("thrust_n", r.station_keeping_thrust_n.unwrap_or(0.0));
+        d.set(
+            "cant_deg",
+            r.cant_angle_rad.map_or(0.0, f64::to_degrees),
+        );
+        d.set("rock_mass_kg", r.rock_mass_kg);
+        d.set("delivered_dv_m_s", r.delivered_dv_m_s);
+        d.set("equivalent_dv_m_s", r.equivalent_dv_m_s);
+        d.set("lead_periods", r.lead_periods);
+        if let Some(req) = r.required_dv_estimate_m_s {
+            d.set("required_dv_m_s", req);
+        }
+        if let Some(margin) = r.margin {
+            d.set("margin", margin);
+        }
+        d
+    }
+
+    /// Kick off one full-field tractor probe on a worker thread. `false` if one is
+    /// already running, the scenario is not built, or the geometry is unflyable.
+    ///
+    /// **On demand, never per keystroke.** One probe is a full multi-year
+    /// propagation — 12.4 s measured at the campaign's longest lead — which is
+    /// precisely why the cheap [`tractor_readout`](Self::tractor_readout) exists
+    /// beside it. Same bargain as the launch-window map's `[E]` verify.
+    #[func]
+    fn begin_tow_probe(
+        &mut self,
+        spacecraft_mass_kg: f64,
+        hover_radii: f64,
+        rock_radius_m: f64,
+        lead_seconds: f64,
+        duration_seconds: f64,
+        retrograde: bool,
+    ) -> bool {
+        if self.tow_build.is_some() {
+            return false;
+        }
+        let Some(core) = self.core.as_ref() else {
+            self.error = "load() must succeed before begin_tow_probe()".into();
+            return false;
+        };
+        let Some(scenario) = core.scenario_arc() else {
+            self.error = "build the scenario before probing a tractor".into();
+            return false;
+        };
+        let plan = TractorPlan {
+            spacecraft_mass_kg,
+            hover_radii,
+            rock_radius_m,
+            lead_seconds,
+            duration_seconds,
+            retrograde,
+        };
+        // Refuse rather than propagate: a spacecraft inside the asteroid has a
+        // perfectly finite tow and no physical meaning, and 12 s of integration
+        // would dignify it with a perigee.
+        if !plan.is_flyable() {
+            self.error = "the tractor would be inside the asteroid; raise the hover distance"
+                .into();
+            return false;
+        }
+        // The stronger geometric refusal. A tow with no station-keeping solution
+        // integrates perfectly happily and describes a mission nobody can fly, so
+        // it is refused *by name* rather than being propagated for 12 s and then
+        // shown beside a blank thrust.
+        if !plan.holds_station() {
+            self.error = "no station-keeping solution at that hover distance; the exhaust                           cant has passed 90 deg"
+                .into();
+            return false;
+        }
+        // A zero-length tow is a reachable knob setting (the duration control goes
+        // to 0) and is not an error worth 12 s of integration or a raw
+        // "invalid tow duration 0 s" from deep in the window constructor.
+        if plan.effective_duration_seconds() <= 0.0 {
+            self.error = "a tow of zero duration deflects nothing; raise the tow duration"
+                .into();
+            return false;
+        }
+        if lead_seconds <= 0.0 {
+            self.error = "a tractor needs a positive lead time".into();
+            return false;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = probe_tow_plan(&scenario, &plan).map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+        self.tow_build = Some(rx);
+        // Drop the previous probe: one shown beside a running solve reads as this
+        // solve's answer.
+        self.pending_tow = Some(plan);
+        self.tow_probe = None;
+        self.error = GString::new();
+        true
+    }
+
+    /// Whether a tractor probe is in flight.
+    #[func]
+    fn is_probing_tow(&self) -> bool {
+        self.tow_build.is_some()
+    }
+
+    /// Pump the tractor-probe worker. `true` while **still running**, `false` once
+    /// finished (or none in flight) — then [`tow_probe`](Self::tow_probe) holds
+    /// the result. Non-blocking; safe every frame.
+    #[func]
+    fn poll_tow_probe(&mut self) -> bool {
+        let Some(rx) = self.tow_build.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Ok(Ok((towed, nominal))) => {
+                self.tow_build = None;
+                if let Some(plan) = self.pending_tow.take() {
+                    self.tow_probe = Some((plan, towed, nominal));
+                }
+                self.error = GString::new();
+                false
+            }
+            Ok(Err(message)) => {
+                self.tow_build = None;
+                self.pending_tow = None;
+                self.error = message.as_str().into();
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.tow_build = None;
+                self.pending_tow = None;
+                self.error = "the tractor-probe thread died without reporting".into();
+                false
+            }
+        }
+    }
+
+    /// The last full-field tractor probe, or an **empty dictionary** if none has
+    /// been run against the current scenario.
+    ///
+    /// Keys: the six plan fields it was solved for (`spacecraft_mass_kg`,
+    /// `hover_radii`, `rock_radius_m`, `lead_seconds`, `duration_seconds`,
+    /// `retrograde`) so a display can tell "this readout's probe" from "a probe
+    /// for knobs I have since moved"; plus `perigee_m`, `nominal_perigee_m`,
+    /// `shift_m` and `clean_miss`.
+    ///
+    /// # `shift_m` is signed, and it must stay that way
+    ///
+    /// It is `perigee − nominal`, and a **negative value is a real, reachable
+    /// outcome**: the nominal is a near-centre hit, so a tug too weak to carry the
+    /// b-plane point past Earth walks it *toward* the centre first — the campaign
+    /// measures −188 km for a 20 t tractor over the full lead. Reporting a
+    /// magnitude here would hide the one result a user most needs to see, and
+    /// would let a panel show steady progress while the impact deepened.
+    ///
+    /// `clean_miss` flags the pass that left the scan gate entirely, whose perigee
+    /// is `+∞` — the success case that shares a sentinel with failure elsewhere in
+    /// this codebase, so it is named rather than inferred from a magic number.
+    #[func]
+    fn tow_probe(&self) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        let Some((plan, towed, nominal)) = self.tow_probe else {
+            return d;
+        };
+        d.set("spacecraft_mass_kg", plan.spacecraft_mass_kg);
+        d.set("hover_radii", plan.hover_radii);
+        d.set("rock_radius_m", plan.rock_radius_m);
+        d.set("lead_seconds", plan.lead_seconds);
+        d.set("duration_seconds", plan.duration_seconds);
+        d.set("retrograde", plan.retrograde);
+        d.set("nominal_perigee_m", nominal);
+        let clean = !towed.is_finite();
+        d.set("clean_miss", clean);
+        d.set("perigee_m", towed);
+        // A clean miss has no finite perigee to difference against, so it carries
+        // no shift rather than an infinite one.
+        if !clean {
+            d.set("shift_m", towed - nominal);
+        }
+        d
     }
 
     /// The nominal encounter's focused capture radius `b_capture`, m (`-1.0` if no

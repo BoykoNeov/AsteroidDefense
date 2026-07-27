@@ -20,6 +20,7 @@ var enc: EncounterView
 var pork: PorkchopPlot
 var planner: PlannerPanel
 var tier2_panel: Tier2Panel
+var tractor_panel: TractorPanel
 var boot: BootScreen
 var time_bar: TimeBar
 
@@ -93,6 +94,10 @@ func _ready() -> void:
 	tier2_panel = Tier2Panel.new()
 	tier2_panel.name = "Tier2Panel"
 	viewport.add_child(tier2_panel)
+
+	tractor_panel = TractorPanel.new()
+	tractor_panel.name = "TractorPanel"
+	viewport.add_child(tractor_panel)
 
 	boot = BootScreen.new()
 	boot.name = "Boot"
@@ -196,6 +201,27 @@ func _input(event: InputEvent) -> void:
 	# [M] solves the window's required mass rather than opening the planner.
 	elif pork.visible and event.is_action_pressed("pork_required_mass"):
 		Sim.request_required_mass()
+	# The tractor bench claims the arrows and [E] while it is up, on the same
+	# first-match-wins principle the porkchop's cursor keys already use. It sits
+	# BEFORE the planner's lead/dv adjust for the same reason the map does: the
+	# panel that is open is the one the arrows belong to.
+	#
+	# **One new input action for six knobs.** UP/DOWN picks a row and LEFT/RIGHT
+	# adjusts it, so a seventh knob is one row in `Sim.TRACTOR_KNOBS` and no edit
+	# here at all — where the planner's key-pair-per-parameter would have cost
+	# twelve actions and twelve branches.
+	elif tractor_panel.visible and event.is_action_pressed("pork_cursor_up"):
+		Sim.move_tractor_cursor(-1)
+	elif tractor_panel.visible and event.is_action_pressed("pork_cursor_down"):
+		Sim.move_tractor_cursor(1)
+	elif tractor_panel.visible and event.is_action_pressed("pork_cursor_left"):
+		Sim.adjust_tractor(-1)
+	elif tractor_panel.visible and event.is_action_pressed("pork_cursor_right"):
+		Sim.adjust_tractor(1)
+	elif tractor_panel.visible and event.is_action_pressed("pork_verify"):
+		# [E] means the same thing in both views — "stop estimating and go measure
+		# it in the full field" — so it is deliberately the same key.
+		Sim.request_tow_probe()
 	elif event.is_action_pressed("focus_next"):
 		_focus_idx = (_focus_idx + 1) % _focus_targets.size()
 		_apply_focus()
@@ -209,6 +235,11 @@ func _input(event: InputEvent) -> void:
 		else:
 			planner.visible = not planner.visible
 			Sim.planner_open = planner.visible
+			# Symmetric to [K]: same origin, same arrow keys, and here the bench
+			# would keep the arrows because its guards sit earlier in the chain.
+			if planner.visible and tractor_panel.visible:
+				tractor_panel.visible = false
+				Sim.tractor_panel_open = false
 	elif planner.visible and event.is_action_pressed("plan_lead_up"):
 		Sim.adjust_lead(10.0)
 	elif planner.visible and event.is_action_pressed("plan_lead_down"):
@@ -244,6 +275,28 @@ func _input(event: InputEvent) -> void:
 		Sim.toggle_tier2("srp")
 	elif tier2_panel.visible and event.is_action_pressed("tier2_term_j2"):
 		Sim.toggle_tier2("j2")
+	elif event.is_action_pressed("tractor_toggle"):
+		# Gated on `mission_online` like the planner and the force menu: every
+		# number in the bench is measured against the threat solution, and an
+		# empty one would show a tractor tugging nothing.
+		#
+		# Nothing is paid for on open, unlike the Tier-2 menu and the launch-window
+		# map. The whole panel is arithmetic until [E] is pressed, which is the
+		# property that lets a user sweep six knobs freely.
+		if not Sim.mission_online:
+			Sim.event_logged.emit("GRAVITY TRACTOR OFFLINE - AWAITING THREAT SOLUTION")
+		else:
+			tractor_panel.visible = not tractor_panel.visible
+			Sim.tractor_panel_open = tractor_panel.visible
+			# The two bottom-centre overlays are mutually exclusive, and not for
+			# tidiness: they draw at the same origin, and the guard chain above
+			# puts the bench's arrow branches first — so with both open the
+			# planner's lead/dv keys would stop responding with nothing on screen
+			# to say why. The porkchop avoids this by being a full-frame view;
+			# these two have to be told.
+			if tractor_panel.visible and planner.visible:
+				planner.visible = false
+				Sim.planner_open = false
 
 
 ## Show exactly one of the full-frame overlay views (or `null` for the 3D world),
@@ -288,7 +341,7 @@ func _apply_focus() -> void:
 
 func _sync_overlay_sizes() -> void:
 	var vs := Vector2(viewport.size)
-	for c: Control in [map2d, enc, pork, tags, hud, planner, tier2_panel, boot]:
+	for c: Control in [map2d, enc, pork, tags, hud, planner, tier2_panel, tractor_panel, boot]:
 		if is_instance_valid(c):
 			c.position = Vector2.ZERO
 			c.size = vs

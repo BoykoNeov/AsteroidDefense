@@ -250,6 +250,28 @@ Two distinct failures needed two distinct fixes, and this is the part worth keep
 
 **The gate was proved by bypassing it**, not by watching it pass: with `../temp/AsteroidDefense/kernels` renamed away, `ASTEROID_REQUIRE_KERNELS=1` makes the kernel-gated tests **FAIL** loudly, and unset it reproduces the original lie exactly — *the same* `81 passed` / `13 passed`, but `0.09s` and `0.00s` instead of `18.03s` and `56.38s`. The counts are indistinguishable; the clock is the whole signal. That bypass is also what confirmed `tier1_field_matches_assist` genuinely runs in 0.05 s (it fails the moment the kernels vanish) rather than being one more silent skip.
 
+### The gotcha with exactly the same shape, on the frontend (2026-07-27)
+
+**Godot loads `target/debug/`, so a `--release` build leaves the frontend running old physics — with no error and no warning.** `godot/asteroid.gdextension` maps `windows.debug.x86_64` to `res://../target/debug/asteroid_gdext.dll` and `windows.release.x86_64` to the release one. The Godot *editor* and the ordinary `godot` binary are debug builds, so **they load the debug DLL** — while the entire Rust test loop (`cargo test --release`, `cargo build --release`) writes only the release one.
+
+The failure mode is the point: a `#[func]` added to `lib.rs` and confirmed by a green release suite simply does not exist as far as GDScript is concerned. What you get is
+
+```
+SCRIPT ERROR: Invalid call. Nonexistent function 'tractor_defaults' in base 'Mission'.
+```
+
+which reads like a typo or a binding-registration problem, not like a stale artifact — and the DLL timestamps are the only tell (`target/debug` seven hours older than `target/release`). Same class as the kernel trap above: a green-looking run that is not testing what you think.
+
+**After any Rust change, build both before touching the frontend:**
+
+```sh
+cd godot/rust && cargo build && cargo build --release
+```
+
+`class_name` is a second, independent staleness: a newly added `class_name` (e.g. `TractorPanel`) is not visible to other scripts until Godot rescans, so `main.gd` fails to parse with *"Could not find type"* while the file is plainly there. `godot --headless --editor --quit --path godot` rebuilds `global_script_class_cache.cfg`. Both of these cost an hour on 2026-07-27 and neither is discoverable from the error text.
+
+---
+
 `user://kernels.cfg` is deliberately *not* read by the Rust side — `user://` resolves through Godot's own per-platform app-data path, and reconstructing that in Rust to read a file the frontend wrote would be a guess that rots silently. The directory scan covers the same case, and callers that know better still pass explicit paths (`MissionCore::load_from`).
 
 ---
@@ -301,7 +323,7 @@ That MVP delivers the whole lesson *and* an honest hit→miss flip. Everything b
 - **Godot 3D view** (gdext): SubViewport composition (2D schematic/HUD over 3D, or vice versa); floating origin / double-precision as needed (§7)
 - **Tier 2 force model**: enable 1PN relativity, Yarkovsky, SRP, J2, and the 16 asteroid perturbers (on top of the DE440/441 ephemeris perturber field already used in the MVP) — validated against **ASSIST**, then **Horizons** on real asteroids
 - Real NEOs from the JPL Small-Body Database (§9): Apophis, Bennu, Didymos/Dimorphos
-- Nuclear standoff + gravity-tractor methods — **DONE 2026-07-27** (core-only, no frontend for either): the standoff term as an impulse sibling of the kinetic model, the **gravity tractor** as a windowed `forces/` term with its own duration solve. §5's spectrum is closed. See *The deflection spectrum, nuclear half* and *…tractor half*.
+- Nuclear standoff + gravity-tractor methods — **DONE 2026-07-27**: the standoff term as an impulse sibling of the kinetic model, the **gravity tractor** as a windowed `forces/` term with its own duration solve. §5's spectrum is closed. The tractor also has a **frontend** — the `[K]` bench, six live knobs over a cheap model scored against the real field, with an on-demand full-field probe on `[E]`. The nuclear half remains core-only. See *The deflection spectrum, nuclear half*, *…tractor half*, and *The tractor on the frontend*.
 - Lambert / porkchop mission design (makes the impulse *deliverable*, not assumed)
 - **Tier 3 uncertainty**: orbit covariance → b-plane → impact probability; keyholes; covariance ellipse shrinking with observations
 
@@ -660,6 +682,146 @@ entry in the same list.
   constant instead of re-paying 237 s for an identical number, and the constant was
   promoted from a local `const` inside one test to module scope so the two cannot
   drift. Whole test: **171 s**.
+
+### The tractor on the frontend — 2026-07-27 session (`[K]`, six knobs, and the cheap model that had to be scored before it could be shown)
+
+The tractor half above is core-only and answers one question: *does a Lu & Love
+tractor deflect this rock?* (No — 12.6× short.) That is a dead end to read and an
+interesting thing to **operate**, because the reason it fails is a scale rather
+than a physics, and every lever that changes that scale is free to evaluate. So
+`[K]` opens a bench with six live knobs — and the design work was almost entirely
+in deciding *what number it is honest to print while a key is held*.
+
+- **A live margin cannot be built from `a·T`, and the project's own note said so
+  before the panel existed.** The campaign test already documented the delivered
+  Δv as an *upper* bound — a tug spread over the lead arrives later on average
+  than an impulse at its start, and late Δv buys less displacement. Turning that
+  caveat into a live readout would have systematically flattered every
+  configuration: **measured +21 %** at the one point where a real-field answer
+  exists. What ships instead is the **impulsive equivalent**
+
+  ```text
+  Δv_eff = a · T · (1 − T / 2L)
+  ```
+
+  which is *not* a fitted correction — it is the same linear response `f(τ) ∝ τ`
+  that produces the `1/lead` law, integrated across the tow window instead of
+  evaluated at a point. One model underwrites both halves of the panel. Its
+  cleanest consequence is worth stating on its own: **towing the entire lead is
+  worth exactly half its delivered Δv**, which is why starting early beats towing
+  hard.
+
+- **Which way a cheap model is wrong matters more than how wrong it is.** Scored
+  at the calibration point the campaign already owns (504 t towing 3.81 yr of a
+  6.32 yr lead, whose real-field perigee lands on the bar), the two candidates are
+  `a·T` → **1.205×** and the equivalent → **0.842×**. The shipped one reads
+  **16 % low**: it calls a tractor short when the field says it just clears. That
+  direction is the reason it ships rather than a tuned version — a deflection
+  readout that errs toward "not enough" is safe and one that errs toward "enough"
+  is not — and a test pins **both signs**, so a future edit cannot quietly flip
+  the estimate to the flattering side.
+
+- **The required-Δv law got a measured validity floor, and the test proves the
+  floor rather than asserting it.** `Δv(n) ≈ Δv(1)/n` holds to **0.1 %** between
+  one and two orbits and 3.9 % out at eight — but at *half* an orbit the product
+  `Δv·lead` collapses to 58 % of its value, because a sub-orbital arc has not had
+  time to turn a period change into along-track drift. Extrapolating there is
+  **1.73× wrong**, measured. So below one orbit the panel prints no requirement
+  and no margin at all — *absent*, not zero — and `required_dv_matches_curve_json`
+  asserts the law really does fail below the floor, so the constant cannot be
+  "tidied" away by someone who reads it as merely defensive.
+
+- **`CURVE_JSON_DV_AT_8_PERIODS` had to leave `#[cfg(test)]`.** It was fine as a
+  test constant while only tests cited it, and became the blocker the moment a
+  *readout* needed the same number: the release build could not see it. Promoted
+  to `REQUIRED_DV_AT_ONE_PERIOD` / `REQUIRED_DV_AT_EIGHT_PERIODS` in shipping
+  code. A general shape worth remembering — a number that is "just for tests"
+  stops being that the moment anything user-facing wants to quote it.
+
+- **The wall is not the surface.** The obvious lower bound for a hover-distance
+  knob is "just outside the rock", and it is wrong. The cant is `sin⁻¹(r/d) + φ`
+  and the thrust divides by its cosine, so station-keeping has no solution at all
+  once the cant reaches 90° — at Lu & Love's 20° plume that is
+
+  ```text
+  d/r  <  1 / cos φ  =  1.064 body radii
+  ```
+
+  a band that clears the surface, **tows perfectly well**, and cannot be flown.
+  The knob's first draft bottomed at 1.02 and was reachable in three keypresses;
+  the core guard correctly returns `None` there, which the panel would have
+  formatted as **`0.000 N THRUST`** — reading as station-keeping being *free* at
+  precisely the distance where it is impossible. Now
+  `min_hover_radii_for_station_keeping` is a closed form in the core, exported
+  through `tractor_defaults()` so the bound is physics rather than a literal in
+  GDScript, and the readout carries a separate `holds_station` flag instead of
+  inferring one from a zero. The thrust divergence approaching that floor is the
+  honest answer to *"why not hover closer for a bigger `1/d²` tow?"*, so it is
+  left visible rather than smoothed away.
+
+- **The knobs are a table, not variables — chosen against the planner's
+  precedent.** The planner spends an input-action *pair* per parameter, which at
+  six knobs would be twelve `project.godot` actions and twelve `main.gd` branches.
+  The bench borrows the porkchop's cursor idiom instead: UP/DOWN selects a row,
+  LEFT/RIGHT adjusts, `[E]` measures. **One new action for six knobs**, and a
+  seventh is one row in `Sim.TRACTOR_KNOBS` with no edit to `main.gd` at all. The
+  harness iterates that same table, so a new knob is covered by existing.
+
+- **A user-tweakable rock radius, without inventing a third rock.** The standing
+  rule (`threat_body_matches_the_srp_default`) is that the frontend must not
+  restate the threat's body, and a radius knob is exactly the edit that breaks it
+  silently. Scoped structurally instead of by comment: `tractor_hover_over`
+  derives its own body mass from its own radius and hands it nowhere but the
+  thrust formula, while `threat_mass_kg` — the porkchop's divisor and the SRP pin
+  — stays a function of a constant.
+  `the_tractor_radius_knob_does_not_reach_the_shipping_rock` moves the knob 4× and
+  asserts the pinned mass has not budged. The physics it exposes is the good part:
+  at fixed `d/r` the tow goes as `1/r²` while the **required Δv does not move at
+  all** (the threat integrates as a test particle), so a rock four times the radius
+  is sixteen times harder to tug for exactly the same Δv.
+
+- **The direction knob turned out to carry the sharpest lesson, and nothing had
+  ever probed it.** Every full-field probe in the tractor work — core tests and
+  frontend alike — had run *prograde*. Running the other one, measured on the
+  shipping configuration:
+
+  ```text
+  PROGRADE     perigee 3000 -> 2811 km   (-188 km, DEEPER)
+  RETROGRADE   perigee 3000 -> 3348 km   (+348 km, OUTWARD)
+  ```
+
+  Not a symmetric sign flip — the retrograde move is nearly **twice** as large,
+  and it is the same near-centre geometry that makes perigee non-monotone in tow
+  duration: the b-plane point sits ~3000 km off Earth’s centre, so one direction
+  walks it *toward* the centre (perigee dips before it can come back out) and the
+  other walks it straight away (perigee grows from the first day). The same 20 t
+  spacecraft either worsens the impact or eases it, one keypress apart, with
+  nothing about the *tow* changed. The panel opens on **prograde deliberately**:
+  it is the configuration the campaign measured, it is the one that fails, and it
+  is one keypress from the one that helps. Seeding on the flattering direction
+  would hide the point.
+
+- **The signed perigee shift is a first-class readout, not a ratio.** A
+  margin-only panel would show a user tuning steadily "toward closing" while the
+  impact deepened. `shift_m` stays signed all the way through the binding, and the
+  harness asserts both directions — the inward move for prograde and the opposite
+  sign for retrograde, so neither branch can rot unnoticed.
+
+- **Three end-stops now have executed probe paths, because none of them did.**
+  `duty = 0` (refused in words, not as a raw "invalid tow duration 0 s" from
+  inside the window constructor), the lead knob's 11.5-orbit maximum (probes fine,
+  −225 km), and the hover knob's plume wall. Each is a setting a user reaches by
+  holding a key, and each was one keypress from an unexercised code path.
+
+- **What the frontend session actually cost, and it was not the physics.** Two
+  staleness traps, both silent, now written up in §6: Godot loads `target/debug/`
+  while the entire Rust loop builds `--release` (a new `#[func]` simply "does not
+  exist"), and a new `class_name` is invisible until the editor rescans. Plus one
+  language trap worth its own line — **GDScript's `%` operator has no `%e`**. It
+  does not raise; it errors once per call from inside `_draw` and puts an error
+  string where a number belongs, sixty times a second, on a panel that otherwise
+  looks entirely fine. The values here span 1e-11 m/s² to 1e13 kg, so it is not
+  avoidable by rounding; `_sci()` formats them.
 
 ### Resolved by the 2026-07-20 session (Phase-2 3D, real bodies — Horizons NEO half)
 

@@ -1459,41 +1459,46 @@ impl MissionCore {
     /// already tracking — the rule `compose_force` follows for 1PN, Yarkovsky and
     /// SRP, for the same reason: the heliocentric frame the transverse direction
     /// is built in has to be the one the rest of the physics uses.
-    fn tow_term(eph: &Arc<Ephemeris>, hover: HoverGeometry, window: TowWindow) -> Option<GravityTractor> {
+    fn tow_term(
+        eph: &Arc<Ephemeris>,
+        hover: HoverGeometry,
+        dir: TowDirection,
+        window: TowWindow,
+    ) -> Option<GravityTractor> {
         GravityTractor::hovering(
             hover,
-            TowDirection::Prograde,
+            dir,
             window,
             EphemerisPerturber::new(Arc::clone(eph), SUN_J2000),
         )
     }
 
     /// The b-plane perigee (m) after a tractor in `hover`'s configuration goes on
-    /// station `tow_lead_seconds` before impact and tugs for `duration_seconds`.
+    /// station `tow_lead_seconds` before impact and tugs `dir` for
+    /// `duration_seconds`.
     ///
     /// One full-field propagation. Returns `f64::INFINITY` for a pass that left the
     /// scan gate entirely (a clean miss).
+    ///
+    /// **`dir` is an explicit parameter rather than a prograde default**, because
+    /// the interesting result of this whole term is that the sign of the perigee
+    /// change is not the sign a reader expects: the nominal is a near-centre hit,
+    /// so a tug can walk the b-plane point *toward* Earth's centre and deepen the
+    /// impact (`gravity_tractor_measured_on_the_real_threat` measures −188 km doing
+    /// exactly that). A defaulted direction would let a caller ask that question
+    /// without noticing they had asked it.
     pub fn towed_perigee(
         &self,
         tow_lead_seconds: f64,
         duration_seconds: f64,
         hover: HoverGeometry,
+        dir: TowDirection,
     ) -> Result<f64, ScenarioError> {
         let sc = self
             .scenario
             .as_ref()
             .ok_or_else(|| ScenarioError::NominalNotAHit("scenario not built".into()))?;
-        let ds = sc.deflection()?;
-        let tow_start = sc.impact_epoch().shifted_by_seconds(-tow_lead_seconds);
-        let window = TowWindow::from_duration(tow_start, duration_seconds).ok_or_else(|| {
-            ScenarioError::NominalNotAHit(format!("invalid tow duration {duration_seconds} s"))
-        })?;
-        let tow = Self::tow_term(sc.ephemeris(), hover, window).ok_or_else(|| {
-            ScenarioError::NominalNotAHit("degenerate tractor hover geometry".into())
-        })?;
-        Ok(ds
-            .towed_encounter(tow_start, &tow)?
-            .map_or(f64::INFINITY, |e| e.perigee))
+        towed_perigee_on(sc, tow_lead_seconds, duration_seconds, hover, dir)
     }
 
     /// Solve for how long a tractor in `hover`'s configuration must tug — going on
@@ -1510,6 +1515,7 @@ impl MissionCore {
         tow_lead_seconds: f64,
         target_perigee_m: f64,
         hover: HoverGeometry,
+        dir: TowDirection,
     ) -> Result<f64, ScenarioError> {
         let sc = self
             .scenario
@@ -1522,7 +1528,7 @@ impl MissionCore {
             tow_start,
             target_perigee_m,
             TowSolveTol::default(),
-            |w| Self::tow_term(eph, hover, w),
+            |w| Self::tow_term(eph, hover, dir, w),
         )?)
     }
 
@@ -1787,6 +1793,19 @@ pub const TRACTOR_HOVER_RADII: f64 = 1.5;
 /// tow it delivers — see [`HoverGeometry`].
 pub const TRACTOR_PLUME_HALF_WIDTH_RAD: f64 = 0.349_065_850_398_866; // 20°
 
+/// The tightest hover distance the campaign's plume geometry permits, in body
+/// radii — `1/cos φ` ≈ **1.064**, not 1.0.
+///
+/// The lower bound any hover-distance control must take, and the reason it is
+/// computed rather than written down: "just above the surface" is the intuitive
+/// bound and it is wrong by a band of hover distances that clear the body, tow
+/// perfectly well, and have no station-keeping solution at all. See
+/// [`HoverGeometry::min_hover_radii_for_station_keeping`].
+pub fn tractor_min_hover_radii() -> f64 {
+    HoverGeometry::min_hover_radii_for_station_keeping(TRACTOR_PLUME_HALF_WIDTH_RAD)
+        .expect("the campaign's 20 deg plume is a sane half-angle")
+}
+
 /// The campaign's tractor hovering configuration for a spacecraft of
 /// `spacecraft_mass_kg`, over *this* threat.
 ///
@@ -1794,11 +1813,363 @@ pub const TRACTOR_PLUME_HALF_WIDTH_RAD: f64 = 0.349_065_850_398_866; // 20°
 /// drift on what "the tractor" means — the same discipline
 /// [`threat_mass_kg`] gets against `SrpParams::sub_km_rock`.
 pub fn tractor_hover(spacecraft_mass_kg: f64) -> HoverGeometry {
+    tractor_hover_over(spacecraft_mass_kg, TRACTOR_HOVER_RADII, THREAT_RADIUS_M)
+}
+
+/// A tractor hovering at `hover_radii` body-radii over a rock of
+/// `asteroid_radius_m` — the **explorable** configuration behind the tractor
+/// panel, of which [`tractor_hover`] is the one shipping point.
+///
+/// # This must not become a second rock
+///
+/// `asteroid_radius_m` is a *what-if* knob, and the warning on
+/// [`threat_body_matches_the_srp_default`] applies with full force: the frontend
+/// must not invent a third rock. It is safe here, and only here, because of what
+/// a radius does and does not reach:
+///
+/// - It reaches the **tow** (`d = hover_radii · r`, so `a_tow ∝ 1/r²`) and the
+///   **station-keeping thrust** (through the body mass it must balance). Both are
+///   properties of the spacecraft's hover, computed fresh per readout.
+/// - It reaches **nothing** in the propagated field. The threat is integrated as
+///   a test particle — its own mass never enters its trajectory — so the required
+///   Δv, the b-plane geometry and the porkchop's delivered Δv are all untouched
+///   by what this returns.
+///
+/// The one number that *would* leak is [`threat_mass_kg`], which the porkchop
+/// divides by and `SrpParams::sub_km_rock` is pinned to. This function never
+/// touches it: it derives its own body mass from its own radius, at
+/// [`THREAT_DENSITY_KG_M3`], and hands it nowhere but the thrust formula.
+pub fn tractor_hover_over(
+    spacecraft_mass_kg: f64,
+    hover_radii: f64,
+    asteroid_radius_m: f64,
+) -> HoverGeometry {
     HoverGeometry {
         spacecraft_mass_kg,
-        hover_distance_m: TRACTOR_HOVER_RADII * THREAT_RADIUS_M,
-        asteroid_radius_m: THREAT_RADIUS_M,
+        hover_distance_m: hover_radii * asteroid_radius_m,
+        asteroid_radius_m,
         plume_half_width_rad: TRACTOR_PLUME_HALF_WIDTH_RAD,
+    }
+}
+
+/// Mass of a rock of `radius_m` at the campaign's bulk density, kg.
+///
+/// The what-if counterpart of [`threat_mass_kg`], which is that same formula at
+/// the one shipping radius. Deliberately a *separate* function rather than a
+/// parameter added to `threat_mass_kg`: the porkchop's mass divisor and the SRP
+/// area-to-mass ratio must keep resolving to the pinned body no matter what the
+/// tractor panel is currently exploring.
+pub fn rock_mass_kg(radius_m: f64) -> f64 {
+    (4.0 / 3.0) * std::f64::consts::PI * radius_m.powi(3) * THREAT_DENSITY_KG_M3
+}
+
+/// The along-track Δv the headline curve requires at a **one-period** lead to
+/// clear [`SAFE_PERIGEE_TARGET_M`], m/s — straight from `curve.json`.
+///
+/// The single anchor the cheap [`required_dv_estimate`] hangs on, and the reason
+/// it is *this* point: one period is the shortest lead at which the `1/lead` law
+/// holds (see below), so anchoring here keeps the estimate inside its own
+/// validity range at the boundary rather than extrapolating into it.
+///
+/// **Out of `#[cfg(test)]` on purpose.** Its 8-period sibling began life as a
+/// test-module constant, which is exactly why the shipping binding could not
+/// read it — a readout cannot cite a number the release build cannot see.
+/// [`required_dv_curve_anchors_still_hold`] re-solves both live and fails if
+/// either drifts.
+pub const REQUIRED_DV_AT_ONE_PERIOD: f64 = 0.509_75;
+
+/// The along-track Δv required at an **eight-period** lead, m/s — the cheapest
+/// point on the whole sweep, and the lead every deflection-method headline in
+/// HANDOFF is quoted at. See [`REQUIRED_DV_AT_ONE_PERIOD`].
+pub const REQUIRED_DV_AT_EIGHT_PERIODS: f64 = 0.066_218_75;
+
+/// The shortest lead, in orbital periods, at which [`required_dv_estimate`]'s
+/// `1/lead` law may be used.
+///
+/// **A measured boundary, not a guess.** Across the recorded curve the product
+/// `Δv · lead` is constant to 0.1 % between one and two periods and 3.9 % out at
+/// eight — but at *half* a period it collapses to 58 % of that value, because a
+/// sub-orbital arc has no time to convert a period change into along-track drift
+/// and the `1/lead` falloff simply is not there yet. Below this the estimate is
+/// not merely imprecise, it is the wrong shape, so the readout must decline to
+/// print rather than print a number that is 1.7× wrong.
+///
+/// The same treatment `Oblateness`'s validity pair gets: state where a cheap
+/// model stops being the model, in the model.
+pub const REQUIRED_DV_LAW_MIN_PERIODS: f64 = 1.0;
+
+/// Cheap estimate of the along-track Δv needed at `lead_periods` orbits of lead
+/// to clear [`SAFE_PERIGEE_TARGET_M`] — `None` below
+/// [`REQUIRED_DV_LAW_MIN_PERIODS`], where the law does not hold.
+///
+/// `Δv(n) ≈ Δv(1) / n`. An **estimate**, and labelled one wherever it is shown:
+/// the exact answer is `required_dv_along_track`, which bisects on the real
+/// perigee and costs 236.6 s measured at eight periods — not a number that can
+/// sit beside a live panel. Same bargain the planner's `REQ DV EST` already
+/// strikes, and for the same reason.
+///
+/// Accuracy against the recorded sweep: 0.1 % at two periods, 3.9 % at eight.
+pub fn required_dv_estimate(lead_periods: f64) -> Option<f64> {
+    (lead_periods >= REQUIRED_DV_LAW_MIN_PERIODS)
+        .then(|| REQUIRED_DV_AT_ONE_PERIOD / lead_periods)
+}
+
+/// The impulsive-equivalent Δv of a tow: what a single along-track impulse at
+/// the tow's **start** would have to be to displace the b-plane as much as
+/// tugging at `tow_acceleration_m_s2` for `duration_seconds` does, given the tow
+/// starts `lead_seconds` before impact.
+///
+/// # Why the naive `a · t` is not this, and must not be shown as if it were
+///
+/// `a · t` is the Δv a tow *delivers*, and it is a genuine upper bound on what
+/// that tow is worth — but only an upper bound. A tug spread across the lead
+/// arrives **later on average** than an impulse at the start of it, and late Δv
+/// buys less b-plane displacement, so `a · t` systematically overstates the
+/// deflection. Measured at the one point where a real-field answer exists (a
+/// 504 t tractor towing 3.81 yr of a 6.32 yr lead, which
+/// [`gravity_tractor_measured_on_the_real_threat`] solves to a perigee that just
+/// clears the bar), `a · t` reads **+21 %** — it would tell an operator their
+/// tractor closes when it barely does, and a panel that flatters a deflection is
+/// the display-grade lie this project keeps catching.
+///
+/// # Where the factor comes from — not a fitted coefficient
+///
+/// It is the *same* linear response that produces the `1/lead` law
+/// [`required_dv_estimate`] rests on. If an along-track impulse `dv` applied with
+/// remaining time `τ` displaces the b-plane by `c · dv · τ` — which is precisely
+/// what `Δv · lead ≈ const` says — then a tow is the integral of that over its
+/// window:
+///
+/// ```text
+///   D = ∫ a·c·τ dτ  from  L−T  to  L   =  a·c·T·(L − T/2)
+/// ```
+///
+/// and dividing by the response `c·L` of an impulse at the tow's start gives
+///
+/// ```text
+///   Δv_eff = a · T · (1 − T / 2L)
+/// ```
+///
+/// So one model underwrites both halves of the panel, and neither half needed a
+/// coefficient sourced from anywhere. Towing the *entire* lead (`T = L`) is worth
+/// exactly **half** its delivered Δv — the cleanest statement of why starting
+/// early beats towing hard.
+///
+/// # Which way it is wrong
+///
+/// At that same calibration point this reads **−16 %**: it calls the tractor
+/// short when the real field says it just clears. That direction is deliberate
+/// and is why this ships rather than a tuned correction — a deflection readout
+/// that errs toward "not enough" is safe, and one that errs toward "enough" is
+/// not. [`tow_equivalent_dv_brackets_the_real_field`] pins both signs, so a
+/// future edit cannot quietly flip the estimate to the flattering side.
+pub fn tow_equivalent_dv(
+    tow_acceleration_m_s2: f64,
+    duration_seconds: f64,
+    lead_seconds: f64,
+) -> f64 {
+    if lead_seconds <= 0.0 {
+        return 0.0;
+    }
+    let t = duration_seconds.clamp(0.0, lead_seconds);
+    tow_acceleration_m_s2 * t * (1.0 - t / (2.0 * lead_seconds))
+}
+
+/// One explorable gravity-tractor mission — the six knobs the tractor panel
+/// turns, in one value.
+///
+/// A struct rather than six loose arguments because every one of them has to
+/// survive the trip to a worker thread and back *paired with its answer*: a
+/// perigee shown beside knobs it was not solved for is the staleness bug the
+/// porkchop's `verdict` tuple already guards against, and six positional `f64`s
+/// crossing a thread boundary is how that bug gets written.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TractorPlan {
+    /// Spacecraft mass, kg. The tow is exactly linear in this.
+    pub spacecraft_mass_kg: f64,
+    /// Hover distance in body radii. Must exceed 1 — see [`Self::is_flyable`].
+    pub hover_radii: f64,
+    /// Radius of the rock being tugged, m. A **what-if** knob scoped to the
+    /// tractor; see [`tractor_hover_over`] for why it cannot reach the field.
+    pub rock_radius_m: f64,
+    /// How long before impact the tractor goes on station, seconds.
+    pub lead_seconds: f64,
+    /// How long it then tugs, seconds. Clamped to the lead by every consumer.
+    pub duration_seconds: f64,
+    /// Tug against the velocity rather than along it.
+    pub retrograde: bool,
+}
+
+impl TractorPlan {
+    /// The hover geometry these knobs describe.
+    pub fn hover(&self) -> HoverGeometry {
+        tractor_hover_over(self.spacecraft_mass_kg, self.hover_radii, self.rock_radius_m)
+    }
+
+    /// Which way it tugs.
+    pub fn direction(&self) -> TowDirection {
+        if self.retrograde {
+            TowDirection::Retrograde
+        } else {
+            TowDirection::Prograde
+        }
+    }
+
+    /// Whether the tow means anything: the spacecraft must hover *outside* the
+    /// body it is tugging.
+    ///
+    /// The tow goes as `1/d²`, so every readout gets better as `d → r` and the
+    /// arithmetic never complains — it is the geometry that forbids it.
+    ///
+    /// **Necessary but not sufficient for a flyable mission** — see
+    /// [`Self::holds_station`]. Keeping the two apart is what lets a readout say
+    /// the true and useful thing about the band between them: the tug is real,
+    /// and nobody can stay there to apply it.
+    pub fn is_flyable(&self) -> bool {
+        self.hover().is_clear_of_surface()
+    }
+
+    /// Whether a station-keeping solution exists — the *stronger* constraint, and
+    /// the one that actually bounds a hover-distance control at
+    /// [`tractor_min_hover_radii`] rather than at the surface.
+    pub fn holds_station(&self) -> bool {
+        self.hover().can_hold_station()
+    }
+
+    /// The tow duration, clamped into `[0, lead]`.
+    pub fn effective_duration_seconds(&self) -> f64 {
+        self.duration_seconds.clamp(0.0, self.lead_seconds.max(0.0))
+    }
+}
+
+/// Everything the tractor panel prints, computed **without touching the field**.
+///
+/// The division of labour this type exists to enforce: these are exact, free,
+/// and answerable while a knob is turning; the perigee is none of those (12.4 s
+/// per probe, measured) and arrives separately through
+/// [`towed_perigee_on`]. Mixing the two would either make the panel unusable or
+/// make it print a stale perigee as if it were live.
+#[derive(Debug, Clone, Copy)]
+pub struct TractorReadout {
+    /// Tow acceleration imparted to the rock, m/s² — `None` if the geometry is
+    /// degenerate or the spacecraft is inside the body.
+    pub tow_acceleration_m_s2: Option<f64>,
+    /// Thrust the spacecraft must sustain to hold station, N — the feasibility
+    /// number, and the only place the rock's mass enters.
+    pub station_keeping_thrust_n: Option<f64>,
+    /// Required thrust cant off the tow axis, radians — `sin⁻¹(r/d) + φ`.
+    pub cant_angle_rad: Option<f64>,
+    /// Mass of the rock being tugged, kg.
+    pub rock_mass_kg: f64,
+    /// `a · T`, m/s — what the tow *delivers*, and a true upper bound on what it
+    /// is worth. **Never the margin**: see [`tow_equivalent_dv`].
+    pub delivered_dv_m_s: f64,
+    /// The impulsive equivalent, m/s — [`tow_equivalent_dv`].
+    pub equivalent_dv_m_s: f64,
+    /// The lead expressed in orbital periods, which is the unit the required-Δv
+    /// law is stated in.
+    pub lead_periods: f64,
+    /// Cheap estimate of the Δv this lead requires, m/s — `None` below
+    /// [`REQUIRED_DV_LAW_MIN_PERIODS`], where the law does not apply.
+    pub required_dv_estimate_m_s: Option<f64>,
+    /// `equivalent / required` — `None` whenever the requirement is.
+    pub margin: Option<f64>,
+    /// Whether any thrust can hold this station. **Separate from a `None` thrust**
+    /// so a display can distinguish "no solution exists here" from "the geometry
+    /// is degenerate", and in particular can avoid printing `0.000 N`, which reads
+    /// as station-keeping being *free* at exactly the distance where it is
+    /// impossible.
+    pub holds_station: bool,
+}
+
+/// The b-plane perigee (m) a tow produces, against a scenario held by
+/// reference — the form a background worker can call.
+///
+/// [`MissionCore::towed_perigee`] delegates here rather than repeating the body,
+/// so the on-demand panel probe and any blocking caller cannot come to describe
+/// different physics. Same anti-fork move as `perigee_scale` in
+/// `core::deflection`, and for the same reason: the sentinel handling below
+/// (a pass that leaves the scan gate entirely is a **clean miss**, reported as
+/// `+∞`) is exactly the kind of thing that gets copied wrong once.
+pub fn towed_perigee_on(
+    sc: &RealFieldScenario,
+    tow_lead_seconds: f64,
+    duration_seconds: f64,
+    hover: HoverGeometry,
+    dir: TowDirection,
+) -> Result<f64, ScenarioError> {
+    let ds = sc.deflection()?;
+    let tow_start = sc.impact_epoch().shifted_by_seconds(-tow_lead_seconds);
+    let window = TowWindow::from_duration(tow_start, duration_seconds).ok_or_else(|| {
+        ScenarioError::NominalNotAHit(format!("invalid tow duration {duration_seconds} s"))
+    })?;
+    let tow = MissionCore::tow_term(sc.ephemeris(), hover, dir, window).ok_or_else(|| {
+        ScenarioError::NominalNotAHit("degenerate tractor hover geometry".into())
+    })?;
+    Ok(ds
+        .towed_encounter(tow_start, &tow)?
+        .map_or(f64::INFINITY, |e| e.perigee))
+}
+
+/// Run one [`TractorPlan`] against the real field: the perigee it produces and
+/// the nominal it moved from.
+///
+/// **Both numbers, always, and that is the point.** The tractor's most
+/// instructive result is that a feeble tug moves the perigee the *wrong way* —
+/// the campaign measures −188 km — and a probe that returned only the achieved
+/// perigee would let a panel show a user tuning steadily toward a deeper impact
+/// while the margin readout crept upward. The pair makes the direction printable.
+pub fn probe_tow_plan(
+    sc: &RealFieldScenario,
+    plan: &TractorPlan,
+) -> Result<(f64, f64), ScenarioError> {
+    let nominal = sc
+        .deflection()?
+        .nominal_encounter()?
+        .map_or(f64::INFINITY, |e| e.perigee);
+    let towed = towed_perigee_on(
+        sc,
+        plan.lead_seconds,
+        plan.effective_duration_seconds(),
+        plan.hover(),
+        plan.direction(),
+    )?;
+    Ok((towed, nominal))
+}
+
+/// Score a [`TractorPlan`] with arithmetic only. `period_seconds` is the
+/// threat's heliocentric period, which converts the lead into the periods the
+/// required-Δv law is stated in.
+pub fn tractor_readout(plan: &TractorPlan, period_seconds: f64) -> TractorReadout {
+    let hover = plan.hover();
+    let flyable = plan.is_flyable();
+    // A spacecraft inside the asteroid has no tow to report. Reporting `None`
+    // rather than the (perfectly finite, perfectly meaningless) `G·m/d²` is what
+    // makes the panel able to say so.
+    let tow = flyable.then(|| hover.tow_acceleration()).flatten();
+    let duration = plan.effective_duration_seconds();
+    let a = tow.unwrap_or(0.0);
+    let delivered = a * duration;
+    let equivalent = tow_equivalent_dv(a, duration, plan.lead_seconds);
+    let lead_periods = if period_seconds > 0.0 {
+        plan.lead_seconds / period_seconds
+    } else {
+        0.0
+    };
+    let required = required_dv_estimate(lead_periods);
+    TractorReadout {
+        tow_acceleration_m_s2: tow,
+        station_keeping_thrust_n: flyable
+            .then(|| hover.station_keeping_thrust_n(rock_mass_kg(plan.rock_radius_m)))
+            .flatten(),
+        cant_angle_rad: flyable.then(|| hover.cant_angle_rad()).flatten(),
+        rock_mass_kg: rock_mass_kg(plan.rock_radius_m),
+        delivered_dv_m_s: delivered,
+        equivalent_dv_m_s: equivalent,
+        lead_periods,
+        required_dv_estimate_m_s: required,
+        margin: required.and_then(|r| (r > 0.0).then_some(equivalent / r)),
+        holds_station: plan.holds_station(),
     }
 }
 
@@ -2327,17 +2698,21 @@ mod tests {
     const AU_M: f64 = AU_KM * M_PER_KM;
 
     /// The along-track Δv the headline curve requires at an **8-period** lead
-    /// (≈6.32 yr) to clear [`SAFE_PERIGEE_TARGET_M`], straight from `curve.json`.
+    /// (≈6.32 yr) to clear [`SAFE_PERIGEE_TARGET_M`] — an alias kept so this
+    /// module's existing readers stay readable.
     ///
     /// The cheapest point on the whole sweep, and therefore the lead every
     /// deflection-method headline is quoted at — the nuclear term's "32× above the
     /// intact-deflection ceiling" and the tractor's shortfall both rest on it.
     ///
-    /// **Module-scope so the two tests cannot drift.** It began as a local `const`
-    /// inside the nuclear comparison; the tractor test needs the same number, and
-    /// a second copy would be free to go stale against the first. One definition,
-    /// two callers — the same reason `secular_oracle` was lifted out of
-    /// `yarkovsky.rs` and `SB441_BODIES` has a drift test.
+    /// **It now lives in shipping code, not here.** It was a `#[cfg(test)]`
+    /// constant, which was fine while only tests cited it and became the blocker
+    /// the moment a *readout* needed the same number: the release build could not
+    /// see it, so a panel had no way to say what the curve requires without
+    /// re-deriving it. Promoted to [`super::REQUIRED_DV_AT_EIGHT_PERIODS`],
+    /// alongside [`super::REQUIRED_DV_AT_ONE_PERIOD`] which anchors the cheap
+    /// estimate. Same discipline as before — one definition, every caller — with
+    /// the definition somewhere every caller can reach.
     ///
     /// `deflection_methods_compared_at_one_bar_on_the_real_threat` solves this lead
     /// **live** and asserts it against this constant, so the constant is validated
@@ -2345,7 +2720,7 @@ mod tests {
     /// measured, one `required_dv_along_track` at this lead costs **236.6 s**,
     /// against **12.4 s** for a whole tow probe. Paying that twice for an identical
     /// number would nearly double the binding suite's runtime.
-    const CURVE_JSON_DV_AT_8_PERIODS: f64 = 0.066_218_75;
+    const CURVE_JSON_DV_AT_8_PERIODS: f64 = super::REQUIRED_DV_AT_EIGHT_PERIODS;
 
     // --- The porkchop layer -------------------------------------------------
 
@@ -3316,20 +3691,76 @@ mod tests {
             "the campaign safe-perigee target moved; curve.json (and the expectations \
              below) were swept against 20 000 km and must be regenerated"
         );
-        // (lead_seconds, required_dv) pairs straight from curve.json.
+        // (lead_periods, lead_seconds, required_dv) triples straight from curve.json.
         let cases = [
-            (12_464_104.312150536_f64, 0.587_75_f64), // 0.5 period
-            (24_928_208.624301072, 0.509_75),         // 1.0 period
-            (49_856_417.248602144, 0.255_125),        // 2.0 periods
+            (0.5_f64, 12_464_104.312150536_f64, 0.587_75_f64),
+            (1.0, 24_928_208.624301072, 0.509_75),
+            (2.0, 49_856_417.248602144, 0.255_125),
         ];
-        for (lead, expected) in cases {
+        let mut live = Vec::new();
+        for (periods, lead, expected) in cases {
             let dv = mc.required_dv_along_track(lead, target).expect("dv solve");
             let rel = (dv - expected).abs() / expected;
             assert!(
                 rel < 0.02,
                 "lead {lead:.0}s: dv {dv:.5} vs curve.json {expected:.5} (rel {rel:.3})"
             );
+            live.push((periods, dv));
         }
+
+        // --- and the cheap law the tractor panel reads, against the same solves ---
+        //
+        // `required_dv_estimate` is `Δv(1)/n`. Its anchor is a shipping constant, so
+        // the first thing to check is that the constant is still the curve's
+        // 1-period point — the drift this whole test exists to catch, now that a
+        // *readout* cites the number and not only a test.
+        let (_, live_one_period) = live[1];
+        let anchor_rel =
+            (live_one_period - REQUIRED_DV_AT_ONE_PERIOD).abs() / REQUIRED_DV_AT_ONE_PERIOD;
+        assert!(
+            anchor_rel < 0.02,
+            "the tractor panel's required-Δv anchor drifted from the live curve: \
+             live {live_one_period:.5} vs shipped {REQUIRED_DV_AT_ONE_PERIOD:.5} \
+             (rel {anchor_rel:.3}) — the panel is now quoting a stale requirement"
+        );
+
+        // Inside its stated range the law is good to a few percent.
+        let (two_periods, live_two_periods) = live[2];
+        let est = required_dv_estimate(two_periods).expect("2 periods is inside the law");
+        let est_rel = (est - live_two_periods).abs() / live_two_periods;
+        assert!(
+            est_rel < 0.05,
+            "the 1/lead estimate should track the real solve inside its range: \
+             est {est:.5} vs live {live_two_periods:.5} (rel {est_rel:.3})"
+        );
+
+        // **And the validity floor is measured here, not merely asserted in a doc.**
+        // At half a period the law is not slightly off, it is the wrong shape — the
+        // sub-orbital arc has not had time to turn a period change into along-track
+        // drift. Extrapolating `Δv(1)/n` down to 0.5 predicts ~1.02 m/s against a
+        // real ~0.59, so a readout that printed it would be ~1.7× wrong. This is the
+        // evidence for `REQUIRED_DV_LAW_MIN_PERIODS`; without it that constant is a
+        // guess someone could "tidy" away.
+        let (half_period, live_half_period) = live[0];
+        assert!(
+            required_dv_estimate(half_period).is_none(),
+            "the estimate must decline below {REQUIRED_DV_LAW_MIN_PERIODS} period(s), \
+             not extrapolate into a regime it does not describe"
+        );
+        let would_have_been = REQUIRED_DV_AT_ONE_PERIOD / half_period;
+        let law_error = would_have_been / live_half_period;
+        assert!(
+            law_error > 1.4,
+            "the floor is only worth having if the law really fails below it; at \
+             {half_period} period the extrapolation gives {would_have_been:.5} against a \
+             live {live_half_period:.5} ({law_error:.2}×) — if this ever falls to ~1 the \
+             floor should be lowered, with the curve re-swept to prove it"
+        );
+        println!(
+            "1/lead law: exact to {:.1}% at 2 periods; below {REQUIRED_DV_LAW_MIN_PERIODS} \
+             period it is {law_error:.2}x wrong and the estimate declines to answer",
+            100.0 * est_rel
+        );
     }
 
     /// Kernel-gated (release-run). **The deflection spectrum, measured on *this*
@@ -4349,6 +4780,132 @@ mod tests {
         );
     }
 
+
+    /// The tractor panel's rock-radius knob must stay **inside the tractor**.
+    ///
+    /// `threat_body_matches_the_srp_default` states the rule this guards: the
+    /// frontend must not invent a third rock. That rule was written when the
+    /// radius was a constant, and a user-tweakable radius is exactly the edit that
+    /// could break it — silently, because nothing about a wrong hover distance
+    /// looks wrong. The failure would be the launch-window map dividing by the mass
+    /// of one body while the force menu models another, which is the same class of
+    /// bug as `payload_kg` meaning two things.
+    ///
+    /// So this pins the seam in both directions: the what-if path reproduces the
+    /// shipping configuration exactly at the shipping radius, and moving the knob
+    /// moves *only* the hover geometry.
+    #[test]
+    fn the_tractor_radius_knob_does_not_reach_the_shipping_rock() {
+        // At the shipping radius the explorable path and the pinned path are the
+        // same configuration — not merely similar. If these ever diverge, every
+        // tractor number the campaign quotes is measured on a different body than
+        // the panel shows.
+        let shipped = tractor_hover(2.0e4);
+        let explored = tractor_hover_over(2.0e4, TRACTOR_HOVER_RADII, THREAT_RADIUS_M);
+        assert_eq!(shipped.hover_distance_m, explored.hover_distance_m);
+        assert_eq!(shipped.asteroid_radius_m, explored.asteroid_radius_m);
+        assert_eq!(shipped.spacecraft_mass_kg, explored.spacecraft_mass_kg);
+        assert_eq!(shipped.plume_half_width_rad, explored.plume_half_width_rad);
+        assert_eq!(rock_mass_kg(THREAT_RADIUS_M), threat_mass_kg());
+
+        // Now move the knob a long way and confirm the pinned rock has not moved.
+        // `threat_mass_kg` is the porkchop's divisor and the SRP area-to-mass
+        // ratio's source; it is a function of a constant and must stay one.
+        let before = threat_mass_kg();
+        let big = tractor_hover_over(2.0e4, TRACTOR_HOVER_RADII, 4.0 * THREAT_RADIUS_M);
+        assert_eq!(
+            threat_mass_kg(),
+            before,
+            "exploring a bigger rock in the tractor panel changed the mass the \
+             launch-window map divides by"
+        );
+        assert_eq!(big.asteroid_radius_m, 4.0 * THREAT_RADIUS_M);
+
+        // And the physics the knob is *for*: at fixed d/r the tow goes as 1/r², so
+        // a rock four times the radius is sixteen times harder to tug — while the
+        // Δv it needs is unchanged, because the threat is propagated as a test
+        // particle and its own mass never enters its trajectory. That asymmetry is
+        // the teaching point the knob exists to expose.
+        let small_tow = shipped.tow_acceleration().expect("tow");
+        let big_tow = big.tow_acceleration().expect("tow");
+        let ratio = small_tow / big_tow;
+        assert!(
+            (ratio - 16.0).abs() < 1.0e-9,
+            "at fixed d/r the tow must scale as 1/r²; got {ratio:.6}x for a 4x radius"
+        );
+
+        // Station-keeping runs the other way — it balances the body's own gravity,
+        // so it grows as r³/r² = r. Sixty-four times the mass at four times the
+        // distance is four times the thrust.
+        let small_thrust = shipped
+            .station_keeping_thrust_n(rock_mass_kg(THREAT_RADIUS_M))
+            .expect("thrust");
+        let big_thrust = big
+            .station_keeping_thrust_n(rock_mass_kg(4.0 * THREAT_RADIUS_M))
+            .expect("thrust");
+        let thrust_ratio = big_thrust / small_thrust;
+        assert!(
+            (thrust_ratio - 4.0).abs() < 1.0e-9,
+            "station-keeping thrust must scale as r at fixed d/r; got {thrust_ratio:.6}x"
+        );
+    }
+
+    /// The cheap models' shapes, without kernels — the algebra the calibrated
+    /// test in `gravity_tractor_measured_on_the_real_threat` then scores against
+    /// the real field.
+    #[test]
+    fn the_cheap_tractor_models_have_the_right_shape() {
+        // Towing the ENTIRE lead is worth exactly half its delivered Δv. This is
+        // the single most useful thing the model says — it is why starting early
+        // beats towing hard — so it is pinned exactly rather than approximately.
+        let a = 1.0e-10;
+        let lead = 2.0e8;
+        assert!((tow_equivalent_dv(a, lead, lead) - 0.5 * a * lead).abs() < 1.0e-20);
+
+        // A vanishing tow at the very start of the lead is worth what it delivers:
+        // the correction is second order in T/L, so the two models agree in the
+        // limit and diverge only as the tow stretches.
+        let brief = 1.0e-4 * lead;
+        let rel = (tow_equivalent_dv(a, brief, lead) - a * brief).abs() / (a * brief);
+        assert!(rel < 1.0e-3, "a brief tow should be worth its delivered Δv; rel {rel:.2e}");
+
+        // Monotone in duration and never above the delivered bound.
+        let mut prev = 0.0;
+        for i in 1..=20 {
+            let t = lead * f64::from(i) / 20.0;
+            let eq = tow_equivalent_dv(a, t, lead);
+            assert!(eq > prev, "equivalent Δv must rise with tow duration");
+            assert!(eq <= a * t, "the equivalent must never exceed the delivered Δv");
+            prev = eq;
+        }
+
+        // Degenerate inputs return 0 rather than NaN/inf — this feeds a live
+        // readout, and a panel drawing "NaN" is how a physics bug looks like a
+        // rendering bug.
+        assert_eq!(tow_equivalent_dv(a, 1.0e7, 0.0), 0.0);
+        assert_eq!(tow_equivalent_dv(a, 1.0e7, -1.0), 0.0);
+        // Over-long tows clamp to the lead instead of turning the factor negative,
+        // which would print a *negative* deflection for a longer tow.
+        assert_eq!(
+            tow_equivalent_dv(a, 5.0 * lead, lead),
+            tow_equivalent_dv(a, lead, lead)
+        );
+
+        // The required-Δv law and its floor.
+        assert_eq!(required_dv_estimate(1.0), Some(REQUIRED_DV_AT_ONE_PERIOD));
+        assert_eq!(required_dv_estimate(2.0), Some(REQUIRED_DV_AT_ONE_PERIOD / 2.0));
+        assert!(required_dv_estimate(0.999).is_none());
+        // The 8-period constant the headlines quote must sit on the same law it
+        // anchors, or the panel and HANDOFF describe different curves.
+        let est_eight = required_dv_estimate(8.0).expect("8 periods is inside the law");
+        let rel8 = (est_eight - REQUIRED_DV_AT_EIGHT_PERIODS).abs() / REQUIRED_DV_AT_EIGHT_PERIODS;
+        assert!(
+            rel8 < 0.05,
+            "the law and the recorded 8-period point must agree to a few percent: \
+             est {est_eight:.6} vs recorded {REQUIRED_DV_AT_EIGHT_PERIODS:.6} (rel {rel8:.3})"
+        );
+    }
+
     /// Kernel-gated (release-run). **The gravity tractor, measured on *this*
     /// threat rather than on the paper's** — the gentle end of §5's spectrum,
     /// completing the table [`deflection_methods_compared_at_one_bar_on_the_real_threat`]
@@ -4443,7 +5000,7 @@ mod tests {
         // Towing for the whole lead is still not enough, so the solver must say so
         // by name rather than hand back the cap. This is the real-field exercise of
         // `TowDurationCapped`; the kernel-free suite pins its shape.
-        let outcome = mc.required_tow_duration(lead, SAFE_PERIGEE_TARGET_M, hover);
+        let outcome = mc.required_tow_duration(lead, SAFE_PERIGEE_TARGET_M, hover, TowDirection::Prograde);
         match outcome {
             Err(ScenarioError::Deflection(DeflectionError::TowDurationCapped {
                 max_duration_s,
@@ -4516,7 +5073,7 @@ mod tests {
         let mass_estimate = hover.spacecraft_mass_kg * shortfall;
         let generous = tractor_hover(2.0 * mass_estimate);
         let solved = mc
-            .required_tow_duration(lead, SAFE_PERIGEE_TARGET_M, generous)
+            .required_tow_duration(lead, SAFE_PERIGEE_TARGET_M, generous, TowDirection::Prograde)
             .expect("twice the extrapolated mass should close inside the lead");
         println!(
             "extrapolated closing mass ~{:.0} t; at 2x that ({:.0} t) the solve wants \
@@ -4534,7 +5091,7 @@ mod tests {
         // tow for 20% less and it does not. Same shape as the kernel-free test, but
         // this one is standing on the shipping force model.
         let at_solved = mc
-            .towed_perigee(lead, solved, generous)
+            .towed_perigee(lead, solved, generous, TowDirection::Prograde)
             .expect("verify at the solved duration");
         assert!(
             at_solved >= 0.98 * SAFE_PERIGEE_TARGET_M,
@@ -4542,7 +5099,7 @@ mod tests {
             SAFE_PERIGEE_TARGET_M
         );
         let at_short = mc
-            .towed_perigee(lead, 0.8 * solved, generous)
+            .towed_perigee(lead, 0.8 * solved, generous, TowDirection::Prograde)
             .expect("verify 20% short");
         assert!(
             at_short < SAFE_PERIGEE_TARGET_M,
@@ -4554,6 +5111,56 @@ mod tests {
             solved / (365.25 * 86_400.0),
             at_solved / 1000.0,
             at_short / 1000.0
+        );
+
+        // ---- the calibration the live readout rests on ----------------------
+        // `solved` is a real-field answer: tow this long and the perigee lands on
+        // the bar. That makes this the one point in the project where a *cheap*
+        // tractor model can be scored against the truth — and the tractor panel
+        // needs a cheap model, because it must answer while a knob is turning and
+        // one probe here costs 12.4 s.
+        //
+        // Two candidates, both free to evaluate, scored on the same point at no
+        // extra propagation cost:
+        //
+        //   a·T                  what the tow delivers — a true upper bound
+        //   a·T·(1 − T/2L)       the impulsive equivalent (`tow_equivalent_dv`)
+        //
+        // The bound this pins is not "the model is accurate". It is **which way
+        // each one is wrong**, which is the property a safety readout actually
+        // needs: a panel that overstates a deflection tells an operator their
+        // tractor closes when it does not.
+        let a_gen = generous.tow_acceleration().expect("tow");
+        let naive = a_gen * solved;
+        let equivalent = tow_equivalent_dv(a_gen, solved, lead);
+        // At `solved` the real field reaches the bar, so the honest impulsive
+        // equivalent of this tow is — by construction — the curve's requirement at
+        // this lead. That is what both candidates are scored against.
+        let naive_ratio = naive / required_dv;
+        let equivalent_ratio = equivalent / required_dv;
+        println!(
+            "cheap-model calibration at the solved duration (truth = 1.000x by construction)\n\
+             naive a*T          = {naive:.6} m/s  -> {naive_ratio:.3}x  ({:+.0}%)\n\
+             equivalent a*T*(1-T/2L) = {equivalent:.6} m/s  -> {equivalent_ratio:.3}x  ({:+.0}%)",
+            100.0 * (naive_ratio - 1.0),
+            100.0 * (equivalent_ratio - 1.0),
+        );
+        assert!(
+            naive_ratio > 1.05,
+            "the naive delivered Δv must come out OPTIMISTIC — that is the whole \
+             reason the panel does not print it as the margin; got {naive_ratio:.3}x"
+        );
+        assert!(
+            (0.7..1.0).contains(&equivalent_ratio),
+            "`tow_equivalent_dv` must land SHORT of the truth and within ~30% of it: \
+             short so the readout errs toward 'not enough', close so it stays useful. \
+             Got {equivalent_ratio:.3}x — if this ever exceeds 1.0 the panel has \
+             started flattering deflections and the model must be re-derived, not \
+             re-tuned"
+        );
+        assert!(
+            equivalent_ratio < naive_ratio,
+            "the equivalent must be the more conservative of the two by construction"
         );
     }
 }

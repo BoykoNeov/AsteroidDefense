@@ -257,6 +257,61 @@ var pork_mass_solving := false
 
 signal porkchop_changed
 
+## ---------------------------------------------------------------- tractor ---
+##
+## The gravity-tractor bench: six knobs and a live scoring of what they buy.
+##
+## **The knobs are a table, not a set of variables**, and that is the whole design.
+## The planner spends a dedicated action pair per parameter (`plan_lead_up` /
+## `plan_lead_down`, `plan_dv_up` / `plan_dv_down`, …), which is fine at two
+## parameters and is twelve input actions and twelve `main.gd` branches at six.
+## Here UP/DOWN picks a row and LEFT/RIGHT adjusts it — the porkchop's cursor
+## idiom — so **adding a parameter is one row in `TRACTOR_KNOBS` and nothing
+## else**. No input action, no key, no branch, no plumbing.
+##
+## Each row is [id, label, unit, min, max, step_factor, is_multiplicative]. A
+## multiplicative knob steps by ×/÷ (mass and hover distance span decades and are
+## unusable on a linear step); an additive one steps by ±.
+const TRACTOR_KNOBS := [
+	["mass", "SPACECRAFT MASS", "T", 1.0, 4000.0, 1.5, true],
+	# The hover minimum here is a PLACEHOLDER and is overridden from the core in
+	# `_seed_tractor_defaults`. The real floor is `1/cos(plume)` ~ 1.064 radii, not
+	# the surface at 1.0: between them the spacecraft is outside the body, tows
+	# perfectly well, and has no station-keeping solution at all. A hand-written
+	# bound "just above the surface" lands squarely inside that band.
+	["hover", "HOVER DISTANCE", "R", 1.0, 8.0, 1.15, true],
+	["radius", "ROCK RADIUS", "M", 15.0, 800.0, 1.25, true],
+	["lead", "TOW START", "ORB", 0.25, 11.5, 0.25, false],
+	["duty", "TOW DURATION", "PCT", 0.0, 100.0, 5.0, false],
+	["dir", "TOW DIRECTION", "", 0.0, 1.0, 1.0, false],
+]
+
+## Live knob values, keyed by the ids above. Seeded from the core in `_ready` so
+## the panel opens on the configuration the campaign actually measured (Lu &
+## Love's 20 t at d/r = 1.5 over this threat) rather than on numbers restated
+## here — the frontend names a source for this exactly as it does for a drawn body.
+var tractor := {
+	"mass": 20.0,        # tonnes
+	"hover": 1.5,        # body radii  (overwritten from the core)
+	"radius": 150.0,     # m           (overwritten from the core)
+	"lead": 8.0,         # orbital periods — the campaign's cheapest lead
+	"duty": 100.0,       # percent of the lead spent towing
+	"dir": 0.0,          # 0 prograde, 1 retrograde
+}
+var tractor_row := 0                   # which knob the cursor is on
+var tractor_panel_open := false
+var tractor_probing := false           # the on-demand ~12 s full-field probe is running
+## The lead below which the required-Δv law does not hold, in orbital periods —
+## read from the core, never assumed. The panel refuses to print a requirement
+## below it rather than printing one that is the wrong shape.
+var tractor_law_min_periods := 1.0
+var tractor_target_perigee_m := 0.0
+## The closest hover the plume geometry permits, in body radii — read from the
+## core, never assumed. See the note on the `hover` row of `TRACTOR_KNOBS`.
+var tractor_hover_min := 1.0
+
+signal tractor_changed
+
 var plan_lead_d := 180.0               # intercept lead before impact epoch, days
 var plan_dv_ms := 30.0                 # impulse magnitude, m/s
 var plan_retro := true                 # true = retrograde (against velocity)
@@ -369,6 +424,7 @@ func _process(delta: float) -> void:
 	_poll_porkchop()
 	_poll_cell_verify()
 	_poll_required_mass()
+	_poll_tow_probe()
 	_tick_plan_debounce(delta)
 
 	if paused:
@@ -528,6 +584,10 @@ func _install_threat() -> void:
 	tier2_measuring = false
 
 	mission_online = true
+	# The tractor bench opens on the core's own configuration, not on numbers
+	# restated in GDScript — seeded here because the shipping hover distance is a
+	# core constant and this is the first moment it is readable.
+	_seed_tractor_defaults()
 	# The b-plane frame is built with the scenario, so the close-up is live the
 	# moment the threat is.
 	encounter_online = true
@@ -1277,6 +1337,188 @@ func _poll_required_mass() -> void:
 		# come from rather than the payload. `hud.gd` clips as a backstop.
 		event_logged.emit(_stamp(t) + "  NEEDS " + pork_required_mass_label())
 	porkchop_changed.emit()
+
+
+# ----------------------------------------------------------------- tractor ---
+
+## Adopt the core's tractor configuration as the panel's starting point.
+##
+## Called once the threat solution lands, because the shipping hover distance and
+## the law's validity floor are *core* facts. Restating them here would be the
+## bug `tractor_defaults()` exists to prevent — the panel and the physics quietly
+## describing different tractors.
+func _seed_tractor_defaults() -> void:
+	if not mission_online:
+		return
+	var d: Dictionary = mission.tractor_defaults()
+	tractor.hover = float(d.hover_radii)
+	tractor.radius = float(d.rock_radius_m)
+	tractor_law_min_periods = float(d.law_min_periods)
+	tractor_target_perigee_m = float(d.target_perigee_m)
+	tractor_hover_min = float(d.min_hover_radii)
+	# Seeding the bound is not enough — the *current* value must be pulled inside
+	# it too, or a default that predates the bound sits below it untouched until
+	# the knob is first turned.
+	tractor.hover = maxf(tractor.hover, tractor_hover_min)
+
+
+## Lead time in seconds — the knob is in orbital periods, because that is the
+## unit the required-Δv law is stated in and the unit the campaign quotes leads
+## in ("eight orbits"). Days would be a number with no physics attached to it.
+func tractor_lead_s() -> float:
+	return tractor.lead * period_s()
+
+
+func tractor_duration_s() -> float:
+	return tractor_lead_s() * tractor.duty * 0.01
+
+
+## The threat's heliocentric period in seconds, or 0 before the solution lands.
+func period_s() -> float:
+	return mission.period_seconds() if mission_online else 0.0
+
+
+## Everything the panel prints that costs nothing — one call, one dictionary.
+## `{}` before the threat solution exists.
+func tractor_readout() -> Dictionary:
+	if not mission_online:
+		return {}
+	return mission.tractor_readout(
+		tractor.mass * 1000.0, tractor.hover, tractor.radius,
+		tractor_lead_s(), tractor_duration_s(), tractor.dir > 0.5)
+
+
+func move_tractor_cursor(d: int) -> void:
+	tractor_row = wrapi(tractor_row + d, 0, TRACTOR_KNOBS.size())
+	tractor_changed.emit()
+
+
+## Step the selected knob. `dir` is -1 or +1.
+##
+## Multiplicative knobs step by ×/÷ because they span decades: spacecraft mass
+## runs from a smallsat to a battleship and hover distance from grazing to
+## useless, and a linear step that is sensible at one end is invisible at the
+## other. Additive knobs are the ones with a natural unit interval.
+func adjust_tractor(dir: int) -> void:
+	var knob: Array = TRACTOR_KNOBS[tractor_row]
+	var id: String = knob[0]
+	var lo: float = knob[3]
+	var hi: float = knob[4]
+	var step: float = knob[5]
+	var mult: bool = knob[6]
+	var v: float = tractor[id]
+	if id == "dir":
+		# Not a magnitude — a toggle. Both directions of the key flip it, so the
+		# row behaves the way every other row does under LEFT/RIGHT.
+		v = 1.0 - v
+	elif mult:
+		v = v * step if dir > 0 else v / step
+	else:
+		v = v + step * dir
+	# The hover row's floor comes from the core, not from the table: it is a
+	# physics bound (`1/cos(plume)`) and the table's own literal is a placeholder.
+	if id == "hover":
+		lo = maxf(lo, tractor_hover_min)
+	tractor[id] = clampf(v, lo, hi)
+	tractor_changed.emit()
+
+
+## Fire the on-demand full-field probe: one real n-body propagation with the tow
+## term switched on for exactly this window.
+##
+## **The only honest number in the panel.** Everything above it is the cheap
+## model — good to a stated band, and deliberately biased toward "not enough" —
+## while this is the perigee the shipping force model actually produces. Costs
+## ~12 s at the campaign's longest lead, which is why it is a key press and not a
+## live readout.
+func request_tow_probe() -> void:
+	if not mission_online or tractor_probing:
+		return
+	# Both refusals are reachable by turning a knob to a documented end stop, so
+	# they are answered here in words rather than as a raw error from inside the
+	# window constructor twelve seconds later.
+	if tractor_duration_s() <= 0.0:
+		event_logged.emit("NO TOW TO PROBE - TOW DURATION IS ZERO")
+		return
+	if not bool(tractor_readout().get("holds_station", false)):
+		event_logged.emit("NO STATION-KEEPING SOLUTION - RAISE HOVER DISTANCE")
+		return
+	if mission.begin_tow_probe(
+			tractor.mass * 1000.0, tractor.hover, tractor.radius,
+			tractor_lead_s(), tractor_duration_s(), tractor.dir > 0.5):
+		tractor_probing = true
+		event_logged.emit(_stamp(t) + "  TOWING IN FULL N-BODY FIELD - STAND BY")
+	else:
+		event_logged.emit("TOW PROBE REFUSED - " + str(mission.last_error()))
+
+
+func _poll_tow_probe() -> void:
+	if not tractor_probing:
+		return
+	if mission.poll_tow_probe():
+		return
+	tractor_probing = false
+	var p := tractor_probe()
+	if p.is_empty():
+		event_logged.emit(_stamp(t) + "  TOW PROBE FAILED - " + str(mission.last_error()))
+	else:
+		event_logged.emit(_stamp(t) + "  TOW RESULT: " + tractor_probe_label())
+	tractor_changed.emit()
+
+
+## The last full-field probe, or `{}` if none has been run.
+func tractor_probe() -> Dictionary:
+	if not mission_online:
+		return {}
+	return mission.tow_probe()
+
+
+## Whether that probe describes the knobs as they stand right now.
+##
+## Same staleness discipline the porkchop's verdict gets, and it matters more
+## here: every knob is continuous, so a probe is one keypress away from being
+## about a configuration the operator has left. A perigee shown as current when
+## it is not would be a measured number lying.
+func tractor_probe_is_current() -> bool:
+	var p := tractor_probe()
+	if p.is_empty():
+		return false
+	return is_equal_approx(float(p.spacecraft_mass_kg), tractor.mass * 1000.0) \
+		and is_equal_approx(float(p.hover_radii), tractor.hover) \
+		and is_equal_approx(float(p.rock_radius_m), tractor.radius) \
+		and is_equal_approx(float(p.lead_seconds), tractor_lead_s()) \
+		and is_equal_approx(float(p.duration_seconds), tractor_duration_s()) \
+		and bool(p.retrograde) == (tractor.dir > 0.5)
+
+
+## The probe in one line — **perigee and the signed shift, never just the ratio**.
+##
+## The sign is the finding. A tractor too weak to carry the b-plane point past
+## Earth walks it *toward* the centre first, so a feeble tow makes the impact
+## deeper: the campaign measures the shipping 20 t tractor moving perigee 3000.0
+## -> 2811.6 km. A user tuning a knob and watching only a margin creep upward
+## would read that as progress. Printing the direction is what stops the panel
+## teaching the opposite of the lesson.
+func tractor_probe_label() -> String:
+	var p := tractor_probe()
+	if p.is_empty():
+		return "NO PROBE"
+	if bool(p.clean_miss):
+		return "CLEAN MISS - THREAT RETIRED"
+	var per := float(p.perigee_m) / 1000.0
+	var shift := float(p.shift_m) / 1000.0
+	var arrow := "DEEPER" if shift < 0.0 else "OUTWARD"
+	return "PERIGEE %s KM (%+.1f KM %s)" % [group_num(int(per)), shift, arrow]
+
+
+## Whether the probed perigee clears the campaign's safe bar — the same
+## `SAFE_PERIGEE_TARGET_M` the headline Δv curve and the launch-window map's
+## required mass are quoted against, so the three numbers compose.
+func tractor_probe_clears() -> bool:
+	var p := tractor_probe()
+	if p.is_empty():
+		return false
+	return bool(p.clean_miss) or float(p.perigee_m) >= tractor_target_perigee_m
 
 
 ## The last required-mass result, or `{}` if none has been solved for this grid.

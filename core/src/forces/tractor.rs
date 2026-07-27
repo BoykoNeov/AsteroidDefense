@@ -212,6 +212,38 @@ impl HoverGeometry {
         }
     }
 
+    /// The closest a spacecraft with an exhaust plume of half-width `φ` can hover,
+    /// in body radii, and still have a station-keeping solution — `1/cos φ`.
+    ///
+    /// # Why this is not `1` (and why a UI that assumes it is will lie)
+    ///
+    /// The cant is `sin⁻¹(r/d) + φ`, and the thrust divides by `cos` of it. So the
+    /// wall is not the surface, it is wherever the cant reaches 90°:
+    ///
+    /// ```text
+    ///   sin⁻¹(r/d) + φ = π/2   ⟺   r/d = cos φ   ⟺   d/r = 1/cos φ
+    /// ```
+    ///
+    /// At Lu & Love's 20° plume that is **1.064 body radii**, not 1.0 — a band of
+    /// hover distances that clear the surface, tow perfectly well, and have no
+    /// station-keeping solution whatsoever. Approaching it the thrust diverges,
+    /// which is the honest reason a tractor cannot simply hover closer to buy a
+    /// larger `1/d²` tow; past it there is no station to keep.
+    ///
+    /// Exposed as a closed form so a control that offers a hover distance can take
+    /// its lower bound from the physics instead of guessing a round number just
+    /// above the surface. `None` for a plume that is not a sane half-angle
+    /// (non-finite, negative, or ≥ 90°, which forbids hovering at any distance).
+    pub fn min_hover_radii_for_station_keeping(plume_half_width_rad: f64) -> Option<f64> {
+        if !plume_half_width_rad.is_finite()
+            || plume_half_width_rad < 0.0
+            || plume_half_width_rad >= std::f64::consts::FRAC_PI_2
+        {
+            return None;
+        }
+        Some(1.0 / plume_half_width_rad.cos())
+    }
+
     /// The acceleration the asteroid feels, `G·m_sc/d²` (m/s²).
     ///
     /// Note what is absent: the asteroid's mass (it is a test particle) and the
@@ -243,11 +275,30 @@ impl HoverGeometry {
 
     /// Whether the hover point is outside the body at all (`d > r`). A tractor
     /// inside the asteroid is not a conservative estimate, it is nonsense.
+    ///
+    /// **This is the weaker of the two geometric constraints**, and on its own it
+    /// is not enough to call a configuration flyable — see
+    /// [`Self::can_hold_station`]. Clearing the surface says the *tow* is
+    /// meaningful; it says nothing about whether the spacecraft can stay there.
     pub fn is_clear_of_surface(&self) -> bool {
         self.hover_distance_m.is_finite()
             && self.asteroid_radius_m.is_finite()
             && self.asteroid_radius_m > 0.0
             && self.hover_distance_m > self.asteroid_radius_m
+    }
+
+    /// Whether a station-keeping solution exists at all: the cant must stay under
+    /// 90°, or no amount of thrust has a component along the tow axis.
+    ///
+    /// Strictly stronger than [`Self::is_clear_of_surface`], and the distinction
+    /// is a real one rather than defensive coding. Gravity does not care where the
+    /// nozzles point, so a spacecraft hovering between
+    /// [`Self::min_hover_radii_for_station_keeping`] and the surface still *tows* — the
+    /// mission is what becomes impossible, not the physics. A readout that
+    /// conflated the two would print a healthy tow beside a thrust of zero.
+    pub fn can_hold_station(&self) -> bool {
+        self.cant_angle_rad()
+            .is_some_and(|cant| cant.cos().is_finite() && cant.cos() > 0.0)
     }
 
     /// Total thrust (N) the spacecraft must sustain to hold station over a body of
@@ -511,6 +562,73 @@ mod tests {
             thrust > 2.0 * mutual - 0.1 * mutual,
             "canting must roughly double the required thrust: {thrust:.3} vs mutual {mutual:.3}"
         );
+    }
+
+    /// **The wall is not the surface.** Between `d/r = 1` and `d/r = 1/cos φ`
+    /// there is a band where the spacecraft is outside the body, tows perfectly
+    /// well, and has no station-keeping solution at all — the cant has reached 90°
+    /// and no thrust direction has a component along the tow axis.
+    ///
+    /// This exists because that band is where a hover-distance control naturally
+    /// puts its minimum. "Just above the surface" sounds like the safe bound and
+    /// is not: at Lu & Love's 20° plume the real floor is 1.064 radii, and a
+    /// control offering 1.02 lets a user reach a configuration whose thrust is
+    /// `None` while every other number on screen stays healthy.
+    #[test]
+    fn station_keeping_fails_before_the_surface_does() {
+        let phi = HoverGeometry::lu_love_2005().plume_half_width_rad;
+        let floor = HoverGeometry::min_hover_radii_for_station_keeping(phi).expect("sane plume");
+        // 1/cos(20°) = 1.0642, comfortably above the surface at 1.0.
+        assert!(
+            (floor - 1.0 / phi.cos()).abs() < 1.0e-15,
+            "the floor must be exactly 1/cos(phi)"
+        );
+        assert!(
+            floor > 1.06 && floor < 1.07,
+            "at a 20 deg plume the floor should be ~1.064 radii, got {floor:.4}"
+        );
+
+        let at = |radii: f64| HoverGeometry {
+            spacecraft_mass_kg: 2.0e4,
+            hover_distance_m: radii * 100.0,
+            asteroid_radius_m: 100.0,
+            plume_half_width_rad: phi,
+        };
+
+        // Inside the band: clear of the surface, tows, cannot hold station.
+        let doomed = at(1.02);
+        assert!(doomed.is_clear_of_surface(), "1.02 radii is outside the body");
+        assert!(
+            doomed.tow_acceleration().is_some_and(|a| a > 0.0),
+            "gravity does not care where the nozzles point — the tow is real here"
+        );
+        assert!(!doomed.can_hold_station(), "but the cant has passed 90 deg");
+        assert!(
+            doomed.station_keeping_thrust_n(1.0e11).is_none(),
+            "and there is no thrust that holds it"
+        );
+
+        // Just outside the floor: everything defined, and the thrust is enormous —
+        // the divergence is the honest reason you cannot hover closer for a bigger
+        // 1/d^2 tow.
+        let tight = at(floor * 1.001);
+        assert!(tight.can_hold_station());
+        let near_wall = tight.station_keeping_thrust_n(1.0e11).expect("defined");
+        let comfortable = at(1.5).station_keeping_thrust_n(1.0e11).expect("defined");
+        assert!(
+            near_wall > 10.0 * comfortable,
+            "thrust must blow up approaching the floor: {near_wall:.3} N vs \
+             {comfortable:.3} N at d/r = 1.5"
+        );
+
+        // A plume that cannot be flown at any distance is rejected rather than
+        // returning a floor a caller would treat as reachable.
+        assert!(HoverGeometry::min_hover_radii_for_station_keeping(std::f64::consts::FRAC_PI_2).is_none());
+        assert!(HoverGeometry::min_hover_radii_for_station_keeping(f64::NAN).is_none());
+        assert!(HoverGeometry::min_hover_radii_for_station_keeping(-0.1).is_none());
+        // A zero-width plume needs no cant beyond the surface tangent, so its floor
+        // is exactly the surface.
+        assert_eq!(HoverGeometry::min_hover_radii_for_station_keeping(0.0), Some(1.0));
     }
 
     /// **The bug this term is most likely to grow.** Canting the thrusters is a

@@ -44,9 +44,14 @@ use anise::prelude::Frame;
 use godot::global::godot_warn;
 use nalgebra::Vector3;
 
+use asteroid_core::deflection::DeflectionError;
 use asteroid_core::ephemeris::Ephemeris;
 use asteroid_core::horizons::Neo;
 use asteroid_core::geometry::BPlaneEncounter;
+use asteroid_core::launch_vehicle::{LaunchVehicle, LAUNCH_VEHICLES};
+use asteroid_core::mission::{
+    cell_delivery, porkchop_grid, verify_cell, Porkchop, PorkchopCell, TransferMetrics,
+};
 use asteroid_core::scenario::{
     DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError, SrpParams,
     Tier2Config, ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES,
@@ -1620,6 +1625,417 @@ impl MissionCore {
     }
 }
 
+// --- The porkchop / deliverability view --------------------------------------
+//
+// The frontend half of `core::mission` (HANDOFF §8): a launch × arrival grid the
+// operator can read, and one selected cell verified in the full field. Split by
+// cost exactly as the core layer is — a cheap vehicle-independent grid built once
+// on a worker, and a single expensive propagation fired on demand.
+
+/// Radius of the synthetic threat, metres.
+///
+/// **The frontend must not invent a third rock.** The scenario already commits to
+/// a body through [`SrpParams::sub_km_rock`], which folds 150 m at 2000 kg/m³ into
+/// an area-to-mass ratio and keeps the dimensions as locals — so a delivery layer
+/// that wants the *mass* has no choice but to restate them. Naming them here (and
+/// pinning them to the SRP default by [`threat_body_matches_the_srp_default`])
+/// makes a careless edit to either side fail loudly, the same treatment
+/// `SB441_BODIES` gets against the core's GM table.
+pub const THREAT_RADIUS_M: f64 = 150.0;
+
+/// Bulk density of the synthetic threat, kg/m³ — see [`THREAT_RADIUS_M`].
+pub const THREAT_DENSITY_KG_M3: f64 = 2000.0;
+
+/// Momentum-enhancement factor `β` for the kinetic impactor. DART measured ≈ 3.6
+/// at Dimorphos; one named constant so the grid's delivered-Δv column and the
+/// on-demand full-field verify can never be reading different physics.
+pub const IMPACTOR_BETA: f64 = 3.6;
+
+/// Mass of the synthetic threat, kg — `4/3·π·r³·ρ` from [`THREAT_RADIUS_M`] and
+/// [`THREAT_DENSITY_KG_M3`]. ≈ 2.83e10 kg.
+pub fn threat_mass_kg() -> f64 {
+    (4.0 / 3.0) * std::f64::consts::PI * THREAT_RADIUS_M.powi(3) * THREAT_DENSITY_KG_M3
+}
+
+/// The launcher at `index` in the core's canonical
+/// [`LAUNCH_VEHICLES`](asteroid_core::launch_vehicle::LAUNCH_VEHICLES) table, or
+/// `None` past the end. The frontend cycles this table by index; the table itself
+/// stays in the core so the display and the physics can never offer different
+/// launchers.
+pub fn launch_vehicle(index: usize) -> Option<&'static LaunchVehicle> {
+    LAUNCH_VEHICLES.get(index)
+}
+
+/// How many launchers the frontend can cycle through.
+pub fn launch_vehicle_count() -> usize {
+    LAUNCH_VEHICLES.len()
+}
+
+/// Where the launch axis stops, as a fraction of the campaign span (`impact −
+/// epoch0`). Launching later than this leaves no room for a transfer *and* the
+/// lead the deflection needs afterwards.
+const LAUNCH_AXIS_END_FRACTION: f64 = 0.70;
+
+/// Where the arrival axis starts, as a fraction of the campaign span — the
+/// earliest interception worth plotting, a minimum cruise past `epoch0`.
+const ARRIVAL_AXIS_START_FRACTION: f64 = 0.10;
+
+/// Where the arrival axis stops, as a fraction of the campaign span. Deliberately
+/// short of impact: an intercept in the last months deflects almost nothing
+/// however well aimed (the §5 lever is lead time), so plotting up to the impact
+/// itself would spend a third of the frame on windows that cannot work.
+const ARRIVAL_AXIS_END_FRACTION: f64 = 0.92;
+
+/// Shortest transfer the grid will consider, days. Below this the Lambert arc is a
+/// near-radial sprint no launcher reaches; the cells are blanked by the grid's own
+/// `min_tof` guard rather than filled with astronomical `C3`.
+const MIN_TOF_DAYS: f64 = 90.0;
+
+/// How many complete laps of the Sun a cell's transfer may make, in the shipping
+/// grid.
+///
+/// **Not zero, and that is a correctness choice rather than a nicety.** The
+/// campaign's times of flight run for years, and over spans that long the direct
+/// arc is the slow, ruinously expensive conic: measured at 2.6 yr, direct
+/// `C3 = 933 km²/s²` (no launcher on the list reaches it) against `55` for the
+/// lapping transfer. A `max_revolutions = 0` grid would render its entire
+/// long-time-of-flight half as an infeasible wall — wrong about real mission
+/// design, not merely conservative.
+///
+/// **Two, not one, and that was measured rather than assumed.** On a 24×24 grid
+/// over the default campaign — 379 real transfers, and the count of them Falcon
+/// Heavy (expendable) can actually reach:
+///
+/// | laps | reachable | cheapest `C3` | cost |
+/// |-----:|----------:|--------------:|-----:|
+/// | `0`  | 21        | 1.53 km²/s²   | 4.8 µs/cell |
+/// | `1`  | 56        | 0.34          | 47.8 |
+/// | `2`  | **95**    | 0.34          | 69.0 |
+/// | `3`  | 129       | 0.29          | 106.8 |
+///
+/// A direct-only grid therefore shows an operator **under a quarter** of the
+/// missions that exist. Two laps more than quadruples that and keeps a 120×120
+/// grid near a second on a worker.
+///
+/// Note where the cheapest column lands: allowing even one lap takes the grid to
+/// `C3 = 0.34`, **below the first knot of three of the five vehicle tables**. That
+/// is what made [`LaunchVehicle::payload_kg`]'s old fail-closed-at-both-ends
+/// behaviour visible as a bug, and it is asserted in
+/// [`revolutions_open_windows_and_what_they_cost`] rather than left as a remark.
+///
+/// The table is also the argument for *stopping* at two rather than going higher:
+/// laps keep opening windows (they always will — at long times of flight a tighter
+/// orbit that laps is simply cheaper than crawling round on a huge one), so there
+/// is no natural knee to find, only a cost that keeps doubling for missions whose
+/// cruise grows by a full solar orbit each step. Reproduced by
+/// [`revolutions_open_windows_and_what_they_cost`], which will print the current
+/// numbers if the scenario or the vehicle tables change.
+pub const DEFAULT_MAX_REVOLUTIONS: u32 = 2;
+
+/// A built porkchop grid, ready for the frontend to read column-wise.
+///
+/// Owns the core [`Porkchop`] and nothing else: every accessor here is a
+/// projection of cells the core already solved, so the vehicle-independence the
+/// core layer bought survives to the display — switching launcher re-reads
+/// [`payload_kg_flat`](Self::payload_kg_flat), it never re-solves Lambert.
+pub struct PorkchopView {
+    grid: Porkchop,
+}
+
+/// The outcome of verifying one selected cell in the full `n`-body field.
+///
+/// An enum rather than a struct of sentinels because the three outcomes are
+/// genuinely different states and this project has already been bitten by
+/// collapsing them: a clean miss is the *best* result, and if it shared a `-1`
+/// with "not verified yet" the frontend would print the safest plan as a failure.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CellVerdict {
+    /// The deflected pass left the close-approach scan gate entirely — no Earth
+    /// encounter at all. The best possible outcome, and it has no b-plane numbers
+    /// *because there is no encounter to reduce*, not because they are missing.
+    CleanMiss,
+    /// The deflected pass still passes Earth; here is its b-plane geometry.
+    Encounter {
+        /// Impact parameter `|B|`, m — the miss distance the hit test judges.
+        impact_parameter_m: f64,
+        /// Focused capture radius `b_capture`, m — the bar `|B|` is measured
+        /// against. **These two pair with each other**; the perigee pairs with
+        /// R⊕. Mixing the pairs is the 3C-2c bug (~1.5× too strict).
+        capture_radius_m: f64,
+        /// Perigee `r_p`, m — the focused closest approach, reported alongside
+        /// because it is what "how close did it come" means to a reader.
+        perigee_m: f64,
+        /// Earth's solid radius R⊕, m — the perigee's partner.
+        earth_radius_m: f64,
+        /// The core's own [`BPlaneEncounter::is_hit`]: `|B| ≤ b_capture`.
+        is_hit: bool,
+    },
+    /// The deflected pass is not hyperbolic about Earth — a dead-centre capture.
+    /// A hit with no b-plane reduction available, distinct from a hit that has one.
+    NotHyperbolic,
+}
+
+/// Everything the readout panel shows for one cell, marshalled in one call so the
+/// display cannot assemble a row out of two different cells.
+#[derive(Debug, Clone, Copy)]
+pub struct CellDetail {
+    /// Launch epoch, TDB seconds past J2000.
+    pub launch_tdb: f64,
+    /// Arrival epoch, TDB seconds past J2000.
+    pub arrival_tdb: f64,
+    /// Time of flight, days.
+    pub tof_days: f64,
+    /// Departure `C3`, km²/s².
+    pub c3_km2_s2: f64,
+    /// Arrival relative speed, m/s.
+    pub arrival_v_rel_ms: f64,
+    /// Along-track projection of the impact, m/s — **signed**. Negative is a
+    /// retrograde, orbit-shrinking push: a real lever, not bad aim.
+    pub along_track_proj_ms: f64,
+    /// Complete laps of the Sun this transfer makes (0 = direct).
+    pub revolutions: u32,
+    /// Deliverable impactor mass at this `C3` for the selected vehicle, kg.
+    /// `0` means this launcher cannot reach this launch energy.
+    pub payload_kg: f64,
+    /// The along-track Δv that delivered mass imparts, m/s (signed).
+    pub along_track_dv_ms: f64,
+}
+
+impl PorkchopView {
+    /// Build the grid over a scenario — the worker-thread entry point.
+    ///
+    /// Both axes are derived from the scenario's own campaign (`epoch0` →
+    /// `impact_epoch`) rather than from literals, because an arrival outside the
+    /// propagated nominal span is a `NoTransfer` *by construction*
+    /// (`mission::porkchop_grid`): hardcoded dates would ship a half-blank grid
+    /// with no way to tell physics from an axis bug.
+    /// The shipping grid: [`build_with_revolutions`](Self::build_with_revolutions)
+    /// at [`DEFAULT_MAX_REVOLUTIONS`].
+    pub fn build(
+        scenario: &RealFieldScenario,
+        launch_samples: usize,
+        arrival_samples: usize,
+    ) -> Result<Self, ScenarioError> {
+        Self::build_with_revolutions(
+            scenario,
+            launch_samples,
+            arrival_samples,
+            DEFAULT_MAX_REVOLUTIONS,
+        )
+    }
+
+    /// As [`build`](Self::build), with the lap budget explicit — so how many laps
+    /// the shipping grid allows can be *measured* against the alternatives rather
+    /// than asserted.
+    pub fn build_with_revolutions(
+        scenario: &RealFieldScenario,
+        launch_samples: usize,
+        arrival_samples: usize,
+        max_revolutions: u32,
+    ) -> Result<Self, ScenarioError> {
+        let launch_samples = launch_samples.max(2);
+        let arrival_samples = arrival_samples.max(2);
+        let t0 = scenario.epoch0().tdb_seconds_past_j2000();
+        let span = scenario.impact_epoch().tdb_seconds_past_j2000() - t0;
+
+        let axis = |lo_frac: f64, hi_frac: f64, n: usize| -> Vec<Epoch> {
+            (0..n)
+                .map(|k| {
+                    let f = lo_frac + (hi_frac - lo_frac) * (k as f64 / (n - 1) as f64);
+                    Epoch::from_tdb_seconds_past_j2000(t0 + f * span)
+                })
+                .collect()
+        };
+        let launches = axis(0.0, LAUNCH_AXIS_END_FRACTION, launch_samples);
+        let arrivals = axis(
+            ARRIVAL_AXIS_START_FRACTION,
+            ARRIVAL_AXIS_END_FRACTION,
+            arrival_samples,
+        );
+
+        let grid = porkchop_grid(
+            scenario,
+            &launches,
+            &arrivals,
+            MIN_TOF_DAYS * 86_400.0,
+            /*prograde*/ true,
+            max_revolutions,
+        )
+        .map_err(|e| ScenarioError::Integration(format!("porkchop grid: {e}")))?;
+
+        Ok(Self { grid })
+    }
+
+    /// Number of launch epochs (the grid's first axis / row count).
+    pub fn launch_count(&self) -> usize {
+        self.grid.launch_epochs.len()
+    }
+
+    /// Number of arrival epochs (the grid's second axis / column count).
+    pub fn arrival_count(&self) -> usize {
+        self.grid.arrival_epochs.len()
+    }
+
+    /// The launch axis, TDB seconds past J2000.
+    pub fn launch_tdb(&self) -> Vec<f64> {
+        self.grid
+            .launch_epochs
+            .iter()
+            .map(|e| e.tdb_seconds_past_j2000())
+            .collect()
+    }
+
+    /// The arrival axis, TDB seconds past J2000.
+    pub fn arrival_tdb(&self) -> Vec<f64> {
+        self.grid
+            .arrival_epochs
+            .iter()
+            .map(|e| e.tdb_seconds_past_j2000())
+            .collect()
+    }
+
+    /// The metrics at `[launch][arrival]`, or `None` for a `NoTransfer` cell.
+    pub fn metrics_at(&self, i: usize, j: usize) -> Option<TransferMetrics> {
+        match self.grid.cells.get(i)?.get(j)? {
+            PorkchopCell::Transfer(m) => Some(*m),
+            PorkchopCell::NoTransfer => None,
+        }
+    }
+
+    /// Departure `C3` per cell, km²/s², row-major `[launch][arrival]`.
+    ///
+    /// **`-1.0` marks a `NoTransfer` cell** — no trajectory exists at any allowed
+    /// revolution count. A negative `C3` is physically impossible, so this is an
+    /// unambiguous sentinel and no `NaN` ever crosses the FFI boundary (a `NaN` in
+    /// a packed float would poison every min/max the display takes over the grid).
+    ///
+    /// This array is the **single authority on emptiness**: the other per-cell
+    /// arrays carry ordinary zeros where a cell is blank, so a reader that checked
+    /// them instead would confuse "no transfer" with "a transfer that projects to
+    /// nothing". Those are the two blanks the display must keep apart, along with
+    /// the third — a real transfer this *launcher* cannot reach
+    /// ([`payload_kg_flat`](Self::payload_kg_flat) `== 0`).
+    pub fn c3_flat(&self) -> Vec<f64> {
+        self.map_flat(|m| m.c3_km2_s2, -1.0)
+    }
+
+    /// Arrival relative speed per cell, m/s (`0` where blank).
+    pub fn arrival_v_rel_flat(&self) -> Vec<f64> {
+        self.map_flat(|m| m.arrival_v_rel_ms, 0.0)
+    }
+
+    /// Signed along-track projection per cell, m/s (`0` where blank).
+    pub fn along_track_flat(&self) -> Vec<f64> {
+        self.map_flat(|m| m.along_track_proj_ms, 0.0)
+    }
+
+    /// Complete laps per cell; `-1` where blank. A lapping cell is a *different
+    /// cruise*, not just a different number, which is why the grid carries it.
+    pub fn revolutions_flat(&self) -> Vec<i32> {
+        let mut out = Vec::with_capacity(self.launch_count() * self.arrival_count());
+        for row in &self.grid.cells {
+            for cell in row {
+                out.push(match cell {
+                    PorkchopCell::Transfer(m) => m.revolutions as i32,
+                    PorkchopCell::NoTransfer => -1,
+                });
+            }
+        }
+        out
+    }
+
+    /// Deliverable impactor mass per cell for `vehicle`, kg — `0` where the
+    /// launcher cannot reach that `C3`, **and also `0` where no transfer exists**.
+    /// Read against [`c3_flat`](Self::c3_flat) to tell the two apart.
+    pub fn payload_kg_flat(&self, vehicle: &LaunchVehicle) -> Vec<f64> {
+        self.map_flat(
+            |m| cell_delivery(&m, vehicle, IMPACTOR_BETA, threat_mass_kg()).payload_kg,
+            0.0,
+        )
+    }
+
+    /// The along-track Δv the delivered mass imparts per cell, m/s (signed;
+    /// `0` where infeasible or blank).
+    pub fn along_track_dv_flat(&self, vehicle: &LaunchVehicle) -> Vec<f64> {
+        self.map_flat(
+            |m| cell_delivery(&m, vehicle, IMPACTOR_BETA, threat_mass_kg()).along_track_dv_ms,
+            0.0,
+        )
+    }
+
+    /// Everything the readout shows for one cell, or `None` if the indices are out
+    /// of range or the cell holds no transfer.
+    pub fn detail(&self, i: usize, j: usize, vehicle: &LaunchVehicle) -> Option<CellDetail> {
+        let m = self.metrics_at(i, j)?;
+        let launch_tdb = self.grid.launch_epochs[i].tdb_seconds_past_j2000();
+        let arrival_tdb = self.grid.arrival_epochs[j].tdb_seconds_past_j2000();
+        let d = cell_delivery(&m, vehicle, IMPACTOR_BETA, threat_mass_kg());
+        Some(CellDetail {
+            launch_tdb,
+            arrival_tdb,
+            tof_days: (arrival_tdb - launch_tdb) / 86_400.0,
+            c3_km2_s2: m.c3_km2_s2,
+            arrival_v_rel_ms: m.arrival_v_rel_ms,
+            along_track_proj_ms: m.along_track_proj_ms,
+            revolutions: m.revolutions,
+            payload_kg: d.payload_kg,
+            along_track_dv_ms: d.along_track_dv_ms,
+        })
+    }
+
+    fn map_flat(&self, f: impl Fn(TransferMetrics) -> f64, blank: f64) -> Vec<f64> {
+        let mut out = Vec::with_capacity(self.launch_count() * self.arrival_count());
+        for row in &self.grid.cells {
+            for cell in row {
+                out.push(match cell {
+                    PorkchopCell::Transfer(m) => f(*m),
+                    PorkchopCell::NoTransfer => blank,
+                });
+            }
+        }
+        out
+    }
+}
+
+/// Re-propagate the asteroid in the **full `n`-body field** after one cell's real
+/// vector impulse and reduce the Earth encounter it produces — the on-demand half
+/// of the layer, ~one propagation, fired per *selected* cell and never across the
+/// grid.
+///
+/// `impactor_mass_kg` is meant to be the selected launcher's deliverable mass at
+/// that cell's `C3`, which is what makes this the honest question: not "would some
+/// impulse work" but "does *this launcher* through *this window* work".
+pub fn verify_porkchop_cell(
+    scenario: &RealFieldScenario,
+    arrival_tdb: f64,
+    metrics: &TransferMetrics,
+    impactor_mass_kg: f64,
+) -> Result<CellVerdict, ScenarioError> {
+    let ds = scenario.deflection()?;
+    let arrival = Epoch::from_tdb_seconds_past_j2000(arrival_tdb);
+    match verify_cell(
+        &ds,
+        arrival,
+        metrics,
+        IMPACTOR_BETA,
+        impactor_mass_kg,
+        threat_mass_kg(),
+    ) {
+        Ok(Some(bp)) => Ok(CellVerdict::Encounter {
+            impact_parameter_m: bp.impact_parameter,
+            capture_radius_m: bp.capture_radius,
+            perigee_m: bp.perigee,
+            earth_radius_m: bp.earth_radius,
+            is_hit: bp.is_hit(),
+        }),
+        Ok(None) => Ok(CellVerdict::CleanMiss),
+        Err(DeflectionError::Geometry(asteroid_core::geometry::GeometryError::NotHyperbolic {
+            ..
+        })) => Ok(CellVerdict::NotHyperbolic),
+        Err(e) => Err(ScenarioError::Integration(format!("cell verify: {e}"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1634,6 +2050,413 @@ mod tests {
 
     /// Metres per AU — for authoring synthetic-body semi-major axes in SI.
     const AU_M: f64 = AU_KM * M_PER_KM;
+
+    // --- The porkchop layer -------------------------------------------------
+
+    /// **The frontend must not invent a third rock.** `THREAT_RADIUS_M` /
+    /// `THREAT_DENSITY_KG_M3` exist only because `SrpParams::sub_km_rock` keeps the
+    /// same two numbers as function locals, so the delivery layer had to restate
+    /// them to get a mass. Restating is the hazard: nothing but this test stops the
+    /// SRP toggle from modelling a 300 m body while the porkchop divides its Δv by
+    /// the mass of some other one.
+    ///
+    /// Asserted through the *derived* quantity (`A/m = 3/(4rρ)`) rather than by
+    /// comparing literals, so it fails for either side drifting — and note the core
+    /// test suite already had a `2.0e10 kg` "~sub-km rock" in `mission.rs`, which is
+    /// a different rock again (that one is a test fixture and stays one; this is
+    /// what the shipping display divides by).
+    #[test]
+    fn threat_body_matches_the_srp_default() {
+        let derived = 3.0 / (4.0 * THREAT_RADIUS_M * THREAT_DENSITY_KG_M3);
+        let srp = SrpParams::sub_km_rock().area_to_mass_m2_per_kg;
+        assert!(
+            (derived - srp).abs() / srp < 1e-12,
+            "the porkchop's threat body (r = {THREAT_RADIUS_M} m, ρ = {THREAT_DENSITY_KG_M3} \
+             kg/m³ → A/m = {derived:.6e}) has drifted from the one SrpParams::sub_km_rock \
+             models (A/m = {srp:.6e}). Two parts of the shipping model would be flying \
+             different asteroids."
+        );
+        // And the mass those two imply, so a units slip in threat_mass_kg shows.
+        let m = threat_mass_kg();
+        assert!(
+            (2.7e10..2.9e10).contains(&m),
+            "a 300 m stony body should be ~2.83e10 kg, got {m:.4e}"
+        );
+    }
+
+    /// The three blanks a porkchop must keep apart, on a real grid.
+    ///
+    /// A cell can be empty for three different reasons, and collapsing any pair
+    /// erases something the operator needs: **no transfer exists at all** (`c3 =
+    /// -1`), **a transfer exists but this launcher cannot reach its `C3`**
+    /// (`payload = 0` with `c3 ≥ 0`), and **a transfer this launcher reaches but
+    /// which projects poorly onto the track** (`payload > 0`, tiny `|Δv|`). The
+    /// third is the module's whole thesis — deliverable ≠ well-aimed — and it is
+    /// invisible if the first two are drawn the same way.
+    ///
+    /// Also pins the sentinel discipline the display depends on: **no `NaN` reaches
+    /// the packed arrays**, because a single `NaN` poisons every min/max the
+    /// heatmap normalizes by, turning the whole grid one flat colour.
+    #[test]
+    fn the_porkchop_grid_separates_its_three_blanks() {
+        if !have_kernels() {
+            return;
+        }
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+
+        // Small axes: this test is about cell *semantics*, not resolution.
+        let view = PorkchopView::build(&scenario, 12, 12).expect("grid builds");
+        assert_eq!(view.launch_count(), 12);
+        assert_eq!(view.arrival_count(), 12);
+
+        let c3 = view.c3_flat();
+        let revs = view.revolutions_flat();
+        let along = view.along_track_flat();
+        assert_eq!(c3.len(), 144);
+        assert_eq!(revs.len(), 144);
+
+        // No NaN anywhere, in any column, ever.
+        for (name, col) in [
+            ("c3", &c3),
+            ("along_track", &along),
+            ("arrival_v_rel", &view.arrival_v_rel_flat()),
+        ] {
+            assert!(
+                col.iter().all(|v| v.is_finite()),
+                "{name} carries a non-finite value — one NaN flattens the whole heatmap"
+            );
+        }
+
+        // Blank cells are marked in c3 and *agree* with the revolutions column:
+        // the two must never disagree about which cells hold a transfer.
+        let blanks = c3.iter().filter(|v| **v < 0.0).count();
+        let filled = 144 - blanks;
+        assert!(
+            filled > 0,
+            "every cell came back NoTransfer — the axes are outside the propagated span"
+        );
+        for k in 0..144 {
+            assert_eq!(
+                c3[k] < 0.0,
+                revs[k] < 0,
+                "cell {k}: c3 and revolutions disagree about whether a transfer exists"
+            );
+        }
+
+        // **Switching launcher must change something, or the vehicle-independent
+        // grid bought nothing.** What it changes is *mass*, not *reach*: four of the
+        // five tables stop at C3 ≈ 100 km²/s², so the launchers open very nearly the
+        // same set of windows and differ ~3× in what they can put through one. That
+        // is a real property of the LSP data and worth pinning, because the obvious
+        // assertion — "the stronger rocket reaches more cells" — is trivially true
+        // here (10 vs 10) and would have passed over a broken C3→mass map.
+        let weak = launch_vehicle(0).expect("a first vehicle");
+        let strong = launch_vehicle(launch_vehicle_count() - 1).expect("a last vehicle");
+        let (pw, ps) = (view.payload_kg_flat(weak), view.payload_kg_flat(strong));
+        let reach = |p: &[f64]| (0..144).filter(|&k| c3[k] >= 0.0 && p[k] > 0.0).count();
+        println!(
+            "porkchop {}×{}: {filled} transfers, {blanks} blank; {} reaches {}, {} reaches {}",
+            view.launch_count(),
+            view.arrival_count(),
+            weak.name,
+            reach(&pw),
+            strong.name,
+            reach(&ps)
+        );
+        let mut compared = 0;
+        for k in 0..144 {
+            if c3[k] >= 0.0 && pw[k] > 0.0 {
+                assert!(
+                    ps[k] > pw[k],
+                    "cell {k} (C3 = {:.1}): {} delivers {:.0} kg but {} only {:.0} kg — \
+                     the C3→payload mapping is inverted or reading one table twice",
+                    c3[k],
+                    strong.name,
+                    ps[k],
+                    weak.name,
+                    pw[k]
+                );
+                compared += 1;
+            }
+        }
+        assert!(
+            compared > 0,
+            "no cell was reachable by the weakest launcher, so nothing compared the two"
+        );
+
+        // A launcher's blanks must be a *subset* of "reachable" — a cell with no
+        // transfer can never have a payload, or the display would offer a mission
+        // through a window with no trajectory.
+        let p = view.payload_kg_flat(strong);
+        for k in 0..144 {
+            if c3[k] < 0.0 {
+                assert_eq!(
+                    p[k], 0.0,
+                    "cell {k} has no transfer yet reports {} kg deliverable",
+                    p[k]
+                );
+            }
+        }
+
+        // The detail marshalling agrees with the columns, cell by cell — the
+        // readout and the heatmap must never describe different cells.
+        let k = (0..144)
+            .find(|&k| c3[k] >= 0.0 && p[k] > 0.0)
+            .expect("a feasible cell for the strongest launcher");
+        let (i, j) = (k / 12, k % 12);
+        let d = view.detail(i, j, strong).expect("detail for a filled cell");
+        assert_eq!(d.c3_km2_s2, c3[k]);
+        assert_eq!(d.revolutions as i32, revs[k]);
+        assert_eq!(d.along_track_proj_ms, along[k]);
+        assert!(
+            d.tof_days >= MIN_TOF_DAYS - 1e-6,
+            "cell {k} has a {:.1} d transfer, below the grid's own {MIN_TOF_DAYS} d floor",
+            d.tof_days
+        );
+        // Δv is the delivered mass acting through the projection — including its
+        // sign, which says which way the push moves the semi-major axis.
+        let expect_dv = IMPACTOR_BETA * (d.payload_kg / threat_mass_kg()) * d.along_track_proj_ms;
+        assert!((d.along_track_dv_ms - expect_dv).abs() <= 1e-12 * expect_dv.abs().max(1e-12));
+        assert_eq!(
+            d.along_track_dv_ms < 0.0,
+            d.along_track_proj_ms < 0.0,
+            "the delivered Δv lost the projection's sign — a retrograde push is a real \
+             lever, not bad aim, and the readout must say which way it acts"
+        );
+
+        // And a blank cell has no detail at all, rather than a zero-filled row.
+        if let Some(kb) = (0..144).find(|&k| c3[k] < 0.0) {
+            assert!(
+                view.detail(kb / 12, kb % 12, strong).is_none(),
+                "a NoTransfer cell handed back a detail row"
+            );
+        }
+        assert!(view.detail(99, 0, strong).is_none(), "out-of-range detail");
+    }
+
+    /// **How many laps the shipping grid allows, decided on numbers.**
+    ///
+    /// `DEFAULT_MAX_REVOLUTIONS` is the one free parameter of this view that
+    /// changes what an operator *sees*: every extra lap is another family of
+    /// cheaper transfers, so it moves cells from "no launcher can do this" to
+    /// "here is a mission". The direct-only grid is known to be wrong (the 2.6 yr
+    /// case: C3 933 direct vs 55 lapping), but "more is better" is not a reason to
+    /// pick a number — each lap costs a ~2× step in grid time, and if the second
+    /// lap opened nothing it would be pure cost.
+    ///
+    /// So this prints the reachable-window count and the wall-clock at `N = 0…3`
+    /// and asserts only what it actually measures: that laps never *remove*
+    /// windows (selection is a minimum over a growing candidate set, so a
+    /// regression here means the selector is returning a worse option), and that
+    /// the shipped default opens strictly more than the direct-only grid.
+    #[test]
+    fn revolutions_open_windows_and_what_they_cost() {
+        if !have_kernels() {
+            return;
+        }
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+        let strong = launch_vehicle(launch_vehicle_count() - 1).expect("a last vehicle");
+
+        let (n, cells) = (24usize, 24 * 24);
+        let mut reachable = Vec::new();
+        for max_rev in 0..=3u32 {
+            let t0 = std::time::Instant::now();
+            let view = PorkchopView::build_with_revolutions(&scenario, n, n, max_rev)
+                .expect("grid builds");
+            let dt = t0.elapsed();
+            let c3 = view.c3_flat();
+            let pay = view.payload_kg_flat(strong);
+            let transfers = c3.iter().filter(|v| **v >= 0.0).count();
+            let reach = (0..cells).filter(|&k| c3[k] >= 0.0 && pay[k] > 0.0).count();
+            let lapping = view.revolutions_flat().iter().filter(|r| **r >= 1).count();
+            let cheapest = c3
+                .iter()
+                .filter(|v| **v >= 0.0)
+                .fold(f64::INFINITY, |a, b| a.min(*b));
+            println!(
+                "N<={max_rev}: {transfers:3}/{cells} transfers, {lapping:3} lapping, \
+                 {reach:3} reachable by {}, cheapest C3 {cheapest:7.2} km²/s², \
+                 {:.0} ms ({:.1} µs/cell)",
+                strong.name,
+                dt.as_secs_f64() * 1e3,
+                dt.as_secs_f64() * 1e6 / cells as f64
+            );
+            reachable.push(reach);
+        }
+
+        // **Laps take the grid below where the vehicle tables start**, and that is
+        // the condition making the flat-hold in `payload_kg` load-bearing rather
+        // than theoretical. The cheapest cell drops to C3 ≈ 0.34 km²/s² once one
+        // lap is allowed, under the 1.0 that three of the five tables begin at —
+        // and `payload_kg` used to fail closed there, so the heatmap drew those
+        // easily-flyable windows as unreachable and captioned them *too much C3*.
+        //
+        // Checked here rather than on the 12×12 grid of the test above, where it
+        // would be **vacuous**: that grid's cheapest cell is C3 3.64, above every
+        // floor, so the assertion would pass without ever entering the regime it
+        // exists to protect. Asserting the regime is reached comes first, for
+        // exactly that reason.
+        let deep = PorkchopView::build_with_revolutions(&scenario, n, n, DEFAULT_MAX_REVOLUTIONS)
+            .expect("grid builds");
+        let deep_c3 = deep.c3_flat();
+        let cheapest = deep_c3
+            .iter()
+            .filter(|v| **v >= 0.0)
+            .fold(f64::INFINITY, |a, b| a.min(*b));
+        let floors: Vec<f64> = LAUNCH_VEHICLES.iter().map(|v| v.min_c3_km2_s2()).collect();
+        println!("cheapest cell C3 = {cheapest:.3} km²/s²; vehicle table floors: {floors:?}");
+        assert!(
+            floors.iter().any(|f| cheapest < *f),
+            "the grid's cheapest cell (C3 {cheapest:.3}) is above every vehicle's table \
+             floor {floors:?}, so the below-the-table behaviour is not being exercised \
+             at all — this check has gone vacuous"
+        );
+        for v in LAUNCH_VEHICLES {
+            assert!(
+                v.payload_kg(cheapest) > 0.0,
+                "{} delivers nothing at the grid's cheapest cell (C3 = {cheapest:.3}), \
+                 below its table floor of {:.2} — a cheaper departure is an *easier* \
+                 one, and zeroing it draws a real window as unreachable",
+                v.name,
+                v.min_c3_km2_s2()
+            );
+        }
+
+        for w in reachable.windows(2) {
+            assert!(
+                w[1] >= w[0],
+                "allowing another lap REMOVED reachable windows ({} → {}) — the \
+                 selection is a minimum over a growing candidate set, so it can only \
+                 ever get cheaper",
+                w[0],
+                w[1]
+            );
+        }
+        let shipped = reachable[DEFAULT_MAX_REVOLUTIONS as usize];
+        assert!(
+            shipped > reachable[0],
+            "the shipped lap budget ({DEFAULT_MAX_REVOLUTIONS}) opens {shipped} windows, \
+             no more than the direct-only grid's {} — it is paying a ~{}× per-cell cost \
+             for nothing",
+            reachable[0],
+            DEFAULT_MAX_REVOLUTIONS + 1
+        );
+    }
+
+    /// **The on-demand verify is the honest half**, and this pins the two things it
+    /// could get silently wrong: that it is really re-flying the field (zero
+    /// delivered mass must reproduce the *nominal hit*, which catches a wrong epoch,
+    /// frame, or un-applied impulse), and that a real delivery moves the b-plane.
+    ///
+    /// The verdict is read as **`|B|` against `b_capture`** — the pair the core's own
+    /// `is_hit` compares — never `perigee` against `capture_radius`, which is neither
+    /// coherent pair and is ~1.5× too strict (the 3C-2c bug this project already
+    /// shipped once).
+    #[test]
+    fn verifying_a_cell_reproduces_the_nominal_then_moves_it() {
+        if !have_kernels() {
+            return;
+        }
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let nominal_b = mc.nominal_impact_parameter_m().expect("a nominal encounter");
+        let capture = mc.capture_radius_m().expect("a capture radius");
+        assert!(nominal_b <= capture, "the nominal must be a hit");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+
+        let view = PorkchopView::build(&scenario, 10, 10).expect("grid builds");
+        let c3 = view.c3_flat();
+        let along = view.along_track_flat();
+        // The best-coupled feasible cell: the strongest launcher, the largest
+        // |along-track projection| — the window most likely to actually work.
+        let strong = launch_vehicle(launch_vehicle_count() - 1).expect("a last vehicle");
+        let pay = view.payload_kg_flat(strong);
+        let k = (0..c3.len())
+            .filter(|&k| c3[k] >= 0.0 && pay[k] > 0.0)
+            .max_by(|&a, &b| along[a].abs().total_cmp(&along[b].abs()))
+            .expect("a feasible cell");
+        let (i, j) = (k / 10, k % 10);
+        let d = view.detail(i, j, strong).expect("detail");
+        let metrics = view.metrics_at(i, j).expect("metrics");
+        println!(
+            "verify cell ({i},{j}): C3 {:.1} km²/s², N={}, TOF {:.0} d, {} delivers {:.0} kg \
+             → along-track {:+.3} m/s",
+            d.c3_km2_s2, d.revolutions, d.tof_days, strong.name, d.payload_kg, d.along_track_dv_ms
+        );
+
+        // (1) Zero delivered mass ⇒ zero impulse ⇒ the nominal hit, to the metre.
+        match verify_porkchop_cell(&scenario, d.arrival_tdb, &metrics, 0.0).expect("verify runs") {
+            CellVerdict::Encounter {
+                impact_parameter_m,
+                capture_radius_m,
+                is_hit,
+                ..
+            } => {
+                assert!(
+                    (impact_parameter_m - nominal_b).abs() / nominal_b < 1e-3,
+                    "a zero-mass verify gave |B| = {impact_parameter_m:.1} m but the nominal \
+                     is {nominal_b:.1} m — the impulse path is reading the wrong epoch/frame"
+                );
+                assert!((capture_radius_m - capture).abs() / capture < 1e-6);
+                assert!(is_hit, "zero deflection must still be the hit");
+            }
+            other => panic!("zero mass should reproduce the nominal encounter, got {other:?}"),
+        }
+
+        // (2) A real delivery moves it. The launcher's *own* deliverable mass may or
+        // may not be enough — that is the honest answer and not something to assert —
+        // so the discriminating claim is that the b-plane MOVED, and moved outward
+        // for a prograde push. A verify that silently ignored its mass would fail
+        // here while passing (1).
+        let verdict =
+            verify_porkchop_cell(&scenario, d.arrival_tdb, &metrics, d.payload_kg).expect("verify");
+        let moved_b = match verdict {
+            CellVerdict::CleanMiss => f64::INFINITY,
+            CellVerdict::Encounter {
+                impact_parameter_m, ..
+            } => impact_parameter_m,
+            CellVerdict::NotHyperbolic => 0.0,
+        };
+        println!(
+            "  {} kg through this window: |B| {nominal_b:.0} → {moved_b:.0} m (capture {capture:.0} m)",
+            d.payload_kg as i64
+        );
+        assert!(
+            (moved_b - nominal_b).abs() > 1.0,
+            "delivering {:.0} kg changed |B| by less than a metre ({nominal_b:.1} → \
+             {moved_b:.1}) — the impactor mass is not reaching the propagation",
+            d.payload_kg
+        );
+
+        // (3) A deliberately huge impactor must clear the capture disc — the
+        // verdict path itself works, judged on the coherent pair.
+        let huge = 50.0 * threat_mass_kg() / (IMPACTOR_BETA * metrics.arrival_v_rel_ms);
+        let big =
+            verify_porkchop_cell(&scenario, d.arrival_tdb, &metrics, huge).expect("verify runs");
+        match big {
+            CellVerdict::CleanMiss => {}
+            CellVerdict::Encounter {
+                impact_parameter_m,
+                capture_radius_m,
+                is_hit,
+                ..
+            } => {
+                assert!(
+                    !is_hit && impact_parameter_m > capture_radius_m,
+                    "a {huge:.2e} kg impactor left |B| = {impact_parameter_m:.0} m inside \
+                     b_capture = {capture_radius_m:.0} m"
+                );
+            }
+            CellVerdict::NotHyperbolic => panic!("a huge deflection should not be a dead-centre hit"),
+        }
+    }
 
     /// 2035-01-01 TDB — comfortably inside the de440s span; the synthetic-body
     /// seed epoch for the catalog tests.

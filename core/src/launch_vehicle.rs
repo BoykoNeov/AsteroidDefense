@@ -15,10 +15,15 @@
 //! (`github.com/athulpg007/AMAT`, MIT-licensed), which are in turn compiled from
 //! the **NASA Launch Services Program Performance website**
 //! (`elvperf.ksc.nasa.gov`) — see Girija, *Launch Vehicle High-Energy Performance
-//! Dataset*, arXiv:2310.05994. AMAT interpolates the tables linearly with
-//! `fill_value = 0` outside the tabulated `C3` range; this module reproduces that
-//! exactly (linear between knots, **0 = infeasible** below the first / above the
-//! last knot).
+//! Dataset*, arXiv:2310.05994. Linear between knots, and **`0` above the last
+//! knot means infeasible** — past a vehicle's energy limit there is no mission.
+//!
+//! Below the *first* knot the payload is held flat at that knot instead, which is
+//! a deliberate departure from AMAT's `fill_value = 0` (it zeroes both ends). A
+//! lower `C3` is an *easier* launch, so a vehicle tabulated from `C3 = 1.0` can
+//! certainly fly `C3 = 0.34`; zeroing it claimed the reverse, and the porkchop
+//! view caught it doing exactly that once multi-revolution transfers pushed real
+//! grid cells below 1.0. See [`LaunchVehicle::payload_kg`].
 //!
 //! # These are the complete tables, and the reason that matters
 //! Every knot of every vehicle's AMAT CSV is embedded here verbatim (101 / 10 /
@@ -66,9 +71,31 @@ pub struct LaunchVehicle {
 
 impl LaunchVehicle {
     /// Deliverable payload mass (kg) at departure characteristic energy
-    /// `c3_km2_s2` (km²/s²). Linear interpolation between the tabulated knots;
-    /// **0 outside the vehicle's tabulated `C3` range** (infeasible), mirroring
-    /// AMAT's `interp1d(fill_value=0, bounds_error=False)`.
+    /// `c3_km2_s2` (km²/s²). Linear interpolation between the tabulated knots.
+    ///
+    /// # The two ends of the table are not symmetric, and treating them alike was a bug
+    /// **Above** the last knot the answer is `0`: the vehicle genuinely cannot reach
+    /// that launch energy, and an extrapolated fiction there would invent missions.
+    ///
+    /// **Below** the first knot it is **the first knot's payload**, held flat. A
+    /// low `C3` is an *easier* departure, so a rocket tabulated from `C3 = 1.0` can
+    /// obviously fly `C3 = 0.34` — carrying at least what it carries at `1.0`, and
+    /// in truth a little more. Holding the first knot is therefore the conservative
+    /// reading; returning `0` claimed the opposite of the truth.
+    ///
+    /// This started as a faithful port of AMAT's
+    /// `interp1d(fill_value=0, bounds_error=False)`, which zeroes both ends. That
+    /// is harmless when a caller only ever asks about energetic transfers, and it
+    /// was not harmless here: allowing multi-revolution transfers pushed the
+    /// cheapest grid cells down to **`C3 = 0.34 km²/s²`**, below where four of the
+    /// five tables start, so the porkchop drew real, easily-flyable windows as
+    /// unreachable and captioned them *too much C3 for this rocket* — the exact
+    /// reverse of the reason. Where a table starts is an artefact of the published
+    /// data's sampling, not a physical floor; where it ends is the physical limit.
+    ///
+    /// The payoff is that `0` now means **exactly one thing** — above this
+    /// vehicle's energy ceiling — so a caller can render it as a single honest
+    /// state rather than one word covering two opposite situations.
     ///
     /// Note the unit: `C3` is in **km²/s²** here (the tables' native unit). The
     /// mission layer computes `C3` in SI (m²/s²) from the Lambert departure
@@ -76,14 +103,18 @@ impl LaunchVehicle {
     /// explicit precisely because a silent km/m slip is the classic delivery bug.
     pub fn payload_kg(&self, c3_km2_s2: f64) -> f64 {
         let knots = self.knots;
-        // Fail closed: NaN and out-of-range both yield 0 (infeasible).
+        // Fail closed on NaN only: a non-finite C3 is a caller bug, not a cheap
+        // departure, and must not be read as one.
         if !c3_km2_s2.is_finite() {
             return 0.0;
         }
-        let (c3_lo, _) = knots[0];
+        let (c3_lo, payload_lo) = knots[0];
         let (c3_hi, _) = knots[knots.len() - 1];
-        if c3_km2_s2 < c3_lo || c3_km2_s2 > c3_hi {
+        if c3_km2_s2 > c3_hi {
             return 0.0;
+        }
+        if c3_km2_s2 < c3_lo {
+            return payload_lo;
         }
         // Locate the bracketing segment and interpolate. Linear scan is fine —
         // a dozen knots, and the mission grid caches per-vehicle results anyway.
@@ -110,6 +141,12 @@ impl LaunchVehicle {
     }
 
     /// The minimum tabulated characteristic energy (km²/s²).
+    ///
+    /// **Not a feasibility floor** — unlike [`max_c3_km2_s2`](Self::max_c3_km2_s2),
+    /// which is a physical ceiling. This is only where the published table happens
+    /// to start; below it [`payload_kg`](Self::payload_kg) holds the first knot,
+    /// because a cheaper departure is an easier one. Treating this as a limit is
+    /// the bug the porkchop view caught.
     pub fn min_c3_km2_s2(&self) -> f64 {
         self.knots[0].0
     }
@@ -596,14 +633,47 @@ mod tests {
         }
     }
 
+    /// **The two ends of the table mean opposite things**, and this pins them apart.
+    ///
+    /// Above the last knot the vehicle genuinely cannot reach that `C3`, so the
+    /// answer is `0` and an extrapolation there would invent missions. Below the
+    /// first knot the departure is *easier*, so the vehicle certainly can fly it —
+    /// the answer is the first knot's payload, held flat (conservative: the true
+    /// value is slightly higher).
+    ///
+    /// Zeroing both ends is what the code originally did, ported from AMAT, and it
+    /// made the porkchop caption real sub-`C3`-1.0 windows *too much C3 for this
+    /// rocket* — the reverse of the truth. The regression that matters is therefore
+    /// the `0` one: **`payload_kg(0) > 0` for every vehicle**, since `C3 = 0` (a
+    /// bare escape trajectory) is below four of the five tables' first knot and is
+    /// the least exotic departure there is.
     #[test]
-    fn infeasible_outside_the_tabulated_range() {
-        // Above the last knot the vehicle simply cannot reach that C3 — 0, not an
-        // extrapolated fiction. Same below the first knot and for NaN.
+    fn above_the_table_is_infeasible_but_below_it_is_easy() {
         for v in LAUNCH_VEHICLES {
+            // The physical ceiling: nothing above it.
             assert_eq!(v.payload_kg(v.max_c3_km2_s2() + 1.0), 0.0, "{}", v.name);
-            assert_eq!(v.payload_kg(v.min_c3_km2_s2() - 1.0), 0.0, "{}", v.name);
+            // NaN is a caller bug, not a cheap departure.
             assert_eq!(v.payload_kg(f64::NAN), 0.0, "{}", v.name);
+
+            // Below the first knot: flat-held, never zero.
+            let first = v.payload_kg(v.min_c3_km2_s2());
+            assert_eq!(
+                v.payload_kg(v.min_c3_km2_s2() - 1.0),
+                first,
+                "{} zeroed a *cheaper* departure than its table starts at — a low C3 \
+                 is an easier launch, not an unreachable one",
+                v.name
+            );
+            assert!(
+                v.payload_kg(0.0) > 0.0,
+                "{} delivers nothing at C3 = 0, the least demanding departure there is",
+                v.name
+            );
+            assert!(
+                v.payload_kg(-5.0) > 0.0,
+                "{} zeroed a below-table C3",
+                v.name
+            );
         }
     }
 

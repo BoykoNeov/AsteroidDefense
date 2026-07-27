@@ -23,11 +23,22 @@ use godot::prelude::*;
 
 use asteroid_core::scenario::{ImpactorConfig, ScenarioError};
 use asteroid_core::{Epoch, OrbitalElements};
+use asteroid_core::launch_vehicle::LaunchVehicle;
 use mission_core::{
-    display_comet, load_neo_bodies, measure_tier2_shifts, mount_small_bodies, seed_orrery_body,
-    BuiltScenario, MissionCore, OrreryBody, Tier2Shifts,
-    SB441_BODIES,
+    display_comet, launch_vehicle, launch_vehicle_count, load_neo_bodies, measure_tier2_shifts,
+    mount_small_bodies, seed_orrery_body, verify_porkchop_cell, BuiltScenario, CellVerdict,
+    MissionCore, OrreryBody, PorkchopView, Tier2Shifts, SB441_BODIES,
 };
+
+/// The launcher at a GDScript-supplied index, or `None` for a negative or
+/// out-of-range one. A free function so every `#[func]` that takes a `vehicle`
+/// argument resolves it exactly one way.
+fn vehicle_at(index: i64) -> Option<&'static LaunchVehicle> {
+    if index < 0 {
+        return None;
+    }
+    launch_vehicle(index as usize)
+}
 
 /// Metres per astronomical unit — synthetic-body semi-major axes reach the SI
 /// core as AU from GDScript.
@@ -79,6 +90,28 @@ struct Mission {
     /// preview worker is running; independent of `build` (a scenario is fully usable
     /// without ever measuring the menu).
     tier2_build: Option<mpsc::Receiver<Result<Tier2Shifts, String>>>,
+    /// The in-flight porkchop grid build, if any — see
+    /// [`begin_porkchop`](Mission::begin_porkchop). A **third** independent channel:
+    /// the grid, the Tier-2 preview and the scenario build are unrelated pieces of
+    /// work and none of them should be able to block or cancel another.
+    porkchop_build: Option<mpsc::Receiver<Result<PorkchopView, String>>>,
+    /// The built grid. Lives here rather than in [`MissionCore`] because it is a
+    /// *display artifact* — a projection of the scenario for one view — not part of
+    /// the mission state the core owns. Dropped whenever a new scenario is installed
+    /// (see [`poll_build`](Mission::poll_build)).
+    porkchop: Option<PorkchopView>,
+    /// The in-flight on-demand full-field verify of one selected cell — its own
+    /// channel again, because a verify is fired repeatedly against a grid that stays
+    /// put, and must not disturb it.
+    verify_build: Option<mpsc::Receiver<Result<CellVerdict, String>>>,
+    /// Which cell the in-flight verify is for — `(launch, arrival, vehicle,
+    /// impactor kg)`. Held here rather than sent through the channel because the
+    /// worker computes physics, not identity, and pairing them on arrival keeps the
+    /// verdict from ever being labelled with a cell it did not come from.
+    pending_verify: (i64, i64, i64, f64),
+    /// The last cell verdict and which cell it belongs to, so the display can tell
+    /// "this cursor's verdict" from "a verdict for a cell I have since left".
+    verdict: Option<(i64, i64, i64, f64, CellVerdict)>,
     error: GString,
     base: Base<RefCounted>,
 }
@@ -372,6 +405,13 @@ impl Mission {
                 match self.core.as_mut() {
                     Some(core) => {
                         core.install(built, bodies);
+                        // A porkchop belongs to the scenario it was solved against —
+                        // its axes come from that campaign's epochs and its cells
+                        // from that nominal trajectory. Installing a new scenario
+                        // makes the old grid a picture of a threat that is no longer
+                        // there, so it is dropped rather than left to be read.
+                        self.porkchop = None;
+                        self.verdict = None;
                         self.error = GString::new();
                     }
                     // The kernels were dropped (a failed re-load) while the build
@@ -479,6 +519,393 @@ impl Mission {
                 false
             }
         }
+    }
+
+    // --- The porkchop grid (HANDOFF §8) -------------------------------------
+
+    /// Kick off the launch × arrival porkchop grid on a worker thread — the cheap,
+    /// **vehicle-independent** half of the deliverability layer.
+    ///
+    /// Both axes are derived from the built scenario's own campaign, so this needs
+    /// a scenario, not merely kernels. Measured cost is ~45 µs/cell (each cell
+    /// selects the cheapest transfer across the direct arc and both branches of one
+    /// lapping alternative), so a 120×120 grid is ~0.6 s — off-thread, once, and
+    /// never per frame. Returns `false` if a grid is already in flight or there is
+    /// nothing to build against.
+    ///
+    /// Rebuilding is allowed: calling this with different sample counts replaces the
+    /// grid when the new one lands.
+    #[func]
+    fn begin_porkchop(&mut self, launch_samples: i64, arrival_samples: i64) -> bool {
+        if self.porkchop_build.is_some() {
+            return false; // already building — not an error
+        }
+        let Some(core) = self.core.as_ref() else {
+            self.error = "load() must succeed before begin_porkchop()".into();
+            return false;
+        };
+        let Some(scenario) = core.scenario_arc() else {
+            self.error = "build the scenario before building the porkchop".into();
+            return false;
+        };
+        let (nl, na) = (
+            launch_samples.clamp(2, 512) as usize,
+            arrival_samples.clamp(2, 512) as usize,
+        );
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = PorkchopView::build(&scenario, nl, na).map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+        self.porkchop_build = Some(rx);
+        self.error = GString::new();
+        true
+    }
+
+    /// Whether the porkchop grid is currently being built.
+    #[func]
+    fn is_building_porkchop(&self) -> bool {
+        self.porkchop_build.is_some()
+    }
+
+    /// Pump the porkchop worker. `true` while **still running**, `false` once
+    /// finished (or none in flight) — then [`has_porkchop`](Self::has_porkchop) says
+    /// whether it succeeded. Non-blocking; safe every frame.
+    #[func]
+    fn poll_porkchop(&mut self) -> bool {
+        let Some(rx) = self.porkchop_build.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Ok(Ok(view)) => {
+                self.porkchop_build = None;
+                self.porkchop = Some(view);
+                // A verdict describes a cell of the *previous* grid; the new grid's
+                // axes may differ, so the same (i, j) is a different window.
+                self.verdict = None;
+                self.error = GString::new();
+                false
+            }
+            Ok(Err(message)) => {
+                self.porkchop_build = None;
+                self.error = message.as_str().into();
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.porkchop_build = None;
+                self.error = "the porkchop build thread died without reporting".into();
+                false
+            }
+        }
+    }
+
+    /// Whether a built grid is available to read.
+    #[func]
+    fn has_porkchop(&self) -> bool {
+        self.porkchop.is_some()
+    }
+
+    /// Rows in the grid (launch epochs); `0` if none is built.
+    #[func]
+    fn porkchop_launch_count(&self) -> i64 {
+        self.porkchop.as_ref().map_or(0, |p| p.launch_count() as i64)
+    }
+
+    /// Columns in the grid (arrival epochs); `0` if none is built.
+    #[func]
+    fn porkchop_arrival_count(&self) -> i64 {
+        self.porkchop.as_ref().map_or(0, |p| p.arrival_count() as i64)
+    }
+
+    /// The launch axis, TDB seconds past J2000.
+    #[func]
+    fn porkchop_launch_tdb(&self) -> PackedFloat64Array {
+        self.porkchop
+            .as_ref()
+            .map(|p| PackedFloat64Array::from(p.launch_tdb().as_slice()))
+            .unwrap_or_default()
+    }
+
+    /// The arrival axis, TDB seconds past J2000.
+    #[func]
+    fn porkchop_arrival_tdb(&self) -> PackedFloat64Array {
+        self.porkchop
+            .as_ref()
+            .map(|p| PackedFloat64Array::from(p.arrival_tdb().as_slice()))
+            .unwrap_or_default()
+    }
+
+    /// Departure `C3` per cell, km²/s², row-major `[launch][arrival]`.
+    ///
+    /// **`-1.0` marks a cell with no transfer at any allowed revolution count.** A
+    /// negative `C3` is physically impossible, so the sentinel is unambiguous — and
+    /// deliberately not `NaN`, which would poison every min/max the heatmap
+    /// normalizes by and flatten the whole picture to one colour.
+    ///
+    /// This is the display's **only** authority on emptiness. The other columns
+    /// carry ordinary zeros in blank cells, so reading them for emptiness would
+    /// confuse "no trajectory exists" with "a trajectory that projects to nothing" —
+    /// and a third state, "a real transfer this launcher cannot reach"
+    /// ([`porkchop_payload_kg`](Self::porkchop_payload_kg) `== 0`), must stay
+    /// distinct from both.
+    #[func]
+    fn porkchop_c3(&self) -> PackedFloat64Array {
+        self.pork_col(|p| p.c3_flat())
+    }
+
+    /// Signed along-track projection per cell, m/s (`0` in blank cells). Negative is
+    /// a retrograde, orbit-shrinking push — a real lever, not bad aim.
+    #[func]
+    fn porkchop_along_track(&self) -> PackedFloat64Array {
+        self.pork_col(|p| p.along_track_flat())
+    }
+
+    /// Arrival relative speed per cell, m/s (`0` in blank cells).
+    #[func]
+    fn porkchop_arrival_v_rel(&self) -> PackedFloat64Array {
+        self.pork_col(|p| p.arrival_v_rel_flat())
+    }
+
+    /// Complete laps of the Sun per cell; `-1` in blank cells. `0` is the direct
+    /// arc — anything higher is a genuinely different cruise, not just a different
+    /// number, which is why the grid reports it.
+    #[func]
+    fn porkchop_revolutions(&self) -> PackedInt32Array {
+        self.porkchop
+            .as_ref()
+            .map(|p| PackedInt32Array::from(p.revolutions_flat().as_slice()))
+            .unwrap_or_default()
+    }
+
+    /// Deliverable impactor mass per cell for launcher `vehicle`, kg.
+    ///
+    /// `0` means **this launcher cannot reach that `C3`** — and is *also* `0` where
+    /// no transfer exists at all. Read against [`porkchop_c3`](Self::porkchop_c3) to
+    /// separate them; they are different facts and a display that draws them the
+    /// same way throws away the point of a vehicle-independent grid.
+    #[func]
+    fn porkchop_payload_kg(&self, vehicle: i64) -> PackedFloat64Array {
+        match (self.porkchop.as_ref(), vehicle_at(vehicle)) {
+            (Some(p), Some(v)) => PackedFloat64Array::from(p.payload_kg_flat(v).as_slice()),
+            _ => PackedFloat64Array::new(),
+        }
+    }
+
+    /// The along-track Δv the delivered mass imparts per cell, m/s (signed; `0`
+    /// where the launcher cannot reach the cell, or no transfer exists).
+    #[func]
+    fn porkchop_along_track_dv(&self, vehicle: i64) -> PackedFloat64Array {
+        match (self.porkchop.as_ref(), vehicle_at(vehicle)) {
+            (Some(p), Some(v)) => PackedFloat64Array::from(p.along_track_dv_flat(v).as_slice()),
+            _ => PackedFloat64Array::new(),
+        }
+    }
+
+    /// Everything the readout shows for one cell, in **one** call so a row can never
+    /// be assembled out of two different cells. An **empty dictionary** means the
+    /// indices are out of range or the cell holds no transfer — never a zero-filled
+    /// row, which would read as a real but useless window.
+    #[func]
+    fn porkchop_cell(&self, i: i64, j: i64, vehicle: i64) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        let (Some(p), Some(v)) = (self.porkchop.as_ref(), vehicle_at(vehicle)) else {
+            return d;
+        };
+        if i < 0 || j < 0 {
+            return d;
+        }
+        let Some(c) = p.detail(i as usize, j as usize, v) else {
+            return d;
+        };
+        d.set("launch_tdb", c.launch_tdb);
+        d.set("arrival_tdb", c.arrival_tdb);
+        d.set("tof_days", c.tof_days);
+        d.set("c3_km2_s2", c.c3_km2_s2);
+        d.set("arrival_v_rel_ms", c.arrival_v_rel_ms);
+        d.set("along_track_proj_ms", c.along_track_proj_ms);
+        d.set("revolutions", c.revolutions as i64);
+        d.set("payload_kg", c.payload_kg);
+        d.set("along_track_dv_ms", c.along_track_dv_ms);
+        d
+    }
+
+    /// How many launchers the frontend can cycle through — the core's own
+    /// canonical table, so the display cannot offer a vehicle the physics does not
+    /// have (or miss one it does).
+    #[func]
+    fn vehicle_count(&self) -> i64 {
+        launch_vehicle_count() as i64
+    }
+
+    /// Launcher `i`'s name, or `""` past the end.
+    #[func]
+    fn vehicle_name(&self, i: i64) -> GString {
+        vehicle_at(i).map_or_else(GString::new, |v| v.name.into())
+    }
+
+    /// The highest `C3` launcher `i` is tabulated for, km²/s² (`-1.0` past the end)
+    /// — the launch energy above which it delivers nothing. The heatmap's natural
+    /// upper colour bound for a vehicle-relative view.
+    #[func]
+    fn vehicle_max_c3(&self, i: i64) -> f64 {
+        vehicle_at(i).map_or(-1.0, |v| v.max_c3_km2_s2())
+    }
+
+    // --- The on-demand full-field verify of one cell ------------------------
+
+    /// Re-fly the asteroid through the **full `n`-body field** after the impulse
+    /// this cell's window would actually deliver, on a worker thread.
+    ///
+    /// The impactor mass is the selected launcher's deliverable payload at that
+    /// cell's `C3`, which is what makes this the honest question — not "would some
+    /// impulse work" but "does *this launcher*, through *this window*, work". One
+    /// propagation (~1 s), so it is fired per selected cell and never across a grid.
+    ///
+    /// Returns `false` — with a reason in [`last_error`](Self::last_error) — when a
+    /// verify is already in flight, there is no grid, the indices are out of range,
+    /// or the cell carries no transfer for this launcher to fly.
+    #[func]
+    fn begin_cell_verify(&mut self, i: i64, j: i64, vehicle: i64) -> bool {
+        if self.verify_build.is_some() {
+            return false;
+        }
+        let Some(core) = self.core.as_ref() else {
+            self.error = "load() must succeed before begin_cell_verify()".into();
+            return false;
+        };
+        let Some(scenario) = core.scenario_arc() else {
+            self.error = "build the scenario before verifying a cell".into();
+            return false;
+        };
+        let (Some(p), Some(v)) = (self.porkchop.as_ref(), vehicle_at(vehicle)) else {
+            self.error = "no porkchop grid (or unknown launcher) to verify against".into();
+            return false;
+        };
+        if i < 0 || j < 0 {
+            self.error = "cell indices must be non-negative".into();
+            return false;
+        }
+        let (Some(metrics), Some(detail)) = (
+            p.metrics_at(i as usize, j as usize),
+            p.detail(i as usize, j as usize, v),
+        ) else {
+            self.error = "that cell carries no transfer to verify".into();
+            return false;
+        };
+        // A launcher that delivers nothing here has no mission to verify. Saying so
+        // is the honest answer; running the propagation anyway would spend a second
+        // to reproduce the nominal hit and print it as a *result*.
+        if detail.payload_kg <= 0.0 {
+            self.error = "this launcher delivers no mass at that cell's C3".into();
+            return false;
+        }
+        let arrival_tdb = detail.arrival_tdb;
+        let mass = detail.payload_kg;
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = verify_porkchop_cell(&scenario, arrival_tdb, &metrics, mass)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+        self.verify_build = Some(rx);
+        // Remember *which* cell this verify is for, and drop any previous verdict:
+        // a stale verdict shown beside a running verify would read as the answer.
+        self.pending_verify = (i, j, vehicle, mass);
+        self.verdict = None;
+        self.error = GString::new();
+        true
+    }
+
+    /// Whether the on-demand cell verify is in flight.
+    #[func]
+    fn is_verifying_cell(&self) -> bool {
+        self.verify_build.is_some()
+    }
+
+    /// Pump the verify worker. `true` while **still running**, `false` once finished
+    /// (or none in flight) — then [`cell_verdict`](Self::cell_verdict) holds the
+    /// result. Non-blocking; safe every frame.
+    #[func]
+    fn poll_cell_verify(&mut self) -> bool {
+        let Some(rx) = self.verify_build.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Ok(Ok(verdict)) => {
+                self.verify_build = None;
+                let (i, j, v, mass) = self.pending_verify;
+                self.verdict = Some((i, j, v, mass, verdict));
+                self.error = GString::new();
+                false
+            }
+            Ok(Err(message)) => {
+                self.verify_build = None;
+                self.error = message.as_str().into();
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.verify_build = None;
+                self.error = "the cell verify thread died without reporting".into();
+                false
+            }
+        }
+    }
+
+    /// The last full-field cell verdict, or an **empty dictionary** if none has been
+    /// computed for the current grid.
+    ///
+    /// Keys always present: `launch_index`, `arrival_index`, `vehicle`,
+    /// `impactor_kg` (which cell and which delivery this describes — so the display
+    /// can tell "the cursor's verdict" from "a verdict for a cell I have left"), and
+    /// `outcome`, one of:
+    ///
+    /// - `"clean_miss"` — the deflected pass left the close-approach scan gate
+    ///   entirely. **The best possible result**, and it carries no b-plane numbers
+    ///   because there is no encounter to reduce, not because they are missing. It
+    ///   must never be collapsed onto the same sentinel as "not verified yet".
+    /// - `"encounter"` — plus `impact_parameter_m`, `capture_radius_m`, `perigee_m`,
+    ///   `earth_radius_m`, `is_hit`. **The verdict is `|B|` against
+    ///   `capture_radius_m`** (which is exactly `is_hit`); the perigee pairs with
+    ///   `earth_radius_m`. The two are equivalent only *as pairs* — comparing the
+    ///   perigee against the capture radius is neither, and is silently ~1.5× too
+    ///   strict.
+    /// - `"not_hyperbolic"` — a dead-centre capture, a hit with no b-plane
+    ///   reduction available.
+    #[func]
+    fn cell_verdict(&self) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        let Some((i, j, v, mass, verdict)) = self.verdict else {
+            return d;
+        };
+        d.set("launch_index", i);
+        d.set("arrival_index", j);
+        d.set("vehicle", v);
+        d.set("impactor_kg", mass);
+        match verdict {
+            CellVerdict::CleanMiss => {
+                d.set("outcome", "clean_miss");
+            }
+            CellVerdict::NotHyperbolic => {
+                d.set("outcome", "not_hyperbolic");
+            }
+            CellVerdict::Encounter {
+                impact_parameter_m,
+                capture_radius_m,
+                perigee_m,
+                earth_radius_m,
+                is_hit,
+            } => {
+                d.set("outcome", "encounter");
+                d.set("impact_parameter_m", impact_parameter_m);
+                d.set("capture_radius_m", capture_radius_m);
+                d.set("perigee_m", perigee_m);
+                d.set("earth_radius_m", earth_radius_m);
+                d.set("is_hit", is_hit);
+            }
+        }
+        d
     }
 
     /// The nominal encounter's focused capture radius `b_capture`, m (`-1.0` if no
@@ -910,6 +1337,17 @@ impl Mission {
             arr.push(Vector3::new(v.x as f32, v.y as f32, v.z as f32));
         }
         arr
+    }
+
+    /// One vehicle-independent porkchop column → a `PackedFloat64Array`, empty when
+    /// no grid is built. In one place so every column shares the same "no grid"
+    /// answer — an empty array, which GDScript reads as `size() == 0` rather than as
+    /// a grid of zeros.
+    fn pork_col(&self, f: impl Fn(&PorkchopView) -> Vec<f64>) -> PackedFloat64Array {
+        self.porkchop
+            .as_ref()
+            .map(|p| PackedFloat64Array::from(f(p).as_slice()))
+            .unwrap_or_default()
     }
 
     /// An optional f64 nalgebra vector → a Godot `Vector3`, absent becoming ZERO.

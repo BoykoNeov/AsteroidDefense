@@ -17,6 +17,7 @@ var hud: HUD
 var tags: TagLayer
 var map2d: Map2D
 var enc: EncounterView
+var pork: PorkchopPlot
 var planner: PlannerPanel
 var tier2_panel: Tier2Panel
 var boot: BootScreen
@@ -63,6 +64,11 @@ func _ready() -> void:
 	enc.visible = false
 	viewport.add_child(enc)
 
+	pork = PorkchopPlot.new()
+	pork.name = "Porkchop"
+	pork.visible = false
+	viewport.add_child(pork)
+
 	tags = TagLayer.new()
 	tags.name = "Tags"
 	tags.camera_rig = rig
@@ -93,7 +99,7 @@ func _ready() -> void:
 	boot.finished.connect(func() -> void:
 		hud.visible = true
 		time_bar.visible = true
-		tags.visible = not (map2d.visible or enc.visible))
+		tags.visible = not (map2d.visible or enc.visible or pork.visible))
 	viewport.add_child(boot)
 
 	# Controls parented directly to a SubViewport don't inherit its size via
@@ -137,14 +143,11 @@ func _input(event: InputEvent) -> void:
 		crt_mat.set_shader_parameter("phosphor",
 			PHOSPHOR_GREEN if _green else PHOSPHOR_AMBER)
 	elif event.is_action_pressed("view_3d"):
-		map2d.visible = false
-		enc.visible = false
+		_show_view(null)
 		tags.visible = true
 		hud.view_name = "TACTICAL 3D"
 	elif event.is_action_pressed("view_map"):
-		map2d.visible = true
-		enc.visible = false
-		tags.visible = false
+		_show_view(map2d)
 		hud.view_name = "HELIO PLOT 2D"
 	elif event.is_action_pressed("view_encounter"):
 		# Gated on `encounter_online`, NOT `mission_online`. They light together now
@@ -154,12 +157,40 @@ func _input(event: InputEvent) -> void:
 		if not Sim.encounter_online:
 			Sim.event_logged.emit("ENCOUNTER VIEW OFFLINE - AWAITING THREAT SOLUTION")
 		else:
-			enc.visible = true
-			map2d.visible = false
-			tags.visible = false
+			_show_view(enc)
 			hud.view_name = "ENCOUNTER B-PLANE"
+	elif event.is_action_pressed("view_porkchop"):
+		# Gated on `mission_online`, not on `pork_online`: the grid does not exist
+		# until this view asks for it, so gating on the grid would make the key a
+		# no-op that could never open the thing that builds it.
+		if not Sim.mission_online:
+			Sim.event_logged.emit("LAUNCH-WINDOW MAP OFFLINE - AWAITING THREAT SOLUTION")
+		else:
+			_show_view(pork)
+			hud.view_name = "LAUNCH WINDOWS"
+			# Opening the map is what pays for the grid — on demand, off the build
+			# path, exactly like the Tier-2 menu. A no-op once it is solved.
+			Sim.request_porkchop()
 	elif enc.visible and event.is_action_pressed("encounter_ca_jump"):
 		_jump_to_closest_approach()
+	# The porkchop's cursor keys are checked BEFORE the planner's, and both are
+	# guarded on their own view being up. LEFT/RIGHT are shared with the planner's
+	# lead adjust, so whichever guard matches first in this chain wins — when the
+	# launch-window map is open, the arrows drive it.
+	elif pork.visible and event.is_action_pressed("pork_cursor_up"):
+		Sim.move_pork_cursor(-1, 0)
+	elif pork.visible and event.is_action_pressed("pork_cursor_down"):
+		Sim.move_pork_cursor(1, 0)
+	elif pork.visible and event.is_action_pressed("pork_cursor_left"):
+		Sim.move_pork_cursor(0, -1)
+	elif pork.visible and event.is_action_pressed("pork_cursor_right"):
+		Sim.move_pork_cursor(0, 1)
+	elif pork.visible and event.is_action_pressed("pork_vehicle"):
+		Sim.cycle_pork_vehicle()
+	elif pork.visible and event.is_action_pressed("pork_metric"):
+		Sim.cycle_pork_metric()
+	elif pork.visible and event.is_action_pressed("pork_verify"):
+		Sim.request_cell_verify()
 	elif event.is_action_pressed("focus_next"):
 		_focus_idx = (_focus_idx + 1) % _focus_targets.size()
 		_apply_focus()
@@ -208,6 +239,19 @@ func _input(event: InputEvent) -> void:
 		Sim.toggle_tier2("srp")
 
 
+## Show exactly one of the full-frame overlay views (or `null` for the 3D world),
+## hiding the others.
+##
+## Centralized because the views are mutually exclusive and the list keeps growing:
+## with each switch setting every sibling by hand, adding the fourth view meant
+## editing three unrelated branches, and forgetting one leaves two overlays stacked
+## — the second silently painting over the first.
+func _show_view(which: Control) -> void:
+	for v: Control in [map2d, enc, pork]:
+		v.visible = (v == which)
+	tags.visible = which == null
+
+
 ## Park the clock on the live asteroid at its closest approach — the one moment
 ## the encounter view's radar contact is on screen.
 ##
@@ -237,7 +281,7 @@ func _apply_focus() -> void:
 
 func _sync_overlay_sizes() -> void:
 	var vs := Vector2(viewport.size)
-	for c: Control in [map2d, enc, tags, hud, planner, tier2_panel, boot]:
+	for c: Control in [map2d, enc, pork, tags, hud, planner, tier2_panel, boot]:
 		if is_instance_valid(c):
 			c.position = Vector2.ZERO
 			c.size = vs

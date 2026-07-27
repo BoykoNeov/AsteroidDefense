@@ -73,6 +73,18 @@ func _draw() -> void:
 	else:
 		_text_r(Vector2(cx, MARGIN + lh * 3.5), warp_str, mid)
 
+	# The launch-window map is a full-frame instrument, and the two mission panels
+	# would sit straight on top of its heatmap. They are also about a different
+	# question — this threat and this interceptor plan, not which windows exist —
+	# so they stand down for that view rather than being drawn over a plot they
+	# make unreadable. (The 3D tag layer stands down for the 2D views for the same
+	# reason.) Header, clock, console and the key line stay: those are chrome.
+	if view_name == "LAUNCH WINDOWS":
+		_console_block(w, h, lh, mid, bright, faint)
+		_help_line(w, h, dim)
+		_bezel(w, h, faint)
+		return
+
 	# ---- target panel (left) ----
 	var py := h * 0.30
 	if not Sim.mission_online:
@@ -269,7 +281,10 @@ func _help_line(w: float, h: float, dim: Color) -> void:
 	# marker was effectively unreachable in the first place.
 	if view_name == "ENCOUNTER B-PLANE":
 		line += " [C]CLOSEST APPR"
-	line += " [1]3D [2]MAP [3]ENC [T]PHOSPHOR"
+	# Same rule for the launch-window map's keys: they bind only while it is up.
+	if view_name == "LAUNCH WINDOWS":
+		line += " [ARR]WINDOW [L]LAUNCHER [D]METRIC [E]VERIFY"
+	line += " [1]3D [2]MAP [3]ENC [4]WINDOWS [T]PHOSPHOR"
 	_text_r(Vector2(w - MARGIN, h - MARGIN - BOTTOM_RESERVE), line, dim, _fs - 2)
 
 

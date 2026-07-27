@@ -201,6 +201,50 @@ var tier2_on := {                       # per-term reveal state (mnemonic keys)
 ## quote one perigee.
 var nom_perigee_km := 0.0
 
+## Porkchop / deliverability layer ([4], HANDOFF §8). The launch-window map: for
+## every (launch, arrival) pair, the transfer that reaches the asteroid and what a
+## real launcher can put on it. Built on demand from the core's `PorkchopView`,
+## once per scenario, on a worker — ~45 us/cell, so this grid is ~0.6 s of work
+## that must never touch the render thread.
+##
+## `pork_online` is **its own flag**, set from `Mission.has_porkchop()` and not
+## alongside `mission_online`. A threat solution does not imply a grid: the two
+## land seconds apart, and a view that gated on the wrong one would draw an empty
+## heatmap as if it were a measured result.
+const PORK_LAUNCH_SAMPLES := 120
+const PORK_ARRIVAL_SAMPLES := 120
+
+## Heatmap metrics, cycled by [D]. Each is [id, label, unit, legend title] — the
+## short title exists because the colour key is a narrow column and a truncated
+## label there ("LAUNCH ENERG") reads as a rendering fault.
+const PORK_METRICS := [
+	["c3", "LAUNCH ENERGY C3", "KM2/S2", "C3"],
+	["dv", "DELIVERED ALONG-TRACK DV", "MM/S", "DELTA-V"],
+]
+
+var pork_online := false               # a built grid is readable
+var pork_building := false             # the ~0.6 s worker is running
+var pork_rows := 0                     # launch epochs
+var pork_cols := 0                     # arrival epochs
+var pork_launch_tdb := PackedFloat64Array()
+var pork_arrival_tdb := PackedFloat64Array()
+## Departure C3 per cell, km^2/s^2 — **-1 marks a cell with no transfer at all**.
+## The single authority on emptiness; the other columns carry ordinary zeros in
+## blank cells, and a third state (a real transfer this launcher cannot reach,
+## `pork_payload == 0`) must stay distinct from both.
+var pork_c3 := PackedFloat64Array()
+var pork_along := PackedFloat64Array()   # signed along-track projection, m/s
+var pork_revs := PackedInt32Array()      # complete solar laps; -1 where blank
+var pork_payload := PackedFloat64Array() # deliverable mass for pork_vehicle, kg
+var pork_dv := PackedFloat64Array()      # delivered along-track dv, m/s (signed)
+var pork_vehicle := 0                    # index into the core's launcher table
+var pork_metric := 0                     # index into PORK_METRICS
+var pork_i := 0                          # cursor: launch index
+var pork_j := 0                          # cursor: arrival index
+var pork_verifying := false              # the on-demand full-field verify is running
+
+signal porkchop_changed
+
 var plan_lead_d := 180.0               # intercept lead before impact epoch, days
 var plan_dv_ms := 30.0                 # impulse magnitude, m/s
 var plan_retro := true                 # true = retrograde (against velocity)
@@ -307,6 +351,8 @@ func _process(delta: float) -> void:
 	# measurement (kicked from the menu) must land whatever the clock is doing.
 	_poll_build()
 	_poll_tier2_preview()
+	_poll_porkchop()
+	_poll_cell_verify()
 	_tick_plan_debounce(delta)
 
 	if paused:
@@ -932,6 +978,220 @@ func tier2_shift_km(term: String) -> float:
 	if not tier2_available(term):
 		return NAN
 	return nom_perigee_km - mission.tier2_shifted_perigee_m(term) / 1000.0
+
+
+# ------------------------------------------------------- porkchop / delivery ---
+
+## Kick off the launch-window grid on a worker. Called when the heatmap view
+## opens — on demand, like the Tier-2 menu, and for the same reason: it is real
+## work (~0.6 s of Lambert solves) that the threat solution must never wait on.
+## A no-op if there is no threat yet, a grid already exists, or one is building.
+func request_porkchop() -> void:
+	if not mission_online or pork_online or pork_building:
+		return
+	if mission.begin_porkchop(PORK_LAUNCH_SAMPLES, PORK_ARRIVAL_SAMPLES):
+		pork_building = true
+		event_logged.emit(_stamp(t) + "  SOLVING LAUNCH-WINDOW GRID - %dx%d TRANSFERS" %
+			[PORK_LAUNCH_SAMPLES, PORK_ARRIVAL_SAMPLES])
+
+
+## Pump the grid worker; pull the columns in when it lands. Mirrors
+## `_poll_tier2_preview`.
+func _poll_porkchop() -> void:
+	if not pork_building:
+		return
+	# poll_porkchop returns true while running, false once landed.
+	if mission.poll_porkchop():
+		return
+	pork_building = false
+	pork_online = mission.has_porkchop()
+	if not pork_online:
+		event_logged.emit(_stamp(t) + "  LAUNCH-WINDOW GRID FAILED - " + str(mission.last_error()))
+		return
+	_fetch_porkchop()
+	event_logged.emit(_stamp(t) + "  LAUNCH-WINDOW GRID READY - %d OF %d WINDOWS REACHABLE" %
+		[pork_feasible_count(), pork_rows * pork_cols])
+
+
+## Pull every grid column from the core into local caches.
+##
+## Read **once** per grid (and per launcher change), never per frame: each call
+## marshals ~14 000 doubles across the FFI boundary. Nothing here is computed —
+## these are projections of cells the core already solved.
+func _fetch_porkchop() -> void:
+	pork_rows = mission.porkchop_launch_count()
+	pork_cols = mission.porkchop_arrival_count()
+	pork_launch_tdb = mission.porkchop_launch_tdb()
+	pork_arrival_tdb = mission.porkchop_arrival_tdb()
+	pork_c3 = mission.porkchop_c3()
+	pork_along = mission.porkchop_along_track()
+	pork_revs = mission.porkchop_revolutions()
+	_fetch_porkchop_vehicle()
+	pork_i = clampi(pork_i, 0, maxi(pork_rows - 1, 0))
+	pork_j = clampi(pork_j, 0, maxi(pork_cols - 1, 0))
+	porkchop_changed.emit()
+
+
+## Re-read only the two vehicle-dependent columns. This is the payoff of the
+## core's vehicle-independent grid: switching launcher re-maps C3 to mass, it
+## never re-solves a single Lambert arc.
+func _fetch_porkchop_vehicle() -> void:
+	pork_payload = mission.porkchop_payload_kg(pork_vehicle)
+	pork_dv = mission.porkchop_along_track_dv(pork_vehicle)
+
+
+## Row-major index of a cell, or -1 if out of range.
+func pork_index(i: int, j: int) -> int:
+	if i < 0 or j < 0 or i >= pork_rows or j >= pork_cols:
+		return -1
+	return i * pork_cols + j
+
+
+## Whether a cell holds **no transfer at any allowed revolution count** — the
+## grid's own blank, read from the one column entitled to say so.
+func pork_blank(i: int, j: int) -> bool:
+	var k := pork_index(i, j)
+	return k < 0 or pork_c3[k] < 0.0
+
+
+## Whether a cell holds a real transfer that the *current launcher* can reach.
+## Distinct from `pork_blank`: this one is a fact about the rocket, and it changes
+## under [V] while the trajectory underneath does not.
+func pork_reachable(i: int, j: int) -> bool:
+	var k := pork_index(i, j)
+	return k >= 0 and pork_c3[k] >= 0.0 and pork_payload[k] > 0.0
+
+
+func pork_feasible_count() -> int:
+	var n := 0
+	for k in range(pork_c3.size()):
+		if pork_c3[k] >= 0.0 and pork_payload[k] > 0.0:
+			n += 1
+	return n
+
+
+## The cursor cell's full readout row, or an empty Dictionary for a blank cell.
+## One core call, so the panel can never assemble a row out of two cells.
+func pork_cell() -> Dictionary:
+	if not pork_online:
+		return {}
+	return mission.porkchop_cell(pork_i, pork_j, pork_vehicle)
+
+
+func move_pork_cursor(di: int, dj: int) -> void:
+	if not pork_online:
+		return
+	pork_i = clampi(pork_i + di, 0, pork_rows - 1)
+	pork_j = clampi(pork_j + dj, 0, pork_cols - 1)
+
+
+func cycle_pork_vehicle() -> void:
+	if not mission_online:
+		return
+	pork_vehicle = (pork_vehicle + 1) % maxi(mission.vehicle_count(), 1)
+	if pork_online:
+		_fetch_porkchop_vehicle()
+		porkchop_changed.emit()
+	event_logged.emit("LAUNCHER: " + str(mission.vehicle_name(pork_vehicle)).to_upper())
+
+
+func cycle_pork_metric() -> void:
+	pork_metric = (pork_metric + 1) % PORK_METRICS.size()
+	porkchop_changed.emit()
+
+
+func pork_vehicle_name() -> String:
+	if not mission_online:
+		return "--"
+	return str(mission.vehicle_name(pork_vehicle)).to_upper()
+
+
+func pork_vehicle_max_c3() -> float:
+	if not mission_online:
+		return 0.0
+	return mission.vehicle_max_c3(pork_vehicle)
+
+
+## Fire the on-demand full-field verify of the cursor cell — one real n-body
+## propagation with the impulse **this launcher** would actually deliver through
+## **this window**. Everything above it is a patched-conic planning estimate; this
+## is the only number in the view that the honest physics produced.
+func request_cell_verify() -> void:
+	if not pork_online or pork_verifying:
+		return
+	if pork_blank(pork_i, pork_j):
+		event_logged.emit("NO TRANSFER IN THAT WINDOW - NOTHING TO VERIFY")
+		return
+	if not pork_reachable(pork_i, pork_j):
+		event_logged.emit("%s DELIVERS NO MASS AT THAT C3 - NOTHING TO VERIFY" % pork_vehicle_name())
+		return
+	if mission.begin_cell_verify(pork_i, pork_j, pork_vehicle):
+		pork_verifying = true
+		event_logged.emit(_stamp(t) + "  VERIFYING WINDOW IN FULL N-BODY FIELD - STAND BY")
+	else:
+		event_logged.emit("VERIFY REFUSED - " + str(mission.last_error()))
+
+
+func _poll_cell_verify() -> void:
+	if not pork_verifying:
+		return
+	if mission.poll_cell_verify():
+		return
+	pork_verifying = false
+	var v := pork_verdict()
+	if v.is_empty():
+		event_logged.emit(_stamp(t) + "  WINDOW VERIFY FAILED - " + str(mission.last_error()))
+	else:
+		event_logged.emit(_stamp(t) + "  WINDOW VERIFY: " + pork_verdict_label())
+	porkchop_changed.emit()
+
+
+## The last full-field verdict, or `{}` if none has been computed for this grid.
+## Carries the cell it belongs to, so the view can tell "the cursor's verdict"
+## from "a verdict for a window I have since moved off".
+func pork_verdict() -> Dictionary:
+	if not pork_online:
+		return {}
+	return mission.cell_verdict()
+
+
+## Whether the last verdict describes the cell the cursor is on right now.
+func pork_verdict_is_current() -> bool:
+	var v := pork_verdict()
+	if v.is_empty():
+		return false
+	return int(v.launch_index) == pork_i and int(v.arrival_index) == pork_j \
+		and int(v.vehicle) == pork_vehicle
+
+
+## The verdict in one line.
+##
+## **The comparison is |B| against the capture radius** — the pair the core's own
+## `is_hit` uses, and exactly the `is_hit` flag it hands back. The perigee is shown
+## beside it because "how close did it come" is what a reader means, but it pairs
+## with Earth's solid radius, not with the capture disc. Mixing the pairs is the
+## bug this project already shipped once: it reads plausible and is ~1.5x too
+## strict, failing plans that physics calls safe.
+func pork_verdict_label() -> String:
+	var v := pork_verdict()
+	if v.is_empty():
+		return "NOT VERIFIED"
+	match str(v.outcome):
+		"clean_miss":
+			# The best outcome there is — the deflected pass never came back for a
+			# close approach at all. It has no b-plane numbers because there is no
+			# encounter to reduce, not because they went missing.
+			return "CLEAN MISS - NO EARTH ENCOUNTER"
+		"not_hyperbolic":
+			return "DEAD-CENTRE CAPTURE - NO B-PLANE SOLUTION"
+		"encounter":
+			var b: float = float(v.impact_parameter_m) / 1000.0
+			var cap: float = float(v.capture_radius_m) / 1000.0
+			var rp: float = float(v.perigee_m) / 1000.0
+			var word: String = "SURFACE IMPACT" if bool(v.is_hit) else "MISS"
+			return "%s - |B| %s KM vs CAPTURE %s KM (PERIGEE %s KM)" % [
+				word, group_num(int(b)), group_num(int(cap)), group_num(int(rp))]
+	return "UNKNOWN VERDICT"
 
 
 func try_commit() -> void:

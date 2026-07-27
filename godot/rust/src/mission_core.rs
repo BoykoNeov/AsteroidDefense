@@ -50,11 +50,12 @@ use asteroid_core::horizons::Neo;
 use asteroid_core::geometry::BPlaneEncounter;
 use asteroid_core::launch_vehicle::{LaunchVehicle, LAUNCH_VEHICLES};
 use asteroid_core::mission::{
-    cell_delivery, porkchop_grid, verify_cell, Porkchop, PorkchopCell, TransferMetrics,
+    cell_delivery, porkchop_grid, required_impactor_mass, verify_cell, MassSolveOutcome, Porkchop,
+    PorkchopCell, TransferMetrics,
 };
 use asteroid_core::scenario::{
     DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError, SrpParams,
-    Tier2Config, ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES,
+    Tier2Config, ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES, SAFE_PERIGEE_TARGET_M,
 };
 use asteroid_core::{
     along_track_unit, Clock, DvSolveTol, EphemerisPerturber, Epoch, OrbitalElements, StateVector,
@@ -2037,6 +2038,12 @@ impl PorkchopView {
 /// `impactor_mass_kg` is meant to be the selected launcher's deliverable mass at
 /// that cell's `C3`, which is what makes this the honest question: not "would some
 /// impulse work" but "does *this launcher* through *this window* work".
+///
+/// **Cost is cell-dependent: measured 5.8 s at a late arrival, 18.2 s at an early
+/// one**, because the propagation re-flies from arrival to the encounter and the
+/// arrival axis spans 0.10–0.92 of a ~12 yr campaign. (An earlier note here said
+/// "~1 s"; that was never measured and is wrong by 6–18×. It matters because it is
+/// the unit the required-mass solve is priced in — see [`required_cell_mass`].)
 pub fn verify_porkchop_cell(
     scenario: &RealFieldScenario,
     arrival_tdb: f64,
@@ -2066,6 +2073,130 @@ pub fn verify_porkchop_cell(
         })) => Ok(CellVerdict::NotHyperbolic),
         Err(e) => Err(ScenarioError::Integration(format!("cell verify: {e}"))),
     }
+}
+
+/// The heaviest mass any launcher on the core's table can deliver, kg — each
+/// vehicle at its own cheapest tabulated `C3`.
+///
+/// Derived from [`LAUNCH_VEHICLES`] rather than written down, so it cannot drift
+/// from the AMAT/LSP tables the rest of the layer reads. Used to size the
+/// required-mass solve's cap ([`mass_solve_cap_kg`]) in units a reader can convert:
+/// a requirement quoted as *n* × this is *n* launches' worth of the best rocket
+/// there is.
+pub fn heaviest_deliverable_kg() -> f64 {
+    LAUNCH_VEHICLES
+        .iter()
+        .map(|v| v.payload_kg(v.min_c3_km2_s2()))
+        .fold(0.0, f64::max)
+}
+
+/// Where the required-mass bracket gives up, kg — **one hundred** of the best
+/// launch there is.
+///
+/// Sized off [`heaviest_deliverable_kg`] rather than a round number, because that
+/// is what makes [`MassSolveOutcome::InfeasibleAtCap`] *readable*: hitting it means
+/// "not this window, not with a hundred of the best launcher there is", which is a
+/// statement about the mission rather than about a solver parameter.
+///
+/// A cap is mandatory, not a nicety — it is the degenerate-direction guard the core
+/// solver was built with from day one. A window whose arrival geometry projects
+/// poorly onto the track (`v_rel ⊥ v̂_ast`) is deflected by *no* deliverable mass,
+/// and an uncapped bisection would double forever chasing it.
+///
+/// A hundred rather than ten, and that was measured. Ten (≈ 64 t) puts the cap
+/// *below* the requirement of every window in the shipping grid, so every cell
+/// would return `InfeasibleAtCap` and the view would never show a mass at all — the
+/// number this whole feature exists to print. The best-coupled early window
+/// measured **157 t**, which a hundred brackets and ten does not.
+pub fn mass_solve_cap_kg() -> f64 {
+    100.0 * heaviest_deliverable_kg()
+}
+
+/// Where the required-mass bracket starts, kg — **one** best launch.
+///
+/// A meaningful anchor rather than an arbitrarily tiny number, and that is worth
+/// probes: the bracket doubles from here, so starting at 1 kg would spend a dozen
+/// full-field propagations climbing to the mission scale before learning anything.
+/// Starting at what the best rocket actually lifts puts the first probe inside the
+/// range the answer lives in.
+///
+/// **Safe only because the answer is seed-independent.** The core solver used to
+/// return the seed verbatim when the seed already cleared the target; it now
+/// brackets downward instead (`required_impactor_mass`), so a well-chosen seed buys
+/// speed and cannot change the reported physics. Choosing this seed before that fix
+/// would have quietly made the readout a function of the launcher table.
+pub fn mass_solve_seed_kg() -> f64 {
+    heaviest_deliverable_kg()
+}
+
+/// Relative width the required-mass bisection stops at — 5 %.
+///
+/// Sized to the *readout*, not to the solver: the panel prints a mass rounded to
+/// three significant figures beside a ratio rounded to a whole number, and neither
+/// can show 5 %. The core's old hardcoded 1e-4 cost **seven extra full-field
+/// propagations** (~2 minutes on an early-arrival cell) to compute digits nothing
+/// displays.
+pub const MASS_SOLVE_TOL: f64 = 0.05;
+
+/// Solve for the impactor mass one launch window needs to reach the campaign's
+/// safe-perigee target ([`SAFE_PERIGEE_TARGET_M`]) — the on-demand answer behind
+/// the launch-window map's `[M]` key.
+///
+/// **Vehicle-independent, on purpose.** The question is what the *window* costs,
+/// not what a particular rocket happens to carry; the frontend divides this by the
+/// selected launcher's payload to get the ratio. That independence is only real
+/// because the core solver brackets from a fixed seed — seeding from the launcher's
+/// payload would make the answer change when you pressed `[L]`.
+///
+/// **Expensive, and every constant above exists because it was measured.** Each
+/// probe is a full-field re-propagation from arrival to the encounter, and the probe
+/// cost is *cell-dependent* — **18.2 s** for an early-arrival window (10.8 yr of
+/// cruise to re-fly) against **5.8 s** for a late one (3.2 yr) — so what decides the
+/// wall clock is how many probes the bracket takes.
+///
+/// Measured end to end on the shipping grid: **46 s** for the best-coupled window
+/// (feasible at 20 232 kg) and **31 s** for the worst-coupled late one (over the
+/// cap). Early-arrival cells far from the seed are the slow tail, ~3 min. The same
+/// order as the Tier-2 preview's ~80 s, and like it: strictly on a worker, with the
+/// frontend saying it is running.
+///
+/// **Both measured cells bracket *upward*, so that range does not cover a window
+/// cheaper than the seed.** Such a window halves down instead
+/// (`required_impactor_mass`'s downward bracket), paying the same per-probe cost per
+/// halving with only [`MIN_BRACKET_MASS_KG`](asteroid_core::mission) — one gram —
+/// bounding it. No cell in the shipping grid does this: the seed is one best launch
+/// and the cheapest requirement found is 1.4× that. A grid whose windows got much
+/// easier would want the seed lowered to match, and would be timing a path nothing
+/// has yet measured.
+///
+/// The naive parameterisation this replaced — a 100 kg seed, the core's old
+/// hardcoded 1e-4 tolerance, a 1e9 cap — took **455 s** for the same answer, and it
+/// is worth naming which knob bought what: the seed removed ~11 doublings, the
+/// tolerance ~7 bisections, and the cap is what keeps the *unreachable* windows from
+/// climbing to 1e9 before admitting it.
+///
+/// The cap direction matters in the other sense too. Sized at ten launches instead
+/// of a hundred, it would sit below every window's requirement, so every cell would
+/// read "over the cap" and the number this feature exists to print would never
+/// appear.
+pub fn required_cell_mass(
+    scenario: &RealFieldScenario,
+    arrival_tdb: f64,
+    metrics: &TransferMetrics,
+) -> Result<MassSolveOutcome, ScenarioError> {
+    let ds = scenario.deflection()?;
+    required_impactor_mass(
+        &ds,
+        Epoch::from_tdb_seconds_past_j2000(arrival_tdb),
+        metrics,
+        IMPACTOR_BETA,
+        threat_mass_kg(),
+        SAFE_PERIGEE_TARGET_M,
+        mass_solve_seed_kg(),
+        mass_solve_cap_kg(),
+        MASS_SOLVE_TOL,
+    )
+    .map_err(|e| ScenarioError::Integration(format!("required impactor mass: {e}")))
 }
 
 #[cfg(test)]
@@ -2490,6 +2621,178 @@ mod tests {
         }
     }
 
+    /// **The required-mass solve, judged on what it delivers rather than on what it
+    /// returns.** Two cells of one grid, and the two outcomes are both real answers.
+    ///
+    /// The discriminating claim is the round trip: take the mass the solver says
+    /// this window needs, fly *that* mass through the independent verify path, and
+    /// require the perigee it reaches to actually clear the target. A test that
+    /// asserted only `impactor_mass_kg > 0` would pass over a mis-bracketed solve, a
+    /// wrong target, or a solver reading a different cell's geometry — this is the
+    /// same catch the core suite makes kernel-free, made here on the real field
+    /// through the exact call the frontend makes.
+    ///
+    /// The second cell pins the guard: a window whose arrival barely projects onto
+    /// the track is not deflected by any mass worth launching, and must come back
+    /// [`MassSolveOutcome::InfeasibleAtCap`] — an honest window state that the
+    /// frontend renders as data. Both outcomes from one grid, so neither is a
+    /// specially-built fixture.
+    ///
+    /// Prints its own cost, because that cost is the whole reason the constants
+    /// above are what they are and a 5× regression should be visible rather than
+    /// merely slow.
+    #[test]
+    fn required_mass_is_what_the_window_actually_needs() {
+        if !have_kernels() {
+            return;
+        }
+        use std::time::Instant;
+
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+
+        let n = 10;
+        let view = PorkchopView::build(&scenario, n, n).expect("grid builds");
+        let c3 = view.c3_flat();
+        let along = view.along_track_flat();
+        let transfers: Vec<usize> = (0..c3.len()).filter(|&k| c3[k] >= 0.0).collect();
+        assert!(
+            !transfers.is_empty(),
+            "no transfers in the grid — nothing to solve against"
+        );
+
+        // Best-coupled window: the one an operator would actually pick, and the one
+        // most likely to be reachable at all.
+        let best = *transfers
+            .iter()
+            .max_by(|&&a, &&b| along[a].abs().total_cmp(&along[b].abs()))
+            .expect("a cell");
+        // Worst-coupled window, restricted to the **late half of the arrival axis**.
+        // Not to bias the outcome — a late, badly-projected window is infeasible for
+        // both reasons at once — but for cost: a probe re-flies from arrival to the
+        // encounter, so a late arrival is ~3× cheaper per probe (5.8 s vs 18.2 s
+        // measured) and this cell walks the full doubling ladder to the cap.
+        let weak = *transfers
+            .iter()
+            .filter(|&&k| k % n >= n / 2)
+            .min_by(|&&a, &&b| along[a].abs().total_cmp(&along[b].abs()))
+            .expect("a late cell");
+
+        let target = SAFE_PERIGEE_TARGET_M;
+        let cap = mass_solve_cap_kg();
+        println!(
+            "target perigee {:.0} km, seed {:.0} kg, cap {cap:.0} kg (= 100 x the best launch)",
+            target / 1000.0,
+            mass_solve_seed_kg()
+        );
+
+        // --- (1) The best-coupled window: a number, and it must be the right one.
+        let (bi, bj) = (best / n, best % n);
+        let b_metrics = view.metrics_at(bi, bj).expect("metrics");
+        let b_arrival = view.arrival_tdb()[bj];
+        let t0 = Instant::now();
+        let out = required_cell_mass(&scenario, b_arrival, &b_metrics).expect("mass solve");
+        let solve_secs = t0.elapsed().as_secs_f64();
+        println!(
+            "best-coupled cell ({bi},{bj}): |along| {:.0} m/s, arrival lead {:.2} yr \
+             → {out:?} in {solve_secs:.1} s",
+            along[best].abs(),
+            (mc.impact_tdb_seconds() - b_arrival) / 3.155_76e7
+        );
+        let MassSolveOutcome::Feasible { impactor_mass_kg } = out else {
+            panic!(
+                "the best-coupled window in the grid came back over the {cap:.0} kg cap \
+                 ({out:?}) — either the cap is sized wrong or the coupling is not reaching \
+                 the propagation; the view would then never show a mass at all"
+            )
+        };
+        assert!(
+            impactor_mass_kg > 0.0 && impactor_mass_kg <= cap,
+            "solved mass {impactor_mass_kg} kg is outside the bracket (0, {cap}]"
+        );
+
+        // **The round trip.** Fly the solved mass through the verify path — a
+        // different function, the one `[E]` uses — and require the perigee it reaches
+        // to clear the target. This is what "required" has to mean.
+        let reached = match verify_porkchop_cell(&scenario, b_arrival, &b_metrics, impactor_mass_kg)
+            .expect("verify runs")
+        {
+            // Off the scan gate entirely: past the target by an unmeasured margin.
+            CellVerdict::CleanMiss => f64::INFINITY,
+            CellVerdict::Encounter { perigee_m, .. } => perigee_m,
+            CellVerdict::NotHyperbolic => 0.0,
+        };
+        println!(
+            "  {impactor_mass_kg:.0} kg through this window reaches perigee {:.0} km \
+             (target {:.0} km)",
+            reached / 1000.0,
+            target / 1000.0
+        );
+        assert!(
+            reached >= target,
+            "the solver called {impactor_mass_kg:.0} kg sufficient, but flying it reaches \
+             perigee {reached:.0} m against a {target:.0} m target — the bracket is on the \
+             wrong side of the crossing"
+        );
+
+        // …and it must be *minimal*, not merely sufficient: a mass a comfortable
+        // margin below the answer has to FAIL the same target. Without this, returning
+        // the cap (or any large number) would pass everything above.
+        let under = impactor_mass_kg * (1.0 - 4.0 * MASS_SOLVE_TOL);
+        let under_reached =
+            match verify_porkchop_cell(&scenario, b_arrival, &b_metrics, under).expect("verify") {
+                CellVerdict::CleanMiss => f64::INFINITY,
+                CellVerdict::Encounter { perigee_m, .. } => perigee_m,
+                CellVerdict::NotHyperbolic => 0.0,
+            };
+        println!(
+            "  {under:.0} kg (−{:.0}%) reaches {:.0} km — short, as a minimum requires",
+            400.0 * MASS_SOLVE_TOL,
+            under_reached / 1000.0
+        );
+        assert!(
+            under_reached < target,
+            "{under:.0} kg already reaches perigee {under_reached:.0} m ≥ the {target:.0} m \
+             target, so {impactor_mass_kg:.0} kg is not the requirement — it is an upper bound \
+             being reported as one"
+        );
+
+        // --- (2) The worst-coupled window: the honest "no", not a hang or an error.
+        let (wi, wj) = (weak / n, weak % n);
+        let w_metrics = view.metrics_at(wi, wj).expect("metrics");
+        let w_arrival = view.arrival_tdb()[wj];
+        let t1 = Instant::now();
+        let w_out = required_cell_mass(&scenario, w_arrival, &w_metrics).expect("mass solve");
+        println!(
+            "worst-coupled late cell ({wi},{wj}): |along| {:.0} m/s → {w_out:?} in {:.1} s",
+            along[weak].abs(),
+            t1.elapsed().as_secs_f64()
+        );
+        match w_out {
+            MassSolveOutcome::InfeasibleAtCap {
+                mass_cap_kg,
+                perigee_reached_m,
+            } => {
+                assert_eq!(mass_cap_kg, cap);
+                assert!(
+                    perigee_reached_m < target,
+                    "InfeasibleAtCap reported perigee {perigee_reached_m:.0} m, which already \
+                     clears the {target:.0} m target — then it was not infeasible"
+                );
+            }
+            // Not a failure of the code — a genuinely better grid than the one this
+            // was written against. Say so loudly rather than assert a stale fact.
+            MassSolveOutcome::Feasible { impactor_mass_kg } => panic!(
+                "even the worst-coupled late window is feasible at {impactor_mass_kg:.0} kg. \
+                 That is a real result, not a bug, but it means this grid no longer exercises \
+                 the InfeasibleAtCap path the frontend renders — pick a harder cell or lower \
+                 the cap."
+            ),
+        }
+    }
+
     /// 2035-01-01 TDB — comfortably inside the de440s span; the synthetic-body
     /// seed epoch for the catalog tests.
     fn epoch_2035() -> Epoch {
@@ -2854,8 +3157,19 @@ mod tests {
         mc.build_scenario(&ImpactorConfig::default())
             .expect("scenario builds");
 
-        let target = 2.0e7; // curve.json target_perigee_m
-                            // (lead_seconds, required_dv) pairs straight from curve.json.
+        // The recorded `curve.json` numbers below were swept against **20 000 km**.
+        // That value now has a name, and the two must not drift apart: if the campaign
+        // target ever moves, every `expected` here is stale and so is the launch-window
+        // map's required-mass number, which is quoted against the same bar precisely so
+        // the two compose. Fail here rather than let a Δv requirement and a mass
+        // requirement silently describe different missions.
+        let target = SAFE_PERIGEE_TARGET_M;
+        assert_eq!(
+            target, 2.0e7,
+            "the campaign safe-perigee target moved; curve.json (and the expectations \
+             below) were swept against 20 000 km and must be regenerated"
+        );
+        // (lead_seconds, required_dv) pairs straight from curve.json.
         let cases = [
             (12_464_104.312150536_f64, 0.587_75_f64), // 0.5 period
             (24_928_208.624301072, 0.509_75),         // 1.0 period

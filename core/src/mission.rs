@@ -550,8 +550,9 @@ pub enum MassSolveOutcome {
 
 /// Solve for the impactor mass that raises the full-field b-plane perigee to
 /// `target_perigee_m`, for one cell's coupled-direction impulse at
-/// `arrival_epoch`. Doubles the mass from `seed_mass_kg` until the perigee clears
-/// the target, then bisects; capped at `mass_cap_kg`.
+/// `arrival_epoch`. Brackets outward from `seed_mass_kg` — doubling while the seed
+/// is too light, **halving while it is already too heavy** — then bisects the
+/// bracket to `rel_tol`; capped at `mass_cap_kg`.
 ///
 /// The cap is the **degenerate-direction guard the advisor asked for from day
 /// one**: when the arrival geometry projects poorly onto the track (`v_rel ⊥
@@ -559,6 +560,20 @@ pub enum MassSolveOutcome {
 /// would run away. Hitting the cap returns [`MassSolveOutcome::InfeasibleAtCap`]
 /// — an honest window state, not a hang. Each probe is one full-field
 /// propagation, so this is an on-demand operation, never a per-grid one.
+///
+/// **The answer does not depend on the seed, and that is load-bearing now that a
+/// frontend displays it.** This function used to return `seed_mass_kg` verbatim
+/// when the seed already cleared the target — an upper bound presented as *the*
+/// requirement. Harmless while the only callers passed a deliberately tiny seed;
+/// wrong the moment a caller seeds from something meaningful (a launcher's payload,
+/// a first-order estimate) to save propagations, because then pressing a key that
+/// changed the seed would change the physics being reported. Bracketing downward
+/// makes a good seed buy *speed* and never *a different answer*.
+///
+/// `rel_tol` is the bisection's relative width — the bracket is split until
+/// `(hi − lo) ≤ rel_tol · hi`. Each halving of the tolerance costs one more full
+/// propagation, so a caller displaying kilograms should ask for what it can read
+/// (1e-2 is ~7 bisections) rather than what the solver can reach.
 #[allow(clippy::too_many_arguments)]
 pub fn required_impactor_mass(
     deflection: &DeflectionScenario,
@@ -569,6 +584,7 @@ pub fn required_impactor_mass(
     target_perigee_m: f64,
     seed_mass_kg: f64,
     mass_cap_kg: f64,
+    rel_tol: f64,
 ) -> Result<MassSolveOutcome, DeflectionError> {
     let ok = beta.is_finite()
         && beta > 0.0
@@ -579,10 +595,13 @@ pub fn required_impactor_mass(
         && seed_mass_kg.is_finite()
         && seed_mass_kg > 0.0
         && mass_cap_kg.is_finite()
-        && mass_cap_kg > seed_mass_kg;
+        && mass_cap_kg > seed_mass_kg
+        && rel_tol.is_finite()
+        && rel_tol > 0.0
+        && rel_tol < 1.0;
     if !ok {
         return Err(DeflectionError::InvalidInput(format!(
-            "required_impactor_mass needs β>0, M>0, target>0, 0<seed<cap (got β={beta}, M={asteroid_mass_kg}, target={target_perigee_m}, seed={seed_mass_kg}, cap={mass_cap_kg})"
+            "required_impactor_mass needs β>0, M>0, target>0, 0<seed<cap, 0<rel_tol<1 (got β={beta}, M={asteroid_mass_kg}, target={target_perigee_m}, seed={seed_mass_kg}, cap={mass_cap_kg}, rel_tol={rel_tol})"
         )));
     }
 
@@ -600,38 +619,57 @@ pub fn required_impactor_mass(
         }
     };
 
-    // Already clear at the seed? Then any mass ≥ seed works; report the seed.
+    // Bracket the crossing around the seed. Which way depends on the seed, the
+    // answer does not (see the doc note): too light and we double up to the cap,
+    // already clear and we halve down until it is not.
+    let (mut lo, mut hi);
     if perigee_at(seed_mass_kg)? >= target_perigee_m {
-        return Ok(MassSolveOutcome::Feasible {
-            impactor_mass_kg: seed_mass_kg,
-        });
-    }
-
-    // Grow the mass to bracket the crossing, capped.
-    let mut lo = seed_mass_kg;
-    let mut hi = seed_mass_kg * 2.0;
-    loop {
-        if hi >= mass_cap_kg {
-            let reached = perigee_at(mass_cap_kg)?;
-            if reached < target_perigee_m {
-                return Ok(MassSolveOutcome::InfeasibleAtCap {
-                    mass_cap_kg,
-                    perigee_reached_m: reached,
+        // Halve until a mass is found that *fails* the target, so the crossing is
+        // bracketed from below rather than assumed to sit at the seed.
+        hi = seed_mass_kg;
+        lo = seed_mass_kg * 0.5;
+        loop {
+            if perigee_at(lo)? < target_perigee_m {
+                break;
+            }
+            hi = lo;
+            lo *= 0.5;
+            // A mass this small deflecting a ~10¹⁰ kg body to a 20 000 km perigee is
+            // not physics, it is a degenerate scenario (typically a nominal that was
+            // never a hit). Report the smallest bracket reached rather than halving
+            // toward zero forever.
+            if lo <= MIN_BRACKET_MASS_KG {
+                return Ok(MassSolveOutcome::Feasible {
+                    impactor_mass_kg: hi,
                 });
             }
-            hi = mass_cap_kg;
-            break;
         }
-        if perigee_at(hi)? >= target_perigee_m {
-            break;
+    } else {
+        lo = seed_mass_kg;
+        hi = seed_mass_kg * 2.0;
+        loop {
+            if hi >= mass_cap_kg {
+                let reached = perigee_at(mass_cap_kg)?;
+                if reached < target_perigee_m {
+                    return Ok(MassSolveOutcome::InfeasibleAtCap {
+                        mass_cap_kg,
+                        perigee_reached_m: reached,
+                    });
+                }
+                hi = mass_cap_kg;
+                break;
+            }
+            if perigee_at(hi)? >= target_perigee_m {
+                break;
+            }
+            lo = hi;
+            hi *= 2.0;
         }
-        lo = hi;
-        hi *= 2.0;
     }
 
-    // Bisect the mass bracket [lo, hi] to a tight relative width.
+    // Bisect the mass bracket [lo, hi] to the caller's relative width.
     for _ in 0..80 {
-        if (hi - lo) <= 1e-4 * hi {
+        if (hi - lo) <= rel_tol * hi {
             break;
         }
         let mid = 0.5 * (lo + hi);
@@ -645,6 +683,14 @@ pub fn required_impactor_mass(
         impactor_mass_kg: hi,
     })
 }
+
+/// Where the downward bracket in [`required_impactor_mass`] stops halving, kg.
+///
+/// One gram. Reaching it means a *gram* of impactor already met the target perigee,
+/// which no real geometry does against a ~10¹⁰ kg body — so it is a guard against
+/// halving toward zero in a degenerate scenario, not a physical limit anyone
+/// approaches from the shipping side.
+const MIN_BRACKET_MASS_KG: f64 = 1.0e-3;
 
 /// Convenience: the SSB vector impulse a kinetic impactor imparts for one cell,
 /// exposed so a frontend can show the actual Δv it is about to apply.
@@ -884,7 +930,7 @@ mod tests {
         // mass ACTUALLY delivers it — the mis-bracket catch the advisor flagged.
         let target = 1.5e7;
         let m_star = match required_impactor_mass(
-            &sc, e0, &metrics, beta, m_ast, target, /*seed*/ 1.0e3, /*cap*/ 1.0e9,
+            &sc, e0, &metrics, beta, m_ast, target, /*seed*/ 1.0e3, /*cap*/ 1.0e9, TEST_TOL,
         )
         .unwrap()
         {
@@ -899,7 +945,7 @@ mod tests {
 
         // A larger required miss must cost more mass (coupling live + monotone).
         let m_far = match required_impactor_mass(
-            &sc, e0, &metrics, beta, m_ast, 3.0e7, 1.0e3, 1.0e9,
+            &sc, e0, &metrics, beta, m_ast, 3.0e7, 1.0e3, 1.0e9, TEST_TOL,
         )
         .unwrap()
         {
@@ -912,12 +958,44 @@ mod tests {
         // (the degenerate-direction case, and any under-powered window), never a
         // runaway bisection.
         let capped =
-            required_impactor_mass(&sc, e0, &metrics, beta, m_ast, target, 1.0, 100.0).unwrap();
+            required_impactor_mass(&sc, e0, &metrics, beta, m_ast, target, 1.0, 100.0, TEST_TOL)
+                .unwrap();
         assert!(
             matches!(capped, MassSolveOutcome::InfeasibleAtCap { .. }),
             "a 100 kg cap can't reach a 15 000 km miss; expected InfeasibleAtCap, got {capped:?}"
         );
+
+        // **The seed must not decide the answer.** A seed far *above* the true
+        // requirement used to short-circuit and be returned verbatim, which is what
+        // made this function unsafe to speed up with a good first guess. Bracketing
+        // downward, an over-generous seed must land on the same mass a tiny one does.
+        let m_over = match required_impactor_mass(
+            &sc,
+            e0,
+            &metrics,
+            beta,
+            m_ast,
+            target,
+            /*seed*/ 100.0 * m_star,
+            /*cap*/ 1.0e12, // above the seed, so the cap is not what is being tested
+            TEST_TOL,
+        )
+        .unwrap()
+        {
+            MassSolveOutcome::Feasible { impactor_mass_kg } => impactor_mass_kg,
+            other => panic!("expected Feasible from an over-generous seed, got {other:?}"),
+        };
+        assert!(
+            (m_over - m_star).abs() <= 4.0 * TEST_TOL * m_star,
+            "seeding 100x high gave {m_over} kg but seeding low gave {m_star} kg — the \
+             reported requirement depends on the seed, so it is not a requirement"
+        );
     }
+
+    /// Bisection tolerance for the solver tests: tight enough that the "does the
+    /// solved mass actually deliver the target" check is meaningful, loose enough
+    /// that the kernel-free scenario stays quick.
+    const TEST_TOL: f64 = 1.0e-4;
 
     // --- The real-field composition, kernel-gated (cheap: ~2 propagations) ----
 

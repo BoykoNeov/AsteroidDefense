@@ -19,7 +19,9 @@
 
 use std::time::Instant;
 
-use viewer::scenario::{CurveFile, ImpactorConfig, RealFieldScenario, DEFAULT_CURVE_JSON};
+use viewer::scenario::{
+    CurveFile, ImpactorConfig, RealFieldScenario, DEFAULT_CURVE_JSON, SAFE_PERIGEE_TARGET_M,
+};
 
 fn main() {
     if let Err(e) = run() {
@@ -55,7 +57,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let leads_periods = [
         0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0,
     ];
-    let target_perigee_m = 2.0e7; // 20 000 km — comfortably above the capture radius
+    // The campaign-wide safe-perigee target, named once in the core so this sweep
+    // and the launch-window map's required-mass solve cannot quote requirements
+    // against two different bars.
+    let target_perigee_m = SAFE_PERIGEE_TARGET_M;
 
     println!(
         "Sweeping {} lead times (target perigee {:.0} km)…",

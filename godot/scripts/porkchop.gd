@@ -21,9 +21,11 @@ extends Control
 ## - **reachable** (bright) — a mission exists here.
 ##
 ## **Everything on this plot is a patched-conic planning estimate.** The Lambert
-## arc sizes and aims the delivery; it does not decide hit or miss. Exactly one
-## number in this view comes from the real n-body field — the [E] verdict — and it
-## is labelled as the only one.
+## arc sizes and aims the delivery; it does not decide hit or miss. Exactly two
+## lines in this view come from the real n-body field, and both are labelled: the
+## [E] verdict (does this launcher clear the capture disc through this window) and
+## the [M] requirement (what mass would). They are the question and its follow-up —
+## [E] can say no, only [M] can say by how much.
 ##
 ## Pure display: it owns no orbital mechanics. The grid columns, the cursor
 ## readout and the verdict all arrive from `Sim`, which marshals them from the
@@ -36,6 +38,15 @@ const TOP_RESERVE := 96.0
 const LEGEND_W := 168.0
 ## Height reserved at the bottom for the cursor readout.
 const PANEL_H := 238.0
+## Where the cursor readout's left edge sits, as a fraction of the view width.
+##
+## Read by **two** files: this one places the panel here, and `hud.gd` budgets the
+## event-log column against it — the log runs the full width in every other view,
+## and in this one the panel is sitting in the half it would otherwise use. Named
+## once because the alternative is the same literal in two places and a console line
+## printing over the readout the first time a message gets long, which is exactly
+## what happened.
+const PANEL_X_FRACTION := 0.44
 
 var _font: Font
 var _fs := 13
@@ -186,7 +197,7 @@ func _draw() -> void:
 	_draw_axes(plot, mid, dim, faint)
 	_draw_cursor(plot, bright)
 	_draw_legend(plot, mid, dim, faint)
-	_draw_panel(Vector2(w * 0.44, h - PANEL_H), bright, mid, dim, faint)
+	_draw_panel(Vector2(w * PANEL_X_FRACTION, h - PANEL_H), bright, mid, dim, faint)
 
 
 ## The heatmap proper: x = arrival date, y = launch date (the two axes the core
@@ -347,15 +358,34 @@ func _draw_panel(origin: Vector2, bright: Color, mid: Color, dim: Color, faint: 
 		verdict = "[E] VERIFY (LAST VERDICT WAS FOR ANOTHER WINDOW)"
 	y += lh * 0.3
 	_t(Vector2(x, y), verdict, verdict_col)
+	y += lh
+
+	# The follow-up [E] cannot answer. When [E] says this launcher fails, the next
+	# question is *by how much* — and the answer is a ratio against the payload on
+	# the line above, which is the campaign's honest headline in one number.
+	#
+	# Same full n-body field as the verdict, so it sits under the same banner. It is
+	# also **vehicle-independent**, which is why it stays legible after [L]: the
+	# window's requirement does not move, only the ratio does.
+	var mass_col := dim
+	var mass := "[M] SOLVE THE IMPACTOR MASS THIS WINDOW WOULD NEED"
+	if Sim.pork_mass_solving:
+		mass = "BRACKETING IMPACTOR MASS IN THE FULL FIELD - UP TO ~3 MIN ..."
+	elif Sim.pork_required_mass_is_current():
+		mass = "NEEDS  " + Sim.pork_required_mass_label()
+		mass_col = bright
+	elif not Sim.pork_required_mass().is_empty():
+		mass = "[M] SOLVE (LAST REQUIREMENT WAS FOR ANOTHER WINDOW)"
+	_t(Vector2(x, y), mass, mass_col)
 	y += lh * 1.3
 	_draw_keys(Vector2(x, y), dim)
 
 
 func _draw_keys(pos: Vector2, dim: Color) -> void:
-	_t(pos, "[ARROWS] SELECT WINDOW   [L] LAUNCHER   [D] METRIC   [E] VERIFY   [1] BACK",
+	_t(pos, "[ARROWS] SELECT WINDOW  [L] LAUNCHER  [D] METRIC  [E] VERIFY  [M] REQUIRED MASS  [1] BACK",
 		dim, _fs - 2)
 	_t(pos + Vector2(0.0, _fs + 4.0),
-		"PATCHED-CONIC PLANNING ESTIMATES - ONLY THE [E] VERDICT IS THE REAL FIELD",
+		"PATCHED-CONIC PLANNING ESTIMATES - ONLY THE [E] AND [M] LINES ARE THE REAL FIELD",
 		Color(0.30, 0.30, 0.30), _fs - 3)
 
 

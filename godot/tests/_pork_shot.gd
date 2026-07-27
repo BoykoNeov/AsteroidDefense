@@ -176,6 +176,76 @@ func _run() -> void:
 
 	await _settle(4)
 	await _shot("porkchop_c3_verified")
+
+	# [M] — the follow-up [E] cannot answer. Several full-field propagations rather
+	# than one, so the wait is minutes, not seconds; the point of driving it here is
+	# that the *panel line* is the only thing that renders it, and `_draw` runs
+	# headless only for visible nodes.
+	main._input(_key(KEY_M))
+	print("PORKSHOT  [M] -> solving=%s" % Sim.pork_mass_solving)
+	assert(Sim.pork_mass_solving, "[M] must fire the required-mass solve")
+	# …and it must NOT have opened the planner: [M] is shared with plan_toggle and
+	# the pork guard has to win while this view is up.
+	assert(not main.planner.visible, "[M] opened the planner instead of solving the window")
+	await _shot("porkchop_mass_solving")
+	# **Move the cursor while it runs.** The solve takes 46-180 s and an operator is
+	# free to wander during it, so the arriving requirement must describe the window
+	# it was fired for — including the payload its ratio divides by. Reading the
+	# cursor instead would print a real mass beside another window's rocket, which
+	# the panel would hide (it prints only when the cell matches) and the event log
+	# would not.
+	var solved_i := Sim.pork_i
+	var solved_j := Sim.pork_j
+	Sim.move_pork_cursor(1, 1)
+	assert(Sim.pork_i != solved_i or Sim.pork_j != solved_j, "the cursor did not move")
+	var t3 := Time.get_ticks_msec()
+	while Sim.pork_mass_solving and Time.get_ticks_msec() - t3 < 600000:
+		await get_tree().process_frame
+	var moved := Sim.pork_required_mass_label()
+	assert(not Sim.pork_required_mass_is_current(),
+		"the cursor moved but the requirement still claims the cursor's cell")
+	# Put the cursor back on the solved window, and require the label to be identical.
+	# If the ratio were read off the cursor, these two strings would differ.
+	Sim.pork_i = solved_i
+	Sim.pork_j = solved_j
+	assert(Sim.pork_required_mass_is_current(), "back on the solved cell, it must be current")
+	assert(moved == Sim.pork_required_mass_label(),
+		"the requirement changed when the cursor did:\n  off-cell: %s\n  on-cell:  %s\n"
+			% [moved, Sim.pork_required_mass_label()]
+			+ "the ratio is being divided by the payload at the CURSOR, not at the "
+			+ "window that was solved")
+	print("PORKSHOT  cursor-move mid-solve: label stable (%s)" % moved)
+	print("PORKSHOT  requirement after %d ms: %s"
+		% [Time.get_ticks_msec() - t3, Sim.pork_required_mass_label()])
+	var m := Sim.pork_required_mass()
+	assert(not m.is_empty(), "the mass solve must land: " + str(Sim.mission.last_error()))
+	assert(Sim.pork_required_mass_is_current(), "the requirement must carry the cursor's cell")
+	# It must be quoted against the campaign's shared target, not some local bar.
+	assert(absf(float(m.target_perigee_m) - 2.0e7) < 1.0,
+		"the requirement is solved against %f m, not the 20 000 km campaign target"
+			% float(m.target_perigee_m))
+	if str(m.outcome) == "feasible":
+		var need: float = float(m.impactor_mass_kg)
+		var pay: float = float(Sim.pork_cell().payload_kg)
+		print("PORKSHOT  needs %.0f kg; %s delivers %.0f kg here (%.1fx)"
+			% [need, Sim.pork_vehicle_name(), pay, need / maxf(pay, 1.0)])
+		assert(need > 0.0, "a feasible requirement of zero mass is not a requirement")
+	else:
+		print("PORKSHOT  over the cap: reaches %.0f km of %.0f km"
+			% [float(m.perigee_reached_m) / 1000.0, float(m.target_perigee_m) / 1000.0])
+
+	# **Vehicle-independence, driven through the real key.** [L] changes the ratio
+	# and must NOT invalidate the requirement — re-solving 45–180 s of propagation on
+	# a keypress that cannot change the answer would be the bug this guards.
+	main._input(_key(KEY_L))
+	await _settle(3)
+	assert(Sim.pork_required_mass_is_current(),
+		"[L] dropped the requirement — it is being keyed by vehicle, and it must not be")
+	assert(not Sim.pork_mass_solving, "[L] re-fired the mass solve; the answer cannot depend on it")
+	print("PORKSHOT  after [L] (%s): %s" % [Sim.pork_vehicle_name(), Sim.pork_required_mass_label()])
+
+	await _settle(4)
+	await _shot("porkchop_required_mass")
 	get_tree().quit(0)
 
 

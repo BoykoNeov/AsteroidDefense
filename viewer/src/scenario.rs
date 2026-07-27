@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 pub use asteroid_core::scenario::{
     EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError, SweepPoint,
-    ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES,
+    ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES, SAFE_PERIGEE_TARGET_M,
 };
 
 /// One point of the headline curve, serialisable for the `curve.json` cache —

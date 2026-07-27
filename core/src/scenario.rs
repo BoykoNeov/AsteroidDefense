@@ -69,6 +69,25 @@ pub const ENCOUNTER_HALF_WINDOW_SECONDS: f64 = 1.5 * 86_400.0;
 /// through the tight turn near closest approach.
 pub const ENCOUNTER_SAMPLES: usize = 1_400;
 
+/// The campaign's **safe-perigee target**, metres — 20 000 km, ≈ 3.13 `R⊕`.
+///
+/// The one number every "how much deflection is enough" answer in this project is
+/// measured against: the headline Δv-vs-lead curve solves for the along-track
+/// impulse that lifts the b-plane perigee to *this* (`viewer/src/bin/curve.rs`, and
+/// the `target_perigee_m` recorded in the `curve.json` it writes), and the
+/// launch-window map's required-impactor-mass solve targets the same value. Naming
+/// it once is what lets those two compose: a mass requirement and a Δv requirement
+/// quoted against different targets would look comparable and not be.
+///
+/// **A margin, not a hit test.** The verdict question — did this pass hit Earth — is
+/// `|B|` against `b_capture` (equivalently, perigee against `R⊕`), and mixing those
+/// pairs is a bug this project shipped once. This is a different question: a design
+/// goal, stated in the perigee's own units, deliberately clear of the focused
+/// capture disc (~11 311 km for the shipping nominal) rather than grazing it. Any
+/// readout quoting a requirement solved against this **must name the target**, or it
+/// reads as "the mass needed to miss Earth", which is a smaller number.
+pub const SAFE_PERIGEE_TARGET_M: f64 = 2.0e7;
+
 /// Which Tier-2 force terms are enabled on the shipping field (HANDOFF §5/§6).
 ///
 /// Every term is off by [`Default`], and that default is load-bearing: an all-off

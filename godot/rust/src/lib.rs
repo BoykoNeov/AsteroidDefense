@@ -21,13 +21,15 @@ use std::sync::{mpsc, Arc};
 
 use godot::prelude::*;
 
-use asteroid_core::scenario::{ImpactorConfig, ScenarioError};
+use asteroid_core::mission::MassSolveOutcome;
+use asteroid_core::scenario::{ImpactorConfig, ScenarioError, SAFE_PERIGEE_TARGET_M};
 use asteroid_core::{Epoch, OrbitalElements};
 use asteroid_core::launch_vehicle::LaunchVehicle;
 use mission_core::{
-    display_comet, launch_vehicle, launch_vehicle_count, load_neo_bodies, measure_tier2_shifts,
-    mount_small_bodies, seed_orrery_body, verify_porkchop_cell, BuiltScenario, CellVerdict,
-    MissionCore, OrreryBody, PorkchopView, Tier2Shifts, SB441_BODIES,
+    display_comet, heaviest_deliverable_kg, launch_vehicle, launch_vehicle_count, load_neo_bodies,
+    measure_tier2_shifts, mount_small_bodies, required_cell_mass, seed_orrery_body,
+    verify_porkchop_cell, BuiltScenario, CellVerdict, MissionCore, OrreryBody, PorkchopView,
+    Tier2Shifts, SB441_BODIES,
 };
 
 /// The launcher at a GDScript-supplied index, or `None` for a negative or
@@ -112,6 +114,21 @@ struct Mission {
     /// The last cell verdict and which cell it belongs to, so the display can tell
     /// "this cursor's verdict" from "a verdict for a cell I have since left".
     verdict: Option<(i64, i64, i64, f64, CellVerdict)>,
+    /// The in-flight required-impactor-mass solve — a **fifth** channel, for the
+    /// same reason as the fourth: it is fired repeatedly against a grid that stays
+    /// put and must not disturb the verify, the grid, or the build.
+    mass_build: Option<mpsc::Receiver<Result<MassSolveOutcome, String>>>,
+    /// Which cell the in-flight mass solve is for, `(launch, arrival)`.
+    ///
+    /// **No vehicle index, and that is the point.** The requirement is a property of
+    /// the *window* — its arrival geometry and its lead — not of whatever rocket is
+    /// selected; the frontend divides it by the launcher's payload to get the ratio.
+    /// Keying it by vehicle would invite re-solving 30 s of propagation on a `[L]`
+    /// press that cannot change the answer.
+    pending_mass: (i64, i64),
+    /// The last mass requirement and the cell it belongs to. Same staleness
+    /// discipline as `verdict`: shown only against the cell it was solved for.
+    mass_requirement: Option<(i64, i64, MassSolveOutcome)>,
     error: GString,
     base: Base<RefCounted>,
 }
@@ -412,6 +429,7 @@ impl Mission {
                         // there, so it is dropped rather than left to be read.
                         self.porkchop = None;
                         self.verdict = None;
+                        self.mass_requirement = None;
                         self.error = GString::new();
                     }
                     // The kernels were dropped (a failed re-load) while the build
@@ -582,8 +600,10 @@ impl Mission {
                 self.porkchop_build = None;
                 self.porkchop = Some(view);
                 // A verdict describes a cell of the *previous* grid; the new grid's
-                // axes may differ, so the same (i, j) is a different window.
+                // axes may differ, so the same (i, j) is a different window. The mass
+                // requirement is keyed the same way and goes for the same reason.
                 self.verdict = None;
+                self.mass_requirement = None;
                 self.error = GString::new();
                 false
             }
@@ -906,6 +926,157 @@ impl Mission {
             }
         }
         d
+    }
+
+    // --- The on-demand required-impactor-mass solve -------------------------
+
+    /// Solve, on a worker thread, for the impactor mass this window would need to
+    /// reach the campaign's safe-perigee target — the `[M]` half of the readout, and
+    /// the question `[E]` cannot answer.
+    ///
+    /// `[E]` asks "does *this launcher* through *this window* work", and when the
+    /// answer is no it says so and stops. This asks the follow-up an operator
+    /// actually needs — *how far off is it* — and answers in a unit that composes
+    /// with the launcher's payload: a ratio. That ratio is the campaign's honest
+    /// headline (a real launcher delivers a small fraction of what the curve wants),
+    /// and until now the frontend had no way to state it.
+    ///
+    /// **Vehicle-independent**, so it takes no vehicle index: see
+    /// [`pending_mass`](Self::pending_mass). Many full-field propagations, so it is
+    /// far slower than a verify — the frontend must show that it is running.
+    ///
+    /// Returns `false` — with a reason in [`last_error`](Self::last_error) — when a
+    /// solve is already in flight, there is no grid or scenario, the indices are out
+    /// of range, or the cell carries no transfer.
+    #[func]
+    fn begin_required_mass(&mut self, i: i64, j: i64) -> bool {
+        if self.mass_build.is_some() {
+            return false;
+        }
+        let Some(core) = self.core.as_ref() else {
+            self.error = "load() must succeed before begin_required_mass()".into();
+            return false;
+        };
+        let Some(scenario) = core.scenario_arc() else {
+            self.error = "build the scenario before solving for a required mass".into();
+            return false;
+        };
+        let Some(p) = self.porkchop.as_ref() else {
+            self.error = "no porkchop grid to solve against".into();
+            return false;
+        };
+        if i < 0 || j < 0 {
+            self.error = "cell indices must be non-negative".into();
+            return false;
+        }
+        // The *arrival* epoch and the metrics are all this needs — no launcher, no
+        // payload. A cell with no transfer has no geometry to solve against, which is
+        // a different thing from a window no rocket can reach.
+        let (Some(metrics), Some(arrival_tdb)) = (
+            p.metrics_at(i as usize, j as usize),
+            p.arrival_tdb().get(j as usize).copied(),
+        ) else {
+            self.error = "that cell carries no transfer to solve".into();
+            return false;
+        };
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = required_cell_mass(&scenario, arrival_tdb, &metrics).map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+        self.mass_build = Some(rx);
+        // Drop any previous requirement: one shown beside a running solve would read
+        // as this solve's answer.
+        self.pending_mass = (i, j);
+        self.mass_requirement = None;
+        self.error = GString::new();
+        true
+    }
+
+    /// Whether the required-mass solve is in flight.
+    #[func]
+    fn is_solving_required_mass(&self) -> bool {
+        self.mass_build.is_some()
+    }
+
+    /// Pump the required-mass worker. `true` while **still running**, `false` once
+    /// finished (or none in flight) — then [`required_mass`](Self::required_mass)
+    /// holds the result. Non-blocking; safe every frame.
+    #[func]
+    fn poll_required_mass(&mut self) -> bool {
+        let Some(rx) = self.mass_build.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Ok(Ok(outcome)) => {
+                self.mass_build = None;
+                let (i, j) = self.pending_mass;
+                self.mass_requirement = Some((i, j, outcome));
+                self.error = GString::new();
+                false
+            }
+            Ok(Err(message)) => {
+                self.mass_build = None;
+                self.error = message.as_str().into();
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.mass_build = None;
+                self.error = "the required-mass thread died without reporting".into();
+                false
+            }
+        }
+    }
+
+    /// The last required-impactor-mass result, or an **empty dictionary** if none has
+    /// been solved for the current grid.
+    ///
+    /// Keys always present: `launch_index`, `arrival_index` (which window this
+    /// describes — no vehicle, because the answer does not depend on one),
+    /// `target_perigee_m` (the bar it was solved against, which a readout **must**
+    /// name — see [`SAFE_PERIGEE_TARGET_M`]), and `outcome`, one of:
+    ///
+    /// - `"feasible"` — plus `impactor_mass_kg`, the mass that just clears the
+    ///   target through this window.
+    /// - `"infeasible_at_cap"` — plus `mass_cap_kg` and `perigee_reached_m`. **This
+    ///   is an expected answer, not a failure**: it is the honest state of a window
+    ///   too weakly coupled or too late to be saved by any mass worth launching, and
+    ///   the perigee it did reach says how close it got. A display that renders it as
+    ///   an error repeats this project's clean-miss-shares-a-sentinel bug in a new
+    ///   place.
+    #[func]
+    fn required_mass(&self) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        let Some((i, j, outcome)) = self.mass_requirement else {
+            return d;
+        };
+        d.set("launch_index", i);
+        d.set("arrival_index", j);
+        d.set("target_perigee_m", SAFE_PERIGEE_TARGET_M);
+        match outcome {
+            MassSolveOutcome::Feasible { impactor_mass_kg } => {
+                d.set("outcome", "feasible");
+                d.set("impactor_mass_kg", impactor_mass_kg);
+            }
+            MassSolveOutcome::InfeasibleAtCap {
+                mass_cap_kg,
+                perigee_reached_m,
+            } => {
+                d.set("outcome", "infeasible_at_cap");
+                d.set("mass_cap_kg", mass_cap_kg);
+                d.set("perigee_reached_m", perigee_reached_m);
+            }
+        }
+        d
+    }
+
+    /// The heaviest mass any launcher on the table can deliver, kg — the unit an
+    /// `infeasible_at_cap` reading is quoted in ("more than N of the best rocket
+    /// there is"), so the display need not restate the AMAT/LSP tables to say it.
+    #[func]
+    fn heaviest_deliverable_kg(&self) -> f64 {
+        heaviest_deliverable_kg()
     }
 
     /// The nominal encounter's focused capture radius `b_capture`, m (`-1.0` if no

@@ -261,16 +261,46 @@ func _console_block(w: float, h: float, lh: float, mid: Color, bright: Color,
 	var rows: int = _console.size()
 	var cy := h - MARGIN - BOTTOM_RESERVE - (rows + 1) * lh
 	_text(Vector2(MARGIN, cy - 4), "-- EVENT LOG " + "-".repeat(38), faint)
+	var budget := _console_width(w)
 	for k in rows:
 		var line := _console[k]
 		if k == rows - 1:
 			line = line.substr(0, int(_reveal))
-		_text(Vector2(MARGIN, cy + (k + 1) * lh), line, mid if k < rows - 1 else bright)
+		_text(Vector2(MARGIN, cy + (k + 1) * lh), _clip(line, budget),
+			mid if k < rows - 1 else bright)
 	# blinking prompt cursor
-	var last_w := _font.get_string_size(_console[rows - 1].substr(0, int(_reveal)),
+	var last_w := _font.get_string_size(
+		_clip(_console[rows - 1].substr(0, int(_reveal)), budget),
 		HORIZONTAL_ALIGNMENT_LEFT, -1, _fs).x
 	if Sim.blink(2.5):
 		_text(Vector2(MARGIN + last_w + 4, cy + rows * lh), "_", bright)
+
+
+## How wide the event log may draw, px.
+##
+## The full view in most views — but the launch-window map parks its cursor readout
+## in the right-hand half at `PorkchopPlot.PANEL_X_FRACTION`, and a log line that
+## keeps going lands **on top of it**. That is not hypothetical: the `[E]` verdict
+## line already overran and was only ever screenshotted mid-typewriter, so it read as
+## fitting; the longer `[M]` requirement line made it unmissable. A budget rather
+## than shorter messages, because the next long message would repeat this.
+func _console_width(w: float) -> float:
+	if view_name == "LAUNCH WINDOWS":
+		return w * PorkchopPlot.PANEL_X_FRACTION - MARGIN * 2.0
+	return w - MARGIN * 2.0
+
+
+## `line` shortened with an ellipsis until it fits `budget` px. The log is a
+## scrolling history and the panel carries the full text of anything it summarises,
+## so losing the tail of a long line costs nothing a reader cannot get.
+func _clip(line: String, budget: float) -> String:
+	if _font.get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, _fs).x <= budget:
+		return line
+	var s := line
+	while s.length() > 1 and _font.get_string_size(
+			s + "...", HORIZONTAL_ALIGNMENT_LEFT, -1, _fs).x > budget:
+		s = s.substr(0, s.length() - 1)
+	return s + "..."
 
 
 func _help_line(w: float, h: float, dim: Color) -> void:

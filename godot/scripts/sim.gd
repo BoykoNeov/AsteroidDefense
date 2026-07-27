@@ -250,6 +250,10 @@ var pork_metric := 0                     # index into PORK_METRICS
 var pork_i := 0                          # cursor: launch index
 var pork_j := 0                          # cursor: arrival index
 var pork_verifying := false              # the on-demand full-field verify is running
+## The on-demand required-impactor-mass solve is running. Its own flag beside
+## `pork_verifying` because they are separate workers answering separate questions,
+## and the panel shows both lines at once — one running must not blank the other.
+var pork_mass_solving := false
 
 signal porkchop_changed
 
@@ -364,6 +368,7 @@ func _process(delta: float) -> void:
 	_poll_tier2_preview()
 	_poll_porkchop()
 	_poll_cell_verify()
+	_poll_required_mass()
 	_tick_plan_debounce(delta)
 
 	if paused:
@@ -1218,6 +1223,128 @@ func pork_verdict_label() -> String:
 			return "%s - |B| %s KM vs CAPTURE %s KM (PERIGEE %s KM)" % [
 				word, group_num(int(b)), group_num(int(cap)), group_num(int(rp))]
 	return "UNKNOWN VERDICT"
+
+
+# ------------------------------------------ required impactor mass ([M]) ---
+#
+# [E] asks "does THIS launcher work through THIS window", and when the answer is no
+# it stops there. [M] asks the follow-up an operator actually needs: how much mass
+# WOULD work. The two compose into the campaign's honest headline — a real rocket
+# delivers a small fraction of what the window wants, and the fraction is the story.
+#
+# **Vehicle-independent**, so it survives an [L] press: the requirement is a property
+# of the window's geometry and lead, and only the ratio against the payload moves.
+
+
+## Fire the on-demand required-mass solve for the cursor cell.
+##
+## Far slower than [E] — several full-field propagations rather than one, measured
+## on the shipping grid at **46 s** for the best-coupled window and **31 s** for a
+## hopeless one, with early-arrival windows the slow tail (~3 min: a probe re-flies
+## the whole remaining cruise, 18 s at ten years out against 6 s at three). The panel
+## says so while it runs; there is no way to make this cheap that does not make it a
+## different number.
+func request_required_mass() -> void:
+	if not pork_online or pork_mass_solving:
+		return
+	# A window with no transfer has no geometry to solve against. Note this is the
+	# ONLY gate: unlike [E], a window this launcher cannot reach is still worth
+	# solving — "what would it take" is exactly the question an unreachable cell
+	# raises, and refusing it would answer only where the answer is least needed.
+	if pork_blank(pork_i, pork_j):
+		event_logged.emit("NO TRANSFER IN THAT WINDOW - NOTHING TO SOLVE")
+		return
+	if mission.begin_required_mass(pork_i, pork_j):
+		pork_mass_solving = true
+		event_logged.emit(_stamp(t) + "  SOLVING REQUIRED IMPACTOR MASS - THIS TAKES A MINUTE")
+	else:
+		event_logged.emit("MASS SOLVE REFUSED - " + str(mission.last_error()))
+
+
+func _poll_required_mass() -> void:
+	if not pork_mass_solving:
+		return
+	if mission.poll_required_mass():
+		return
+	pork_mass_solving = false
+	var m := pork_required_mass()
+	if m.is_empty():
+		event_logged.emit(_stamp(t) + "  MASS SOLVE FAILED - " + str(mission.last_error()))
+	else:
+		# "NEEDS", not "REQUIRED MASS:" — the log column is only as wide as the
+		# readout panel's left edge in this view, and the ratio at the end of the
+		# label is the part a reader wants, so the prefix is where the characters
+		# come from rather than the payload. `hud.gd` clips as a backstop.
+		event_logged.emit(_stamp(t) + "  NEEDS " + pork_required_mass_label())
+	porkchop_changed.emit()
+
+
+## The last required-mass result, or `{}` if none has been solved for this grid.
+func pork_required_mass() -> Dictionary:
+	if not pork_online:
+		return {}
+	return mission.required_mass()
+
+
+## Whether the last requirement describes the window the cursor is on.
+##
+## No vehicle in the comparison — deliberately. The requirement does not depend on
+## the launcher, so cycling [L] must not grey out a number that is still true; only
+## the ratio beside it changes.
+func pork_required_mass_is_current() -> bool:
+	var m := pork_required_mass()
+	if m.is_empty():
+		return false
+	return int(m.launch_index) == pork_i and int(m.arrival_index) == pork_j
+
+
+## The requirement in one line, **naming the target it was solved against**.
+##
+## That naming is not decoration. "REQUIRED MASS 157 T" alone reads as the mass
+## needed to miss Earth, which is a smaller number; this is the mass to reach the
+## campaign's 20 000 km safe perigee, the same bar the headline Delta-v curve is
+## quoted against. Two requirements measured against different bars would look
+## comparable and would not be.
+##
+## `infeasible_at_cap` is **data, not failure** — the honest state of a window no
+## plausible launch fleet can save — so it prints what it reached, not an error.
+func pork_required_mass_label() -> String:
+	var m := pork_required_mass()
+	if m.is_empty():
+		return "NOT SOLVED"
+	var tgt: float = float(m.target_perigee_m) / 1000.0
+	match str(m.outcome):
+		"feasible":
+			var kg: float = float(m.impactor_mass_kg)
+			# The ratio divides by the payload at **the solved window**, read off the
+			# requirement itself — never at the cursor. The solve takes 46-180 s and
+			# the operator is free to move during it, so the two are routinely
+			# different cells by the time this formats. The panel happens to be safe
+			# (it prints only when the two agree), but `_poll_required_mass` logs this
+			# line unconditionally on arrival, and a row assembled out of two windows
+			# is exactly the failure this view keeps its verdict pairing to avoid.
+			return "%s KG FOR A %s KM PERIGEE%s" % [
+				group_num(int(kg)), group_num(int(tgt)),
+				_mass_ratio_suffix(kg, int(m.launch_index), int(m.arrival_index))]
+		"infeasible_at_cap":
+			var cap: float = float(m.mass_cap_kg)
+			var got: float = float(m.perigee_reached_m) / 1000.0
+			return "OVER %s KG (%d LAUNCHES) - GETS %s OF %s KM" % [
+				group_num(int(cap)), int(round(cap / maxf(mission.heaviest_deliverable_kg(), 1.0))),
+				group_num(int(got)), group_num(int(tgt))]
+	return "UNKNOWN REQUIREMENT"
+
+
+## " = 100 x WHAT THIS LAUNCHER DELIVERS" for the window at `(i, j)` — **the cell
+## the requirement was solved for**, which the caller passes explicitly rather than
+## letting this reach for the cursor. The ratio is the point of the whole readout;
+## it is left off rather than faked when the selected rocket delivers nothing there.
+func _mass_ratio_suffix(required_kg: float, i: int, j: int) -> String:
+	var k := pork_index(i, j)
+	if k < 0 or pork_payload[k] <= 0.0:
+		return ""
+	return " - %sx %s" % [
+		group_num(int(round(required_kg / pork_payload[k]))), pork_vehicle_name()]
 
 
 func try_commit() -> void:

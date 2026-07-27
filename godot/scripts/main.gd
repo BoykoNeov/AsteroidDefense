@@ -191,6 +191,11 @@ func _input(event: InputEvent) -> void:
 		Sim.cycle_pork_metric()
 	elif pork.visible and event.is_action_pressed("pork_verify"):
 		Sim.request_cell_verify()
+	# [M] is shared with the planner toggle, and resolved the same way the arrows
+	# are: this guard is earlier in the chain, so while the launch-window map is up
+	# [M] solves the window's required mass rather than opening the planner.
+	elif pork.visible and event.is_action_pressed("pork_required_mass"):
+		Sim.request_required_mass()
 	elif event.is_action_pressed("focus_next"):
 		_focus_idx = (_focus_idx + 1) % _focus_targets.size()
 		_apply_focus()

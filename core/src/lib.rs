@@ -69,7 +69,7 @@ pub use perturber_field::{
 pub use propagator::{KeplerPropagator, Propagator, PropagatorError};
 pub use scenario::{
     DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError, SweepPoint,
-    Tier2Config, ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES,
+    Tier2Config, ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES, SAFE_PERIGEE_TARGET_M,
 };
 pub use state::StateVector;
 

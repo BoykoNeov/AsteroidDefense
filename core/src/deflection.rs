@@ -206,13 +206,19 @@ impl StandoffNuclear {
     /// 4000 tons of surface material into plasma expanding at over 2 km/s"* —
     /// which is `C_m = 4.0e6 × 2000 / (10 × 4.184e12)` = **1.91 × 10⁻⁴ N·s/J**.
     ///
-    /// The two disagree by **36 %**, and the 2011 figure is a *lower* bound
-    /// ("over 2 km/s"), so they bracket rather than contradict. **That spread is
-    /// the honest uncertainty of this term** — it is a coefficient good to well
-    /// under a factor of two, not to three digits, and nothing downstream should
-    /// quote it as though it were better. `1.418e-4` is used because it comes
-    /// from the fully-specified case (body, yield, height, absorbed energy and
-    /// outcome all stated together) rather than from one parenthetical clause.
+    /// The two disagree by **at least 36 %**, and "at least" is the operative
+    /// word: *"over* 2 km/s" makes the 2011 value a **lower bound**, `C_m ≥
+    /// 1.91e-4`, and the shipped 1.418e-4 sits *below* that bound. So the two
+    /// figures do **not** bracket the truth between them — they point the same
+    /// way, and 36 % is the floor of the disagreement, not a range containing it.
+    /// **That is the honest uncertainty of this term**: a coefficient good to
+    /// something like a factor of two, not to three digits, and nothing
+    /// downstream should quote it as though it were better.
+    ///
+    /// `1.418e-4` is used because it comes from the fully-specified case (body,
+    /// yield, height, absorbed energy and outcome all stated together) rather
+    /// than from one parenthetical clause — and being the smaller value it
+    /// demands *more* yield for a given Δv, so the requirement errs high.
     pub const DEARBORN_2007: Self = Self {
         coupling_efficiency: 0.115,
         momentum_coupling_ns_per_j: 1.418e-4,
@@ -250,10 +256,9 @@ impl StandoffNuclear {
         if !ok {
             return None;
         }
-        let per_kt = self.momentum_coupling_ns_per_j
-            * self.coupling_efficiency
-            * JOULES_PER_KILOTONNE
-            / asteroid_mass_kg;
+        let per_kt =
+            self.momentum_coupling_ns_per_j * self.coupling_efficiency * JOULES_PER_KILOTONNE
+                / asteroid_mass_kg;
         if !(per_kt.is_finite() && per_kt > 0.0) {
             return None;
         }
@@ -302,6 +307,14 @@ pub enum DisruptionRegime {
 /// Ratio of Δv to escape speed at or below which a published run kept the body
 /// intact: the UCRL-PROC-228569 "Nudge Model" — 6.5 mm/s against a ≈ 0.5 m/s
 /// escape speed, **99 % of the mass remaining bound**.
+///
+/// Quoted from the paper's own *rounded* 0.5 m/s. Recomputing the escape speed
+/// from the same paper's stated mass and diameter gives 0.5295 m/s and hence a
+/// ratio of 0.01228 — so the Nudge Model case clears this threshold by only
+/// **≈6 %**. That is thin for a bound defined from that very case, and it is
+/// stated rather than tuned away: widening the constant to fit its own fixture
+/// more comfortably would be choosing a number the sources did not choose, which
+/// is the thing the `Uncharacterised` band exists to avoid.
 pub const INTACT_DV_OVER_VESC: f64 = 0.013;
 
 /// Ratio of Δv to escape speed at or above which a published run reported
@@ -1200,16 +1213,18 @@ mod tests {
         );
     }
 
-    /// The coefficient must stay inside the spread the two independent papers
-    /// bracket — a guard on *provenance*, which no numerical test of the model
-    /// itself would catch.
+    /// The coefficient must stay inside the band the published series define — a
+    /// guard on *provenance*, which no numerical test of the model itself would
+    /// catch, and the only check here that bounds the coefficient from **above**.
     ///
     /// LLNL-PROC-485160 reports a separate run: 10 kt deposited ablates ~4000 t at
-    /// "over 2 km/s", i.e. `C_m = 1.91e-4 N·s/J`. Nothing forces two different
-    /// simulation series to agree, so if a future edit moves the shipped constant
-    /// outside this band it has left the published range and needs a new citation.
+    /// "over 2 km/s", i.e. `C_m ≥ 1.91e-4 N·s/J`. Note that is a *lower bound*, so
+    /// it does not bracket the shipped 1.418e-4 — both point the same way and the
+    /// 36 % gap is a floor. Nothing forces two different simulation series to
+    /// agree; if a future edit moves the shipped constant outside this band it has
+    /// left the published range and needs a new citation.
     #[test]
-    fn momentum_coupling_brackets_the_independent_2011_figure() {
+    fn momentum_coupling_stays_in_the_published_band() {
         let ours = StandoffNuclear::DEARBORN_2007.momentum_coupling_ns_per_j;
         let from_2011 = 4.0e6 * 2000.0 / (10.0 * JOULES_PER_KILOTONNE);
 
@@ -1220,16 +1235,19 @@ mod tests {
         let spread = (from_2011 - ours).abs() / ours;
         assert!(
             spread < 0.40,
-            "the two published series must agree to well under a factor of two \
+            "the two published series must stay within well under a factor of two \
              (ours {ours:.4e} vs 2011 {from_2011:.4e} = {:.0} %)",
             spread * 100.0
         );
-        // Ours is the smaller of the two, and that direction matters: a smaller
+        // Ours is the smaller, and the direction matters twice over. A smaller
         // momentum coupling means *more* yield is required for a given Δv, so the
-        // requirement this term reports errs high rather than flattering itself.
+        // requirement errs high rather than flattering itself. And because the
+        // 2011 value is a lower bound, this inequality is the only thing in the
+        // suite bounding the coefficient from above at all — the fragmentation
+        // test bounds it from below, and nothing else touches it.
         assert!(
             ours < from_2011,
-            "the shipped coefficient should be the conservative end of the spread"
+            "the shipped coefficient should be the conservative (smaller) value"
         );
     }
 
@@ -1241,6 +1259,18 @@ mod tests {
     /// The model must independently land that case above the escape speed — the
     /// assertion that fails if the coefficient is wrong by the order of magnitude
     /// a dimensional-plausibility check would happily let through.
+    ///
+    /// # What this test does *not* bound
+    /// It is **one-sided**, in two compounding ways. It fails if `C_m` is ~2.19×
+    /// too *low* and never if it is too high; the upper bound comes only from
+    /// [`momentum_coupling_stays_in_the_published_band`]. And it extrapolates the
+    /// coefficient across roughly **20× the surface fluence** it was fitted at
+    /// (17 kt over a 135 m radius here, against 11.5 kt over 500 m), in the
+    /// direction where momentum coupling per joule is known to *fall*. So the
+    /// 2.19 carries perhaps a factor of two of margin against a real systematic
+    /// rather than being a tight prediction — which is enough for the qualitative
+    /// claim being tested (above escape speed, therefore disrupted) and not enough
+    /// for anything quantitative.
     #[test]
     fn standoff_nuclear_predicts_the_published_fragmentation_case() {
         // The paper states energy *absorbed*, not device yield, so the coupling
@@ -1325,6 +1355,17 @@ mod tests {
     /// interception geometry (β = 3.6 from DART, 10 km/s relative speed) is a
     /// stated assumption rather than a derived result — labelled as such, because
     /// the ratio depends on it.
+    ///
+    /// # This table does not transfer to the campaign's own threat
+    /// It concludes on a **1.05e12 kg** body, and its `IntactDeflection` verdict is
+    /// a property of *that* rock's 0.53 m/s escape speed. The shipping threat is
+    /// 2.83e10 kg with an escape speed of 0.159 m/s, where the same comparison
+    /// comes out the other way — every lead the campaign covers needs a Δv above
+    /// escape, i.e. disruption rather than deflection. Core must not learn about
+    /// that body, so the on-threat table lives in the binding as
+    /// `deflection_methods_compared_at_one_bar_on_the_real_threat`, and **it is
+    /// the one the frontend should ever quote**. Reading this one as the
+    /// campaign's answer is precisely the mistake the J2 pair already caught once.
     #[test]
     fn deflection_methods_compared_at_one_bar() {
         let dv_required = 6.5e-3_f64;

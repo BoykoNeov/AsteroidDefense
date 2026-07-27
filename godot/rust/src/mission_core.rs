@@ -46,8 +46,8 @@ use nalgebra::Vector3;
 
 use asteroid_core::deflection::DeflectionError;
 use asteroid_core::ephemeris::Ephemeris;
-use asteroid_core::horizons::Neo;
 use asteroid_core::geometry::BPlaneEncounter;
+use asteroid_core::horizons::Neo;
 use asteroid_core::launch_vehicle::{LaunchVehicle, LAUNCH_VEHICLES};
 use asteroid_core::mission::{
     cell_delivery, porkchop_grid, required_impactor_mass, verify_cell, MassSolveOutcome, Porkchop,
@@ -1270,7 +1270,10 @@ impl MissionCore {
     /// reported because "how close did it actually come" is a real question a
     /// readout may want to answer; it is not the verdict.
     pub fn deflected_perigee_m(&self) -> Option<f64> {
-        self.plan.as_ref().and_then(|p| p.encounter).map(|e| e.perigee)
+        self.plan
+            .as_ref()
+            .and_then(|p| p.encounter)
+            .map(|e| e.perigee)
     }
 
     /// The deflected pass's **b-plane impact parameter** `b`, m — the perpendicular
@@ -2529,7 +2532,9 @@ mod tests {
         let mut mc = MissionCore::load().expect("kernels load");
         mc.build_scenario(&ImpactorConfig::default())
             .expect("scenario builds");
-        let nominal_b = mc.nominal_impact_parameter_m().expect("a nominal encounter");
+        let nominal_b = mc
+            .nominal_impact_parameter_m()
+            .expect("a nominal encounter");
         let capture = mc.capture_radius_m().expect("a capture radius");
         assert!(nominal_b <= capture, "the nominal must be a hit");
         let scenario = mc.scenario_arc().expect("a built scenario");
@@ -2617,7 +2622,9 @@ mod tests {
                      b_capture = {capture_radius_m:.0} m"
                 );
             }
-            CellVerdict::NotHyperbolic => panic!("a huge deflection should not be a dead-centre hit"),
+            CellVerdict::NotHyperbolic => {
+                panic!("a huge deflection should not be a dead-centre hit")
+            }
         }
     }
 
@@ -2874,7 +2881,8 @@ mod tests {
              drawn on the Sun"
         );
         // Arming records a path and mounts nothing, so the refusal must survive it.
-        core.set_small_body_kernel(sb.to_str().unwrap()).expect("arm");
+        core.set_small_body_kernel(sb.to_str().unwrap())
+            .expect("arm");
         assert!(
             !core.small_bodies_mounted() && core.body_position_ecl_au(2000001, t).is_none(),
             "arming a kernel is not mounting it"
@@ -2962,7 +2970,10 @@ mod tests {
                     "{label}: {n} is not unit ({})",
                     v.norm()
                 );
-                assert!(v.iter().all(|c| c.is_finite()), "{label}: {n} is not finite");
+                assert!(
+                    v.iter().all(|c| c.is_finite()),
+                    "{label}: {n} is not finite"
+                );
             }
             assert!(xi.dot(&zeta).abs() < 1e-12, "{label}: ξ̂·ζ̂ ≠ 0");
             assert!(xi.dot(&s_out).abs() < 1e-12, "{label}: ξ̂·Ŝ ≠ 0");
@@ -3076,8 +3087,14 @@ mod tests {
             (hi - lo) / year
         );
         // Inside at both edges…
-        assert!(mc.body_position_ecl_au(399, lo).is_some(), "span lo unusable");
-        assert!(mc.body_position_ecl_au(399, hi).is_some(), "span hi unusable");
+        assert!(
+            mc.body_position_ecl_au(399, lo).is_some(),
+            "span lo unusable"
+        );
+        assert!(
+            mc.body_position_ecl_au(399, hi).is_some(),
+            "span hi unusable"
+        );
         // …and exhausted a year out, so the span is the real edge, not a guess
         // that happens to be conservative by decades.
         assert!(
@@ -3183,6 +3200,137 @@ mod tests {
                 "lead {lead:.0}s: dv {dv:.5} vs curve.json {expected:.5} (rel {rel:.3})"
             );
         }
+    }
+
+    /// Kernel-gated (release-run). **The deflection spectrum, measured on *this*
+    /// threat rather than on the paper's.**
+    ///
+    /// `core::deflection`'s own comparison test quotes the two methods against
+    /// each other on UCRL-PROC-228569's published 1 km body, because core must not
+    /// learn about this campaign's rock. That table is citable and it is *not*
+    /// transferable: it concludes the nuclear option deflects intact, which is
+    /// true of a 1.05e12 kg body and false here. This is the same trap the J2 pair
+    /// already caught — a per-term row has to be measured on the seed it will be
+    /// displayed against, not on whichever body the literature used.
+    ///
+    /// So this re-runs the comparison at one bar on the shipping threat:
+    /// [`threat_mass_kg`] / [`THREAT_RADIUS_M`], the live full-field
+    /// `required_dv_along_track` at each lead, and [`SAFE_PERIGEE_TARGET_M`] —
+    /// the same target `curve.json` and the launch-window map's required-mass
+    /// figure are quoted against.
+    ///
+    /// # The result, and why it is the interesting one
+    /// The threat is a **300 m** body: 2.83e10 kg, surface escape speed **0.159
+    /// m/s**. The required Δv runs from ~8.4 m/s at a tenth of an orbit to ~0.066
+    /// m/s at eight orbits — which means **every lead time the campaign covers
+    /// needs a Δv larger than the body's own escape speed**, or within a factor of
+    /// three of it. A standoff burst sized to deliver that does not deflect this
+    /// rock, it disperses it.
+    ///
+    /// That is not a failure of the term; it is the term reporting the thing
+    /// LLNL-PROC-485160 says in words — *"[a]t a size of 100 meters ... inducing a
+    /// 1 cm/s speed change will almost certainly result in extensive debris
+    /// ejection or fragmentation. Fortunately, bodies of this size may be
+    /// addressed by impactors."* §5 asks for the methods to be modelled as a
+    /// **spectrum across lead time**; this asserts where on that spectrum the
+    /// campaign's own body actually sits, instead of restating the spectrum.
+    #[test]
+    fn deflection_methods_compared_at_one_bar_on_the_real_threat() {
+        if !have_kernels() {
+            eprintln!(
+                "skipping deflection_methods_compared_at_one_bar_on_the_real_threat: no DE kernel"
+            );
+            return;
+        }
+        use asteroid_core::deflection::{
+            disruption_regime, escape_speed_ms, kinetic_impactor_mass_for_dv, DisruptionRegime,
+            StandoffNuclear,
+        };
+
+        let mut mc = MissionCore::load().expect("load kernels");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+
+        let m_threat = threat_mass_kg();
+        let v_esc = escape_speed_ms(m_threat, THREAT_RADIUS_M).expect("threat escape speed");
+        let nuke = StandoffNuclear::DEARBORN_2007;
+        // Δv per kilotonne on this body — the whole nuclear column in one number.
+        let dv_per_kt = nuke.dv_ms(1.0, m_threat).expect("rate");
+        // Interception geometry, stated not derived (the kinetic column depends on
+        // it): DART's measured β, and a 10 km/s closing speed.
+        let beta = 3.6_f64;
+        let v_rel = 1.0e4_f64;
+
+        println!(
+            "threat: M = {m_threat:.3e} kg, r = {THREAT_RADIUS_M} m, v_esc = {v_esc:.4} m/s\n\
+             nuclear rate = {:.4e} m/s per kt → {:.1} kt reaches escape speed\n\
+             {:>10} {:>10} {:>11} {:>10} {:>9}  regime",
+            dv_per_kt,
+            v_esc / dv_per_kt,
+            "lead (yr)",
+            "Δv (m/s)",
+            "yield (kt)",
+            "mass (t)",
+            "Δv/v_esc"
+        );
+
+        // Leads spanning the campaign, in orbital periods of the threat.
+        let period = 24_928_208.624_301_072_f64;
+        let mut all_disrupt = true;
+        // The longest lead is also the cheapest Δv, so it doubles as the
+        // "closest anyone gets to intact deflection" figure below. Captured from
+        // the sweep rather than re-solved: each of these is a full-field
+        // propagation costing ~90 s, and solving the same lead twice would be a
+        // sixth of this test's runtime spent reproducing a number it already has.
+        let mut easiest = f64::NAN;
+        for periods in [0.5_f64, 1.0, 2.0, 4.0, 8.0] {
+            let lead = periods * period;
+            let dv = mc
+                .required_dv_along_track(lead, SAFE_PERIGEE_TARGET_M)
+                .expect("dv solve");
+            easiest = dv;
+            let yield_kt = nuke
+                .yield_kilotonnes_for_dv(dv, m_threat)
+                .expect("nuclear invert");
+            let mass_kg =
+                kinetic_impactor_mass_for_dv(dv, beta, v_rel, m_threat).expect("kinetic invert");
+            let regime = disruption_regime(dv, m_threat, THREAT_RADIUS_M).expect("regime");
+            println!(
+                "{:>10.2} {dv:>10.4} {yield_kt:>11.1} {:>10.0} {:>9.3}  {regime:?}",
+                lead / (365.25 * 86400.0),
+                mass_kg / 1000.0,
+                dv / v_esc
+            );
+            if regime != DisruptionRegime::LikelyDisruption {
+                all_disrupt = false;
+            }
+        }
+
+        // The claim, asserted rather than narrated. If a future force-model or
+        // seed change ever moves this body out of the disruption regime, that is a
+        // real change to the campaign's lesson and it should fail here first.
+        assert!(
+            all_disrupt,
+            "every lead the campaign covers should require a Δv above this 300 m \
+             body's own escape speed — a standoff burst that size disperses it \
+             rather than deflecting it, which is why §5 puts the kinetic impactor \
+             in the middle of the spectrum and this term at the top"
+        );
+
+        // And the crossover is quoted so the reader can see *how far* from intact
+        // deflection this is: reaching `IntactDeflection` needs Δv ≤ 0.013·v_esc,
+        // which is over two orders of magnitude below the easiest point on the
+        // curve. Nothing in the campaign's lead-time range approaches it.
+        let intact_ceiling = asteroid_core::deflection::INTACT_DV_OVER_VESC * v_esc;
+        println!(
+            "intact-deflection ceiling = {intact_ceiling:.5} m/s; easiest lead on the \
+             curve still needs {easiest:.4} m/s = {:.0}x that",
+            easiest / intact_ceiling
+        );
+        assert!(
+            easiest > 10.0 * intact_ceiling,
+            "the gap to intact nuclear deflection should be large and stated, not marginal"
+        );
     }
 
     /// Kernel-gated (release-run). The single most decisive frame check: the
@@ -3494,7 +3642,11 @@ mod tests {
         // Bit-identical, not "close". Nothing in the read path above touched the
         // field the threat was flown in.
         assert_eq!(mc.capture_radius_m(), Some(capture), "capture radius moved");
-        assert_eq!(mc.nominal_perigee_m(), Some(perigee), "nominal perigee moved");
+        assert_eq!(
+            mc.nominal_perigee_m(),
+            Some(perigee),
+            "nominal perigee moved"
+        );
         assert_eq!(mc.impact_tdb_seconds(), impact, "impact epoch moved");
 
         // And the asteroids are actually there, sampled, span-gated, and in NEO
@@ -3576,7 +3728,10 @@ mod tests {
         let built = BuiltScenario::build(Arc::clone(&eph), &ImpactorConfig::default(), false)
             .expect("scenario builds");
         mc.install(built, Vec::new());
-        assert!(!mc.has_tier2_preview(), "a freshly-built scenario carries no preview");
+        assert!(
+            !mc.has_tier2_preview(),
+            "a freshly-built scenario carries no preview"
+        );
         assert_eq!(
             mc.tier2_shifted_perigee_m("relativity"),
             None,
@@ -3588,11 +3743,16 @@ mod tests {
         // Now the on-demand path: measure off an Arc clone of the installed scenario
         // (what the preview worker holds) and adopt the result — the ~80 s, paid only
         // when the operator opens the menu, never on the build.
-        let scenario = mc.scenario_arc().expect("installed scenario is Arc-shareable");
+        let scenario = mc
+            .scenario_arc()
+            .expect("installed scenario is Arc-shareable");
         let shifts = measure_tier2_shifts(&scenario, mc.small_bodies_mounted())
             .expect("tier2 preview measures");
         mc.adopt_tier2_shifts(shifts);
-        assert!(mc.has_tier2_preview(), "adopted preview must light the menu");
+        assert!(
+            mc.has_tier2_preview(),
+            "adopted preview must light the menu"
+        );
 
         // Every term except the belt: finite, and each genuinely moved the perigee off
         // the baseline (not a dead toggle). Driven off `TIER2_TERM_IDS` rather than a
@@ -3603,7 +3763,10 @@ mod tests {
             let shifted = mc
                 .tier2_shifted_perigee_m(term)
                 .unwrap_or_else(|| panic!("{term} shift should be available"));
-            assert!(shifted.is_finite() && shifted > 0.0, "{term} perigee {shifted} m");
+            assert!(
+                shifted.is_finite() && shifted > 0.0,
+                "{term} perigee {shifted} m"
+            );
             assert!(
                 (shifted - baseline).abs() > 1.0,
                 "{term} left the perigee within 1 m of baseline ({shifted} vs {baseline}) — dead toggle"
@@ -3866,8 +4029,7 @@ mod tests {
         // THE assertion. Far out, the track is on the asymptote, which pierces the
         // b-plane at B — so the transverse components must already agree there.
         let far = track[0];
-        let transverse_gap =
-            ((far.x - b_point.x).powi(2) + (far.y - b_point.y).powi(2)).sqrt();
+        let transverse_gap = ((far.x - b_point.x).powi(2) + (far.y - b_point.y).powi(2)).sqrt();
         assert!(
             transverse_gap < 0.25 * b,
             "the far-field track sample sits {transverse_gap:.1} km from the b-point in \
@@ -3887,7 +4049,11 @@ mod tests {
         // draws — not on the 3-vector's norm, which would pass either way.
         mc.set_plan(mc.period_seconds(), -0.2).expect("plan solves");
         for (point, b_m, who) in [
-            (mc.nominal_b_point_km(), mc.nominal_impact_parameter_m(), "nominal"),
+            (
+                mc.nominal_b_point_km(),
+                mc.nominal_impact_parameter_m(),
+                "nominal",
+            ),
             (
                 mc.deflected_b_point_km(),
                 mc.deflected_impact_parameter_m(),

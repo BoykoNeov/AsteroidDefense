@@ -21,10 +21,10 @@ use std::sync::{mpsc, Arc};
 
 use godot::prelude::*;
 
+use asteroid_core::launch_vehicle::LaunchVehicle;
 use asteroid_core::mission::MassSolveOutcome;
 use asteroid_core::scenario::{ImpactorConfig, ScenarioError, SAFE_PERIGEE_TARGET_M};
 use asteroid_core::{Epoch, OrbitalElements};
-use asteroid_core::launch_vehicle::LaunchVehicle;
 use mission_core::{
     display_comet, heaviest_deliverable_kg, launch_vehicle, launch_vehicle_count, load_neo_bodies,
     measure_tier2_shifts, mount_small_bodies, required_cell_mass, seed_orrery_body,
@@ -192,9 +192,7 @@ impl Mission {
     /// times; the flag is cheaper than the fourth.
     #[func]
     fn small_bodies_mounted(&self) -> bool {
-        self.core
-            .as_ref()
-            .is_some_and(|c| c.small_bodies_mounted())
+        self.core.as_ref().is_some_and(|c| c.small_bodies_mounted())
     }
 
     /// How many small bodies the mounted kernel offers — `0` when it is not
@@ -345,48 +343,45 @@ impl Mission {
             // The error is flattened to a String on this side of the channel: only
             // the message ever reaches the HUD, and a plain String is unambiguously
             // safe to send.
-            let result = BuiltScenario::build(
-                Arc::clone(&eph),
-                &ImpactorConfig::default(),
-                mounted,
-            )
-            // The Tier-2 shift preview is DELIBERATELY not measured here: it is ~64 s
-            // of propagation that would sit *before* `install`, delaying the threat
-            // solution and the planner — the core gameplay — by that much. It is
-            // instead computed on demand when the operator opens the force-model menu
-            // (`begin_tier2_preview`), off the same scenario, so the threat lands as
-            // fast as it did before the menu existed.
-            .map_err(|e| e.to_string())
-                .and_then(|built| {
-                    // The orrery's scenery flies here, on this thread, in the field
-                    // that was just built — ~4 s of integration that would otherwise
-                    // land on the main thread, since `add_synthetic_body` is
-                    // inline-and-expensive by design.
-                    let comet = seed_orrery_body(
-                        &eph,
-                        built.scenario_ref(),
-                        display_comet::NAME,
-                        display_comet::KIND,
-                        display_comet::elements(),
-                        built.epoch0(),
-                        display_comet::CADENCE_SECONDS,
-                        display_comet::N_SNAPSHOTS,
-                    )
-                    .map_err(|e| e.to_string())?;
+            let result =
+                BuiltScenario::build(Arc::clone(&eph), &ImpactorConfig::default(), mounted)
+                    // The Tier-2 shift preview is DELIBERATELY not measured here: it is ~64 s
+                    // of propagation that would sit *before* `install`, delaying the threat
+                    // solution and the planner — the core gameplay — by that much. It is
+                    // instead computed on demand when the operator opens the force-model menu
+                    // (`begin_tier2_preview`), off the same scenario, so the threat lands as
+                    // fast as it did before the menu existed.
+                    .map_err(|e| e.to_string())
+                    .and_then(|built| {
+                        // The orrery's scenery flies here, on this thread, in the field
+                        // that was just built — ~4 s of integration that would otherwise
+                        // land on the main thread, since `add_synthetic_body` is
+                        // inline-and-expensive by design.
+                        let comet = seed_orrery_body(
+                            &eph,
+                            built.scenario_ref(),
+                            display_comet::NAME,
+                            display_comet::KIND,
+                            display_comet::elements(),
+                            built.epoch0(),
+                            display_comet::CADENCE_SECONDS,
+                            display_comet::N_SNAPSHOTS,
+                        )
+                        .map_err(|e| e.to_string())?;
 
-                    // The real asteroids join the same catalog — but they cost no
-                    // integration at all. A `.neo` table already holds JPL's
-                    // trajectory, so this is a file read (milliseconds) beside the
-                    // comet's ~4 s of flying. It rides the worker because this is
-                    // where the catalog is assembled, not because it is expensive.
-                    //
-                    // Absent tables are the ordinary state of a fresh clone and
-                    // produce an empty vector, exactly as an unmounted small-body
-                    // kernel produces an empty asteroid list.
-                    let mut bodies = vec![comet];
-                    bodies.extend(load_neo_bodies());
-                    Ok((built, bodies))
-                });
+                        // The real asteroids join the same catalog — but they cost no
+                        // integration at all. A `.neo` table already holds JPL's
+                        // trajectory, so this is a file read (milliseconds) beside the
+                        // comet's ~4 s of flying. It rides the worker because this is
+                        // where the catalog is assembled, not because it is expensive.
+                        //
+                        // Absent tables are the ordinary state of a fresh clone and
+                        // produce an empty vector, exactly as an unmounted small-body
+                        // kernel produces an empty asteroid list.
+                        let mut bodies = vec![comet];
+                        bodies.extend(load_neo_bodies());
+                        Ok((built, bodies))
+                    });
             // A closed channel means the game quit mid-build. Dropping the result is
             // the right response; `send`'s Err must not become a panic on a detached
             // thread.
@@ -629,13 +624,17 @@ impl Mission {
     /// Rows in the grid (launch epochs); `0` if none is built.
     #[func]
     fn porkchop_launch_count(&self) -> i64 {
-        self.porkchop.as_ref().map_or(0, |p| p.launch_count() as i64)
+        self.porkchop
+            .as_ref()
+            .map_or(0, |p| p.launch_count() as i64)
     }
 
     /// Columns in the grid (arrival epochs); `0` if none is built.
     #[func]
     fn porkchop_arrival_count(&self) -> i64 {
-        self.porkchop.as_ref().map_or(0, |p| p.arrival_count() as i64)
+        self.porkchop
+            .as_ref()
+            .map_or(0, |p| p.arrival_count() as i64)
     }
 
     /// The launch axis, TDB seconds past J2000.
@@ -981,7 +980,8 @@ impl Mission {
         };
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = required_cell_mass(&scenario, arrival_tdb, &metrics).map_err(|e| e.to_string());
+            let result =
+                required_cell_mass(&scenario, arrival_tdb, &metrics).map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
         self.mass_build = Some(rx);
@@ -1493,7 +1493,11 @@ impl Mission {
     #[func]
     fn encounter_sample_span_tdb(&self) -> PackedFloat64Array {
         let mut arr = PackedFloat64Array::new();
-        if let Some((lo, hi)) = self.core.as_ref().and_then(|c| c.encounter_sample_span_tdb()) {
+        if let Some((lo, hi)) = self
+            .core
+            .as_ref()
+            .and_then(|c| c.encounter_sample_span_tdb())
+        {
             arr.push(lo);
             arr.push(hi);
         }

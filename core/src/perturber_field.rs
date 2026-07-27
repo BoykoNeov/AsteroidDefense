@@ -36,9 +36,9 @@
 use std::sync::Arc;
 
 use anise::constants::frames::{
-    EARTH_J2000, JUPITER_BARYCENTER_J2000, MARS_BARYCENTER_J2000, MERCURY_J2000, MOON_J2000,
-    NEPTUNE_BARYCENTER_J2000, SATURN_BARYCENTER_J2000, SSB_J2000, SUN_J2000,
-    URANUS_BARYCENTER_J2000, VENUS_J2000,
+    EARTH_J2000, IAU_EARTH_FRAME, JUPITER_BARYCENTER_J2000, MARS_BARYCENTER_J2000, MERCURY_J2000,
+    MOON_J2000, NEPTUNE_BARYCENTER_J2000, PLUTO_BARYCENTER_J2000, SATURN_BARYCENTER_J2000,
+    SSB_J2000, SUN_J2000, URANUS_BARYCENTER_J2000, VENUS_J2000,
 };
 use anise::prelude::Frame;
 use nalgebra::Vector3;
@@ -117,6 +117,33 @@ pub const SB441_PERTURBER_GM_AU3_DAY2: [(i32, &str, f64); 16] = [
     (2000511, "Davida", 0.868362534922865448e-14),
     (2000704, "Interamnia", 0.631103434208788874e-14),
 ];
+
+/// Pluto system barycenter (NAIF 9) gravitational parameter, **au³/day²** — the
+/// DE440/441 header constant `GM9`.
+///
+/// This is the constant HANDOFF's open-questions list recorded as *missing*: the
+/// shipped `pck11.pca` carries no Pluto GM at all (`gm_km3_s2` fails with
+/// "ID 9 not in look up table" — verified by
+/// `core/examples/probe_pluto_and_pole.rs`, not assumed), which is why ASSIST's
+/// 11th point mass could not simply be resolved through ANISE like the other ten.
+///
+/// It is read **verbatim from the DE440 header's own constant record** in the local
+/// `linux_p1550p2650.440` binary — the same machine-verified path the sb441
+/// asteroid masses took (name/value arrays aligned and pinned by the header's `AU`,
+/// `EMRAT` and `DENUM` reappearing at their named slots), and for the same reason:
+/// this is the mass JPL *integrated Pluto's position with*, so pairing it with that
+/// position is self-consistent. Converts to **975.500 km³/s²** — the Pluto+Charon
+/// system value, as it must be, since NAIF 9 is the *barycenter* and the two bodies
+/// are only a ~8:1 mass ratio apart. Pairing this GM with the barycenter position
+/// (never Pluto's own centre, NAIF 999) is the same position↔GM discipline the
+/// module note describes for the giant planets.
+///
+/// Unlike the sb441 GMs there is no independent pck11 value to cross-check against
+/// (that is the whole problem), so the units guard is the conversion factor itself:
+/// [`AU3_DAY2_TO_KM3_S2`] is shared with the sixteen asteroid masses, whose
+/// best-determined three *are* pinned against pck11 to <1%. A wrong factor would
+/// break those first.
+pub const PLUTO_BARYCENTER_GM_AU3_DAY2: f64 = 2.175_096_464_893_358e-12;
 
 /// The Tier-1 MVP perturber set (HANDOFF §5): Sun + 8 planets + Moon, ten bodies.
 ///
@@ -308,6 +335,80 @@ pub fn sb441_perturber_field(
         perturbers.push(Perturber::new(mu, source));
     }
     Ok(PointMassGravity::new(perturbers))
+}
+
+/// Assemble **Pluto** as a single extra point-mass perturber — ASSIST's 11th body,
+/// the one deliberate difference between this project's shipping field and its
+/// declared validation oracle (HANDOFF §6, and the open-questions entry this
+/// closes).
+///
+/// Position comes from the DE kernel's Pluto-barycenter segment (present in
+/// `de440s.bsp`, verified by probe); the GM is the hardcoded
+/// [`PLUTO_BARYCENTER_GM_AU3_DAY2`], because ANISE resolves none. Like
+/// [`sb441_perturber_field`] this **probes the position up front** and fails loud
+/// naming the missing coverage rather than dying inside the first integration step
+/// — Pluto's segment is the one a *trimmed* DE kernel is most likely to omit.
+///
+/// The batch-2c ASSIST comparison measured omitting Pluto at ~55 m over two years
+/// for a main-belt test particle, growing with lead time. Whether that matters at
+/// the decade lead times the b-plane cares about is a *measured* question, not an
+/// asserted one — see the scenario-level fixed-seed comparison.
+pub fn pluto_perturber_field(
+    eph: &Arc<Ephemeris>,
+) -> Result<PointMassGravity, EphemerisError> {
+    // Probe inside every relevant kernel's coverage (de440s is 1849–2150).
+    let probe = AniseEpoch::from_gregorian(2000, 1, 1, 0, 0, 0, 0, TimeScale::TDB);
+    eph.position_km(PLUTO_BARYCENTER_J2000, SSB_J2000, probe)
+        .map_err(|e| {
+            EphemerisError::Translate(format!(
+                "Pluto barycenter (NAIF 9) has no position in this ephemeris — does the \
+                 loaded DE kernel carry its segment? (underlying: {e})"
+            ))
+        })?;
+    let mu = PLUTO_BARYCENTER_GM_AU3_DAY2 * AU3_DAY2_TO_KM3_S2 * KM3_S2_TO_M3_S2;
+    let source = EphemerisPerturber::new(Arc::clone(eph), PLUTO_BARYCENTER_J2000);
+    Ok(PointMassGravity::new(vec![Perturber::new(mu, source)]))
+}
+
+/// An ANISE-backed spin-axis source: the body's north pole, expressed in ICRF,
+/// looked up from the loaded planetary-constants orientation data on demand.
+///
+/// The orientation sibling of [`EphemerisPerturber`] (which answers *where* a body
+/// is), supplying [`BodyPole`] for the
+/// [`Oblateness`](crate::forces::oblateness::Oblateness) term. Holds the body's
+/// **IAU body-fixed frame** (whose `ẑ` is the pole) and the inertial frame to
+/// express it in; see [`Ephemeris::pole_unit_icrf`] for why that is the DCM's third
+/// row.
+#[derive(Clone)]
+pub struct EphemerisPole {
+    ephemeris: Arc<Ephemeris>,
+    body_iau_frame: Frame,
+    inertial_frame: Frame,
+}
+
+impl EphemerisPole {
+    /// A pole source for `body_iau_frame` (e.g. `IAU_EARTH_FRAME`), expressed in
+    /// `inertial_frame` (e.g. [`EARTH_J2000`]).
+    pub fn new(ephemeris: Arc<Ephemeris>, body_iau_frame: Frame, inertial_frame: Frame) -> Self {
+        Self {
+            ephemeris,
+            body_iau_frame,
+            inertial_frame,
+        }
+    }
+
+    /// Earth's spin axis in ICRF — the configuration the shipping `J2` term uses.
+    pub fn earth(ephemeris: Arc<Ephemeris>) -> Self {
+        Self::new(ephemeris, IAU_EARTH_FRAME, EARTH_J2000)
+    }
+}
+
+impl crate::forces::oblateness::BodyPole for EphemerisPole {
+    fn pole_at(&self, epoch: Epoch) -> Result<Vector3<f64>, ForceError> {
+        self.ephemeris
+            .pole_unit_icrf(self.body_iau_frame, self.inertial_frame, epoch.as_hifitime())
+            .map_err(|e| ForceError::Ephemeris(e.to_string()))
+    }
 }
 
 #[cfg(test)]

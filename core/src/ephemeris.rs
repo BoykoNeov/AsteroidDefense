@@ -184,6 +184,40 @@ impl Ephemeris {
         Ok(self.state_km_s(target, observer, epoch)?.0)
     }
 
+    /// Unit vector along a body's **north spin axis**, expressed in ICRF, from the
+    /// loaded planetary-constants orientation data.
+    ///
+    /// `body_iau_frame` is the body-fixed IAU frame (e.g.
+    /// [`IAU_EARTH_FRAME`](anise::constants::frames::IAU_EARTH_FRAME)) and
+    /// `inertial_frame` the ICRF-oriented frame to express the axis in (e.g.
+    /// [`EARTH_J2000`]). ANISE returns the DCM `R` taking ICRF vectors to
+    /// body-fixed ones (`v_body = R·v_icrf`), so the body-fixed `ẑ` — the pole —
+    /// expressed back in ICRF is `Rᵀẑ`, i.e. the **third row** of `R`.
+    ///
+    /// This is what [`Oblateness`](crate::forces::oblateness::Oblateness) needs:
+    /// `J2` is defined about the spin axis, and for Earth in ICRF that axis is
+    /// *near* `ẑ` but not equal to it (~0.2° over this project's epochs, drifting
+    /// with precession). Reading it from the same constants file the frame data
+    /// comes from keeps the term's axis and the frame's orientation one source
+    /// rather than two that can silently disagree.
+    ///
+    /// Fails with [`EphemerisError::Translate`] if no orientation data for the body
+    /// is loaded, rather than falling back to `ẑ` — a silent fallback is exactly
+    /// the display-grade shortcut the term's doc refuses.
+    pub fn pole_unit_icrf(
+        &self,
+        body_iau_frame: Frame,
+        inertial_frame: Frame,
+        epoch: Epoch,
+    ) -> Result<Vector3, EphemerisError> {
+        let dcm = self
+            .almanac
+            .rotate(inertial_frame, body_iau_frame, epoch)
+            .map_err(|e| EphemerisError::Translate(e.to_string()))?;
+        let row = dcm.rot_mat.row(2);
+        Ok(Vector3::new(row[0], row[1], row[2]))
+    }
+
     /// SSB→**geocenter** (reconstructed Earth, NAIF 399), km. NOT the EMB.
     pub fn geocenter_ssb_km(&self, epoch: Epoch) -> Result<Vector3, EphemerisError> {
         self.position_km(EARTH_J2000, SSB_J2000, epoch)

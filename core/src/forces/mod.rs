@@ -31,6 +31,7 @@
 //! relativity/oblateness/Yarkovsky/SRP terms and the Tier-1 encounter validation
 //! against ASSIST land in later batches.
 
+pub mod oblateness;
 pub mod point_mass;
 pub mod relativity;
 pub mod srp;

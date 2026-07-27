@@ -40,12 +40,16 @@ use anise::constants::frames::{EARTH_J2000, SUN_J2000};
 use nalgebra::Vector3;
 
 use crate::ephemeris::{Ephemeris, EphemerisError, KM3_S2_TO_M3_S2};
+use crate::forces::oblateness::Oblateness;
 use crate::forces::relativity::Relativity1PN;
 use crate::forces::srp::SolarRadiationPressure;
 use crate::forces::yarkovsky::YarkovskyA2;
 use crate::forces::CompositeForce;
 use crate::geometry::BPlaneEncounter;
-use crate::perturber_field::{sb441_perturber_field, tier1_perturber_field, EphemerisPerturber};
+use crate::perturber_field::{
+    pluto_perturber_field, sb441_perturber_field, tier1_perturber_field, EphemerisPerturber,
+    EphemerisPole,
+};
 use crate::{
     geometry, Clock, DeflectionError, DeflectionScenario, Dop853, DvSolveTol, Epoch, Integrator,
     ScanOptions, StateVector,
@@ -146,6 +150,27 @@ pub struct Tier2Config {
     /// it yields; do **not** inflate `A/m` to manufacture a visible one — the same
     /// display-grade lie the `yarkovsky_a2` note warns against.
     pub srp: Option<SrpParams>,
+    /// Enable Earth's `J2` oblateness
+    /// ([`Oblateness`](crate::forces::oblateness::Oblateness)) with the DE440
+    /// `J2E`/`RE` pair and the spin axis ANISE rotates out of the loaded
+    /// orientation data (never `ẑ` assumed).
+    ///
+    /// `J2` falls off as `1/r⁴`, so along the heliocentric cruise it is nothing;
+    /// it exists for the **close Earth flyby**, where the asteroid spends minutes
+    /// inside a few Earth radii. Expect the b-plane shift to be dominated entirely
+    /// by that final pass — and expect it to be small. Report it, do not amplify it.
+    pub earth_j2: bool,
+    /// Enable **Pluto** as an 11th point-mass perturber
+    /// ([`pluto_perturber_field`](crate::perturber_field::pluto_perturber_field)) —
+    /// the one body ASSIST's point-mass term carries that §5's locked "Sun + 8
+    /// planets + Moon" shipping set omits (HANDOFF open questions).
+    ///
+    /// Off by [`Default`] like every other Tier-2 term, so the shipping demo stays
+    /// the ten-body field it has always been. Whether Pluto belongs *in* that set
+    /// is the measured question the batch-2c ~55 m-over-two-years figure left open;
+    /// the fixed-seed b-plane comparison below answers it at the campaign's real
+    /// lead time.
+    pub pluto: bool,
 }
 
 /// The knobs that define a designer impactor and the campaign around it.
@@ -264,6 +289,19 @@ fn compose_force(
             p.area_to_mass_m2_per_kg,
             sun,
         )));
+    }
+    if tier2.earth_j2 {
+        // μ⊕ from the *same* ANISE `EARTH_J2000` GM the point-mass Earth uses, so
+        // the oblateness correction and the monopole it corrects can never disagree
+        // about Earth's mass — the rule the 1PN term follows for μ_sun. The J2/R_eq
+        // pair travels together from the DE440 header (see `oblateness`).
+        let mu_earth = eph.gm_km3_s2(EARTH_J2000)? * KM3_S2_TO_M3_S2;
+        let earth = EphemerisPerturber::new(Arc::clone(eph), EARTH_J2000);
+        let pole = EphemerisPole::earth(Arc::clone(eph));
+        force = force.with(Box::new(Oblateness::earth_de440(mu_earth, earth, pole)));
+    }
+    if tier2.pluto {
+        force = force.with(Box::new(pluto_perturber_field(eph)?));
     }
     Ok(force)
 }
@@ -1582,6 +1620,94 @@ mod tests {
         assert!(
             shift > 0.0 && shift.is_finite(),
             "the belt should move the perigee by a nonzero finite amount, got {shift:.3e} m"
+        );
+    }
+
+    /// The last two Tier-2 terms — Earth's `J2` and Pluto — measured the same
+    /// fixed-seed way, and the measurement that answers the open question each of
+    /// them was parked on.
+    ///
+    /// **`J2`.** Deferred through the whole of Tier 2 as "negligible
+    /// heliocentrically", which is true and is exactly why it must be measured at
+    /// the *encounter* rather than argued about: the term is `1/r⁴`, so essentially
+    /// all of its effect is bought in the minutes the asteroid spends inside a few
+    /// Earth radii. Whatever comes out is the honest size of that, reported.
+    ///
+    /// **Pluto.** HANDOFF parked "Pluto in the shipping field" on a missing GM,
+    /// which the DE440 header supplies, and on an unmeasured cost — batch-2c's
+    /// ~55 m over two years for a main-belt particle, *growing with lead time*.
+    /// This runs it at the campaign's real ~12 yr lead so the 10-vs-11-body choice
+    /// is made against a number instead of an extrapolation.
+    ///
+    /// Assertions stay structural (off == baseline bit-for-bit; on shifts by a
+    /// nonzero finite amount); the magnitudes are printed, never asserted, because
+    /// both terms are expected small and manufacturing a threshold they must clear
+    /// is how a measurement turns into a claim.
+    #[test]
+    fn earth_j2_and_pluto_leave_the_bplane_unchanged_off_and_shift_it_on() {
+        if crate::kernels::resolve_for_test("earth_j2_and_pluto_…_shift_it_on").is_none() {
+            return;
+        }
+
+        let sc = RealFieldScenario::build(&ImpactorConfig::default()).expect("scenario builds");
+        let baseline = sc
+            .deflection()
+            .expect("deflection")
+            .nominal_encounter()
+            .expect("nominal reduces")
+            .expect("nominal is a hit");
+
+        // (a) Both off == the shipping baseline, bit-for-bit.
+        let off = sc
+            .nominal_encounter_with(&Tier2Config::default())
+            .expect("off re-fly")
+            .expect("off pass is still an encounter");
+        assert_eq!(
+            off.perigee, baseline.perigee,
+            "all-off re-fly must match the shipping perigee bit-for-bit"
+        );
+
+        // (b) Earth's J2 — bought almost entirely during the final close pass.
+        let j2 = sc
+            .nominal_encounter_with(&Tier2Config {
+                earth_j2: true,
+                ..Tier2Config::default()
+            })
+            .expect("J2 re-fly")
+            .expect("J2 pass is still an encounter");
+        let j2_shift = (j2.perigee - baseline.perigee).abs();
+        println!(
+            "Earth J2 (DE440 J2E, real spin axis): perigee shift over the campaign {:.4} km \
+             (baseline {:.1} km → +J2 {:.1} km, capture {:.1} km)",
+            j2_shift / 1e3,
+            baseline.perigee / 1e3,
+            j2.perigee / 1e3,
+            j2.capture_radius / 1e3,
+        );
+        assert!(
+            j2_shift > 0.0 && j2_shift.is_finite(),
+            "Earth's J2 should move the perigee by a nonzero finite amount, got {j2_shift:.3e} m"
+        );
+
+        // (c) Pluto — ASSIST's 11th point mass, the one the shipping ten omit.
+        let pluto = sc
+            .nominal_encounter_with(&Tier2Config {
+                pluto: true,
+                ..Tier2Config::default()
+            })
+            .expect("Pluto re-fly")
+            .expect("Pluto pass is still an encounter");
+        let pluto_shift = (pluto.perigee - baseline.perigee).abs();
+        println!(
+            "Pluto (DE440 GM9, 11th point mass): perigee shift over the campaign {:.4} km \
+             (baseline {:.1} km → +Pluto {:.1} km)",
+            pluto_shift / 1e3,
+            baseline.perigee / 1e3,
+            pluto.perigee / 1e3,
+        );
+        assert!(
+            pluto_shift > 0.0 && pluto_shift.is_finite(),
+            "Pluto should move the perigee by a nonzero finite amount, got {pluto_shift:.3e} m"
         );
     }
 }

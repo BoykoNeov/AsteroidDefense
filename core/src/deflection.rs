@@ -43,7 +43,8 @@ use nalgebra::Vector3;
 use crate::clock::{Clock, ClockError};
 use crate::close_approach::{closest_approach, GeocentricState, ScanOptions};
 use crate::epoch::Epoch;
-use crate::forces::{ForceModel, GRAVITATIONAL_CONSTANT};
+use crate::forces::tractor::TowWindow;
+use crate::forces::{ForceModel, ForceSum, GRAVITATIONAL_CONSTANT};
 use crate::geometry::{BPlaneEncounter, GeometryError};
 use crate::integrator::{Dop853, IntegratorError};
 use crate::state::StateVector;
@@ -380,6 +381,34 @@ impl Default for DvSolveTol {
     }
 }
 
+/// Tuning for the [`DeflectionScenario::required_tow_duration`] solve.
+///
+/// Deliberately smaller than [`DvSolveTol`]: a tow duration is bracketed by
+/// `[0, lead time]` from the outset, so there is no seed to pick and no expansion
+/// to cap. Only the stopping rule remains.
+///
+/// [`Default`] pins the duration to 0.5 %. That is looser than the impulse
+/// solver's 0.1 % on purpose — each probe here is a full multi-year
+/// re-propagation, roughly ten times the cost of an impulsive probe, and half a
+/// percent of a decade-long tow is a few weeks of station-keeping, well below the
+/// precision any of the mission inputs are known to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TowSolveTol {
+    /// Relative width at which the bisection stops: `(hi − lo) ≤ rel_tol · hi`.
+    pub rel_tol: f64,
+    /// Cap on bisection halvings (the `rel_tol` test normally stops it first).
+    pub max_bisections: u32,
+}
+
+impl Default for TowSolveTol {
+    fn default() -> Self {
+        Self {
+            rel_tol: 5.0e-3,
+            max_bisections: 60,
+        }
+    }
+}
+
 /// Why a deflection evaluation or solve could not complete.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeflectionError {
@@ -411,6 +440,28 @@ pub enum DeflectionError {
         /// deflected pass left the scan's distance gate).
         perigee_reached_m: f64,
     },
+    /// A tow window run all the way to the **cap** — the whole lead time between
+    /// the tow start and the nominal encounter — still did not lift the perigee to
+    /// the target. There is no longer window to try, so this is *not* a bracket
+    /// that needs widening: it is the honest answer that this tractor cannot do
+    /// this job from this start date.
+    ///
+    /// This is a distinct variant, and returning the cap as "the required
+    /// duration" instead would repeat a defect this codebase has already shipped
+    /// once: [`crate::mission::required_impactor_mass`] used to hand back its seed
+    /// mass verbatim when the seed already cleared, reporting an *upper bound* as
+    /// the requirement. A caller that cannot tell "3.1 years is enough" from
+    /// "12 years is not enough" will read the second as the first.
+    TowDurationCapped {
+        /// Target perigee that was never cleared, metres.
+        target_perigee_m: f64,
+        /// The cap: the longest window that still ends at or before the nominal
+        /// encounter, seconds.
+        max_duration_s: f64,
+        /// Perigee reached by that longest window, metres (may be `INFINITY` if
+        /// the towed pass left the scan's distance gate).
+        perigee_reached_m: f64,
+    },
 }
 
 impl std::fmt::Display for DeflectionError {
@@ -430,6 +481,16 @@ impl std::fmt::Display for DeflectionError {
                 f,
                 "target perigee {target_perigee_m:.3e} m unreachable: at |Δv| = {max_dv_tried:.3e} m/s \
                  perigee only reached {perigee_reached_m:.3e} m"
+            ),
+            DeflectionError::TowDurationCapped {
+                target_perigee_m,
+                max_duration_s,
+                perigee_reached_m,
+            } => write!(
+                f,
+                "target perigee {target_perigee_m:.3e} m unreachable by towing: a window running \
+                 the full {:.3} yr to the nominal encounter only reached {perigee_reached_m:.3e} m",
+                max_duration_s / (365.25 * 86_400.0)
             ),
         }
     }
@@ -671,17 +732,42 @@ impl<'a> DeflectionScenario<'a> {
 
         let seed = self.nominal.state_at(deflection_epoch)?;
         let deflected = apply_impulse(seed, delta_v);
+        self.propagate_and_reduce(self.force, deflection_epoch, deflected)
+    }
 
-        // Re-propagate from the deflection epoch to the span end, at the same
-        // cadence. Round the interval count up so the clock always reaches
-        // `span_end` (and thus past the nominal encounter); at least one step.
-        let remaining = ((self.span_end_seconds - t_d) / self.cadence_seconds).ceil();
+    /// Propagate `seed` from `start` to the span end under **`force`**, and reduce
+    /// the resulting close approach to b-plane geometry.
+    ///
+    /// The shared body of every "re-fly and look at the encounter" path. It takes
+    /// the force model as an **argument** rather than reading [`self.force`],
+    /// which is the whole point: an impulsive deflection varies the *initial
+    /// state* under a fixed field, while a gravity-tractor duration solve varies
+    /// the *field* (a different tow window per probe) under a fixed state. Before
+    /// this, `DeflectionScenario`'s `force: &'a dyn ForceModel` made the second
+    /// kind inexpressible.
+    ///
+    /// Callers must not hand in an unrelated field: every probe is compared
+    /// against a nominal flown under [`self.force`], so a probe's field should be
+    /// `self.force` plus whatever term is being studied — which is exactly what
+    /// [`towed_trajectory`](Self::towed_trajectory) composes, via
+    /// [`ForceSum`], so a caller cannot get it wrong by hand.
+    fn propagate_and_reduce(
+        &self,
+        force: &dyn ForceModel,
+        start: Epoch,
+        seed: StateVector,
+    ) -> Result<(Clock, Option<BPlaneEncounter>), DeflectionError> {
+        // Propagate from `start` to the span end, at the same cadence. Round the
+        // interval count up so the clock always reaches `span_end` (and thus past
+        // the nominal encounter); at least one step.
+        let t0 = start.tdb_seconds_past_j2000();
+        let remaining = ((self.span_end_seconds - t0) / self.cadence_seconds).ceil();
         let n = (remaining as u32).max(1);
         let clock = Clock::propagate(
             &self.integrator,
-            self.force,
-            deflection_epoch,
-            deflected,
+            force,
+            start,
+            seed,
             self.cadence_seconds,
             n,
         )?;
@@ -716,7 +802,22 @@ impl<'a> DeflectionScenario<'a> {
         direction: Vector3<f64>,
         magnitude: f64,
     ) -> Result<f64, DeflectionError> {
-        match self.evaluate(deflection_epoch, magnitude * direction) {
+        Self::perigee_scale(self.evaluate(deflection_epoch, magnitude * direction))
+    }
+
+    /// Fold an encounter outcome onto the monotone perigee scale the root-finds
+    /// bracket on, mapping the two extremes described on
+    /// [`perigee_after`](Self::perigee_after).
+    ///
+    /// Extracted so the impulsive solver and the tow-duration solver share **one**
+    /// definition of "how deep was that pass". Two copies of this mapping would be
+    /// two places for a `NotHyperbolic` to start reading as an error instead of as
+    /// a dead-centre hit, and the resulting solver would fail exactly on the
+    /// scenarios it exists to fix.
+    fn perigee_scale(
+        outcome: Result<Option<BPlaneEncounter>, DeflectionError>,
+    ) -> Result<f64, DeflectionError> {
+        match outcome {
             Ok(Some(bp)) => Ok(bp.perigee),
             Ok(None) => Ok(f64::INFINITY),
             Err(DeflectionError::Geometry(GeometryError::NotHyperbolic { .. })) => Ok(0.0),
@@ -832,12 +933,206 @@ impl<'a> DeflectionScenario<'a> {
         let dir = along_track_unit(seed).ok_or(DeflectionError::NoDirection)?;
         self.required_dv(deflection_epoch, dir, target_perigee_m, tol)
     }
+
+    // ---------------------------------------------------------------------
+    // Continuous deflection: the gravity tractor's duration axis (§5).
+    //
+    // Everything above varies an *impulse* under a fixed force field. A tractor
+    // varies the *field* — the tow window's length — under an unchanged initial
+    // state. That is a different solve, and it is why `propagate_and_reduce`
+    // takes a force argument.
+    // ---------------------------------------------------------------------
+
+    /// Epoch of the nominal (un-deflected) closest approach, or `None` if no close
+    /// approach falls inside the scan's distance gate.
+    ///
+    /// Cheap: a scan over the already-propagated nominal clock, no propagation.
+    /// [`nominal_encounter`](Self::nominal_encounter) reduces the same close
+    /// approach to b-plane geometry, which discards the epoch — and the tow cap
+    /// needs the epoch.
+    pub fn nominal_encounter_epoch(&self) -> Result<Option<Epoch>, DeflectionError> {
+        Ok(closest_approach(&self.nominal, self.earth, self.scan)?.map(|c| c.epoch))
+    }
+
+    /// The longest tow window that still **ends at or before the nominal
+    /// encounter**, starting from `tow_start` (seconds).
+    ///
+    /// This is the cap the duration solve brackets against, and it is a physical
+    /// bound rather than a numerical convenience. Two things break past it:
+    ///
+    /// - **Monotonicity.** Perigee grows with tow duration only while the extra
+    ///   tugging still has time to translate into displacement. Tugging *after*
+    ///   the encounter cannot move a flyby that has already happened, so the
+    ///   response flattens, and a bisection on a flat function returns noise.
+    /// - **The encounter itself.** A window edge landing inside the flyby perturbs
+    ///   the very geometry being measured.
+    ///
+    /// Anchored to the *nominal* encounter epoch, not the towed one. The towed
+    /// encounter shifts by a little, but the cap only has to be a defensible
+    /// bound, and a cap that moved with every probe would make the bracket itself
+    /// a function of the thing being solved for. Falls back to the span end when
+    /// the nominal has no close approach at all.
+    pub fn max_tow_duration_seconds(&self, tow_start: Epoch) -> Result<f64, DeflectionError> {
+        let t0 = tow_start.tdb_seconds_past_j2000();
+        let end = match self.nominal_encounter_epoch()? {
+            Some(e) => e.tdb_seconds_past_j2000(),
+            None => self.span_end_seconds,
+        };
+        if !(end > t0) {
+            return Err(DeflectionError::InvalidInput(format!(
+                "tow start ({t0} s) is at or after the nominal encounter ({end} s) — no lead time"
+            )));
+        }
+        Ok(end - t0)
+    }
+
+    /// Fly the **un-impulsed** nominal state from `tow_start` under the scenario's
+    /// own force field *plus* `tow`, and return the propagated arc and the Earth
+    /// encounter it produces.
+    ///
+    /// The tractor analogue of
+    /// [`deflected_trajectory`](Self::deflected_trajectory). Note what is *not*
+    /// here: an impulse. A tractor never applies one — the seed at `tow_start` is
+    /// the nominal state untouched, and the entire deflection accumulates through
+    /// the force term over the window.
+    ///
+    /// `tow` should be a windowed term whose window starts at or after
+    /// `tow_start`; anything it contributes earlier simply is not integrated,
+    /// since propagation begins here. The base field is borrowed via
+    /// [`ForceSum`] rather than rebuilt, so a probe cannot silently disagree with
+    /// the nominal about the physics.
+    pub fn towed_trajectory(
+        &self,
+        tow_start: Epoch,
+        tow: &dyn ForceModel,
+    ) -> Result<(Clock, Option<BPlaneEncounter>), DeflectionError> {
+        let t0 = tow_start.tdb_seconds_past_j2000();
+        if t0 >= self.span_end_seconds {
+            return Err(DeflectionError::InvalidInput(format!(
+                "tow start ({t0} s) is at or past the span end ({} s)",
+                self.span_end_seconds
+            )));
+        }
+        let seed = self.nominal.state_at(tow_start)?;
+        let field = ForceSum(self.force, tow);
+        self.propagate_and_reduce(&field, tow_start, seed)
+    }
+
+    /// [`towed_trajectory`](Self::towed_trajectory), discarding the arc.
+    pub fn towed_encounter(
+        &self,
+        tow_start: Epoch,
+        tow: &dyn ForceModel,
+    ) -> Result<Option<BPlaneEncounter>, DeflectionError> {
+        Ok(self.towed_trajectory(tow_start, tow)?.1)
+    }
+
+    /// Solve for the **tow duration** (seconds) that raises the b-plane perigee to
+    /// `target_perigee_m`, for a tractor that goes on station at `tow_start`.
+    ///
+    /// `make_tow` builds the windowed force term for a candidate window; it is a
+    /// closure because each probe needs a *different* term (a different window),
+    /// and because the term's own dependencies — a spacecraft configuration, an
+    /// ephemeris-backed Sun provider — belong to the caller, not to this scenario.
+    /// Returning `None` from it means "this window cannot be realised", reported
+    /// as [`DeflectionError::InvalidInput`].
+    ///
+    /// # Why this is a bounded bisection and not a geometric bracket
+    /// [`required_dv`](Self::required_dv) grows its impulse until the perigee
+    /// clears, because there is no a-priori largest sensible impulse. A tow
+    /// duration *has* an upper bound — the lead time before the encounter
+    /// ([`max_tow_duration_seconds`](Self::max_tow_duration_seconds)) — so the
+    /// bracket is `[0, cap]` from the start and no expansion loop is needed. That
+    /// also removes the failure mode where an expansion silently walks past the
+    /// region in which the response is monotone.
+    ///
+    /// # Running out of lead time is an error, not an answer
+    /// If the full-cap window still falls short, this returns
+    /// [`DeflectionError::TowDurationCapped`] carrying the cap and the perigee it
+    /// reached — it does **not** return the cap. See that variant for why: handing
+    /// back the bound as though it were the requirement is a defect this codebase
+    /// has already shipped once.
+    ///
+    /// Returns `0.0` if the nominal already clears the target (no tow needed).
+    pub fn required_tow_duration<T, F>(
+        &self,
+        tow_start: Epoch,
+        target_perigee_m: f64,
+        tol: TowSolveTol,
+        make_tow: F,
+    ) -> Result<f64, DeflectionError>
+    where
+        T: ForceModel,
+        F: Fn(TowWindow) -> Option<T>,
+    {
+        if !(target_perigee_m.is_finite() && target_perigee_m > 0.0) {
+            return Err(DeflectionError::InvalidInput(format!(
+                "target_perigee_m must be finite and > 0 (got {target_perigee_m})"
+            )));
+        }
+        if !(tol.rel_tol.is_finite() && tol.rel_tol > 0.0) {
+            return Err(DeflectionError::InvalidInput(format!(
+                "rel_tol must be finite and > 0 (got {})",
+                tol.rel_tol
+            )));
+        }
+
+        // Zero duration is the nominal itself: no window is built, so this cannot
+        // disagree with `nominal_encounter()` about what "no tow" means.
+        let p0 = Self::perigee_scale(self.nominal_encounter())?;
+        if p0 >= target_perigee_m {
+            return Ok(0.0);
+        }
+
+        let cap = self.max_tow_duration_seconds(tow_start)?;
+        let probe = |duration_s: f64| -> Result<f64, DeflectionError> {
+            let window = TowWindow::from_duration(tow_start, duration_s).ok_or_else(|| {
+                DeflectionError::InvalidInput(format!(
+                    "tow duration {duration_s} s is not a valid window"
+                ))
+            })?;
+            let tow = make_tow(window).ok_or_else(|| {
+                DeflectionError::InvalidInput(
+                    "the tow term could not be built for this window (degenerate configuration?)"
+                        .into(),
+                )
+            })?;
+            Self::perigee_scale(self.towed_encounter(tow_start, &tow))
+        };
+
+        // The bracket's upper end is the cap, and if even that falls short there
+        // is nothing longer to try.
+        let p_cap = probe(cap)?;
+        if p_cap < target_perigee_m {
+            return Err(DeflectionError::TowDurationCapped {
+                target_perigee_m,
+                max_duration_s: cap,
+                perigee_reached_m: p_cap,
+            });
+        }
+
+        // Bisect [0, cap]: 0 is known below (p0 < target), cap known at-or-above.
+        let (mut lo, mut hi) = (0.0_f64, cap);
+        for _ in 0..tol.max_bisections {
+            if (hi - lo) <= tol.rel_tol * hi {
+                break;
+            }
+            let mid = 0.5 * (lo + hi);
+            if probe(mid)? < target_perigee_m {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(0.5 * (lo + hi))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::forces::point_mass::{FixedPerturber, PointMassGravity};
+    use crate::forces::tractor::{GravityTractor, TowDirection, TowWindow};
     use crate::forces::{ForceError, ForceModel};
     use nalgebra::Vector3;
 
@@ -1431,5 +1726,246 @@ mod tests {
             momentum_coupling_ns_per_j: 1.418e-4,
         };
         assert_eq!(bad.dv_ms(100.0, 1.0e12), None, "η > 1 is not a coupling");
+    }
+
+    // ---- Test 6: the tow-duration solve (gravity tractor, §5) ---------------
+
+    /// A tow term for the straight-line scenario. The magnitude is **wildly**
+    /// amplified relative to a real tractor (`~2.6e-11 m/s²`): this scenario spans
+    /// eleven days, not a decade, so the tug has to be enormous to register at
+    /// all. That is fine here — these tests exercise the *solver*, whose behaviour
+    /// is scale-free, while the physical tow magnitude is pinned against Lu & Love
+    /// in `forces::tractor` and measured on the real campaign in the gdext suite.
+    fn tow(a_tow: f64, w: TowWindow) -> GravityTractor {
+        GravityTractor::sun_at_origin(a_tow, TowDirection::Prograde, w)
+    }
+
+    /// The cap is exactly the lead time from the tow start to the **nominal**
+    /// encounter — not the span end, which runs well past it.
+    #[test]
+    fn max_tow_duration_is_the_lead_time_to_the_nominal_encounter() {
+        let force = ZeroForce;
+        let earth = |_e: Epoch| Ok(StateVector::new(Vector3::zeros(), Vector3::zeros()));
+        let sc = straight_line_scenario(&force, &earth);
+
+        let t0 = Epoch::from_tdb_seconds_past_j2000(0.0);
+        let ca = sc
+            .nominal_encounter_epoch()
+            .expect("scan succeeds")
+            .expect("the nominal is a hit, so it has a close approach");
+        let cap = sc.max_tow_duration_seconds(t0).unwrap();
+
+        assert!(
+            (cap - ca.tdb_seconds_past_j2000()).abs() < 1.0,
+            "cap {cap} s must be the lead time to CA at {} s",
+            ca.tdb_seconds_past_j2000()
+        );
+        // And it is strictly shorter than the propagated span: capping at the span
+        // end would let a window swallow the encounter it is trying to move.
+        assert!(cap < 1.0e6, "cap {cap} s must stop short of the 1e6 s span");
+
+        // Starting after the encounter is not a short tow, it is no tow at all.
+        let late = Epoch::from_tdb_seconds_past_j2000(9.0e5);
+        assert!(matches!(
+            sc.max_tow_duration_seconds(late),
+            Err(DeflectionError::InvalidInput(_))
+        ));
+    }
+
+    /// A vanishingly short window must leave the encounter where the nominal put
+    /// it. This is the "zero duration ⇒ zero deflection" end of the bracket, and
+    /// it is what makes the bisection's lower bound trustworthy without probing it.
+    #[test]
+    fn a_negligible_tow_window_reproduces_the_nominal_encounter() {
+        let force = ZeroForce;
+        let earth = |_e: Epoch| Ok(StateVector::new(Vector3::zeros(), Vector3::zeros()));
+        let sc = straight_line_scenario(&force, &earth);
+
+        let t0 = Epoch::from_tdb_seconds_past_j2000(0.0);
+        let nominal = sc.nominal_encounter().unwrap().unwrap().perigee;
+        let w = TowWindow::from_duration(t0, 1.0e-3).unwrap();
+        let towed = sc
+            .towed_encounter(t0, &tow(1.0e-5, w))
+            .unwrap()
+            .unwrap()
+            .perigee;
+
+        let rel = (towed - nominal).abs() / nominal;
+        // The floor here is not the tow — it is re-propagation: `towed_encounter`
+        // re-flies from `t0` and re-runs the close-approach root-find, which lands
+        // a few millimetres from where the nominal clock's own scan landed on a
+        // 4000 km perigee (measured: 2.1e-9 relative). What matters is that a 1 ms
+        // window is indistinguishable from that floor, while a full-cap window
+        // moves the perigee by tens of percent (see the monotonicity test).
+        assert!(
+            rel < 1e-7,
+            "a 1 ms tow moved the perigee from {nominal:.6e} to {towed:.6e} m (rel {rel:.2e})"
+        );
+    }
+
+    /// Perigee grows with tow duration over the capped bracket — the monotonicity
+    /// the bisection assumes, checked rather than asserted in prose.
+    #[test]
+    fn a_longer_tow_raises_the_perigee() {
+        let force = ZeroForce;
+        let earth = |_e: Epoch| Ok(StateVector::new(Vector3::zeros(), Vector3::zeros()));
+        let sc = straight_line_scenario(&force, &earth);
+
+        let t0 = Epoch::from_tdb_seconds_past_j2000(0.0);
+        let cap = sc.max_tow_duration_seconds(t0).unwrap();
+        let a_tow = 1.0e-5;
+
+        let mut previous = sc.nominal_encounter().unwrap().unwrap().perigee;
+        for f in [0.25, 0.5, 0.75, 1.0] {
+            let w = TowWindow::from_duration(t0, f * cap).unwrap();
+            let p = sc
+                .towed_encounter(t0, &tow(a_tow, w))
+                .unwrap()
+                .unwrap()
+                .perigee;
+            assert!(
+                p > previous,
+                "perigee must grow with duration: at {f} of the cap got {p:.4e} m, \
+                 previous {previous:.4e} m"
+            );
+            previous = p;
+        }
+    }
+
+    /// **The round trip.** Solve for a duration, then check that the answer is
+    /// actually the answer: towing for it clears the target, and towing for 20 %
+    /// less does not. Asserting only "the solver returned a number in range" would
+    /// pass for a solver that returned its own bracket.
+    #[test]
+    fn required_tow_duration_round_trips() {
+        let force = ZeroForce;
+        let earth = |_e: Epoch| Ok(StateVector::new(Vector3::zeros(), Vector3::zeros()));
+        let sc = straight_line_scenario(&force, &earth);
+
+        let t0 = Epoch::from_tdb_seconds_past_j2000(0.0);
+        let cap = sc.max_tow_duration_seconds(t0).unwrap();
+        let a_tow = 1.0e-5;
+        let nominal = sc.nominal_encounter().unwrap().unwrap().perigee;
+        // Reachable but not trivially so: at this tow the full-cap window reaches
+        // ≈1.31× the nominal perigee, so a 1.2× target lands the solve well inside
+        // the bracket rather than against either end of it.
+        let target = 1.2 * nominal;
+
+        let solved = sc
+            .required_tow_duration(t0, target, TowSolveTol::default(), |w| Some(tow(a_tow, w)))
+            .expect("this target is reachable inside the cap");
+
+        assert!(
+            solved > 0.0 && solved < cap,
+            "solved duration {solved} s must sit strictly inside (0, {cap})"
+        );
+
+        let at_solved = sc
+            .towed_encounter(t0, &tow(a_tow, TowWindow::from_duration(t0, solved).unwrap()))
+            .unwrap()
+            .unwrap()
+            .perigee;
+        assert!(
+            at_solved >= target * (1.0 - 2.0 * TowSolveTol::default().rel_tol),
+            "the solved duration must clear the target: {at_solved:.5e} vs {target:.5e} m"
+        );
+
+        let short = 0.8 * solved;
+        let at_short = sc
+            .towed_encounter(t0, &tow(a_tow, TowWindow::from_duration(t0, short).unwrap()))
+            .unwrap()
+            .unwrap()
+            .perigee;
+        assert!(
+            at_short < target,
+            "20% less towing must fall short: {at_short:.5e} vs target {target:.5e} m"
+        );
+    }
+
+    /// **Running out of lead time is an error, not an answer.** With a tow far too
+    /// feeble for the target, the solve must report
+    /// [`DeflectionError::TowDurationCapped`] carrying the cap it exhausted — not
+    /// quietly return the cap as "the required duration".
+    ///
+    /// This is the shape of test that caught `required_impactor_mass` handing back
+    /// its seed as the requirement. A solver that returns its own bound looks
+    /// perfectly healthy until someone acts on the number.
+    #[test]
+    fn required_tow_duration_reports_the_cap_rather_than_returning_it() {
+        let force = ZeroForce;
+        let earth = |_e: Epoch| Ok(StateVector::new(Vector3::zeros(), Vector3::zeros()));
+        let sc = straight_line_scenario(&force, &earth);
+
+        let t0 = Epoch::from_tdb_seconds_past_j2000(0.0);
+        let cap = sc.max_tow_duration_seconds(t0).unwrap();
+        let nominal = sc.nominal_encounter().unwrap().unwrap().perigee;
+        // A thousandth of the tow that solved above, against a harder target.
+        let feeble = 1.0e-8;
+        let target = 3.0 * nominal;
+
+        let outcome =
+            sc.required_tow_duration(t0, target, TowSolveTol::default(), |w| Some(tow(feeble, w)));
+
+        match outcome {
+            Err(DeflectionError::TowDurationCapped {
+                target_perigee_m,
+                max_duration_s,
+                perigee_reached_m,
+            }) => {
+                assert_eq!(target_perigee_m, target);
+                assert!(
+                    (max_duration_s - cap).abs() < 1.0,
+                    "the reported cap {max_duration_s} s must be the real cap {cap} s"
+                );
+                assert!(
+                    perigee_reached_m < target,
+                    "the reported perigee {perigee_reached_m:.4e} m must be short of {target:.4e} m"
+                );
+                assert!(
+                    perigee_reached_m > 0.0 && perigee_reached_m.is_finite(),
+                    "and it must be a real measurement, not a sentinel: {perigee_reached_m}"
+                );
+            }
+            other => panic!("expected TowDurationCapped, got {other:?}"),
+        }
+    }
+
+    /// A target the nominal already clears needs no tow at all — and the answer is
+    /// exactly zero, never a tiny positive number the bisection happened to land
+    /// on.
+    #[test]
+    fn required_tow_duration_is_zero_when_the_nominal_already_clears() {
+        let force = ZeroForce;
+        let earth = |_e: Epoch| Ok(StateVector::new(Vector3::zeros(), Vector3::zeros()));
+        let sc = straight_line_scenario(&force, &earth);
+
+        let t0 = Epoch::from_tdb_seconds_past_j2000(0.0);
+        let nominal = sc.nominal_encounter().unwrap().unwrap().perigee;
+        let solved = sc
+            .required_tow_duration(t0, 0.5 * nominal, TowSolveTol::default(), |w| {
+                Some(tow(1.0e-5, w))
+            })
+            .unwrap();
+        assert_eq!(solved, 0.0);
+    }
+
+    /// A tow term that cannot be built for a probe's window is an input error, not
+    /// a silently-zero force that would make the solver report an impossible
+    /// configuration as merely slow.
+    #[test]
+    fn an_unbuildable_tow_term_is_an_input_error() {
+        let force = ZeroForce;
+        let earth = |_e: Epoch| Ok(StateVector::new(Vector3::zeros(), Vector3::zeros()));
+        let sc = straight_line_scenario(&force, &earth);
+
+        let t0 = Epoch::from_tdb_seconds_past_j2000(0.0);
+        let nominal = sc.nominal_encounter().unwrap().unwrap().perigee;
+        let outcome = sc.required_tow_duration(
+            t0,
+            1.5 * nominal,
+            TowSolveTol::default(),
+            |_w| -> Option<GravityTractor> { None },
+        );
+        assert!(matches!(outcome, Err(DeflectionError::InvalidInput(_))));
     }
 }

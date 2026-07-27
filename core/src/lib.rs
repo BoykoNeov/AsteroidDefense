@@ -43,7 +43,7 @@ pub use close_approach::{
 };
 pub use deflection::{
     along_track_unit, apply_impulse, kinetic_impactor_dv, DeflectionError, DeflectionScenario,
-    DvSolveTol,
+    DvSolveTol, TowSolveTol,
 };
 pub use elements::{ElementsError, OrbitalElements};
 pub use horizons::{Neo, NeoError};
@@ -52,7 +52,7 @@ pub use forces::relativity::{CentralBodyState, FixedCentralBody, Relativity1PN, 
 pub use forces::srp::SolarRadiationPressure;
 pub use forces::tractor::{GravityTractor, HoverGeometry, TowDirection, TowWindow};
 pub use forces::yarkovsky::YarkovskyA2;
-pub use forces::{CompositeForce, ForceError, ForceModel, GRAVITATIONAL_CONSTANT};
+pub use forces::{CompositeForce, ForceError, ForceModel, ForceSum, GRAVITATIONAL_CONSTANT};
 pub use geometry::{
     BPlaneEncounter, GeometryError, EARTH_EQUATORIAL_RADIUS_M, EARTH_MEAN_RADIUS_M,
 };

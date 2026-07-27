@@ -131,29 +131,34 @@ pub trait ForceModel: Send + Sync {
     fn acceleration(&self, epoch: Epoch, state: &StateVector) -> Result<Vector3<f64>, ForceError>;
 }
 
-/// A borrowed force model that satisfies [`ForceModel`] by delegation — the
-/// adapter that lets an owned [`CompositeForce`] be built *on top of* a field
-/// someone else owns.
+/// The sum of two **borrowed** force models — how a field is composed on top of
+/// one someone else owns, without cloning or rebuilding it.
 ///
-/// [`CompositeForce`] holds `Box<dyn ForceModel>`, so composing with an existing
-/// `&dyn ForceModel` would otherwise require cloning or re-building that field.
-/// Wrapping the reference is enough, and it is the exact decorator the
-/// [`ForceModel`] trait's `Sync` bound was chosen to permit (see the note there:
-/// `&T: Send` requires `T: Sync`).
+/// This is the decorator the [`ForceModel`] trait's `Sync` bound exists to permit
+/// (see the note there: a wrapper holding `&'a dyn ForceModel` is `Send` only if
+/// `&dyn ForceModel` is, and `&T: Send` requires `T: Sync`).
 ///
-/// The motivating caller is the gravity tractor. A
-/// [`DeflectionScenario`](crate::deflection::DeflectionScenario) borrows the base
-/// field for its whole lifetime, but a tractor *duration* solve re-propagates
-/// under a **different** field on every probe — base + a tow window of the length
-/// currently being tried. `ForceRef` makes each probe's field
-/// `CompositeForce::new().with(ForceRef(base)).with(tractor)`, so the base field
-/// is borrowed rather than duplicated and the probes cannot drift from the
-/// nominal's physics.
-pub struct ForceRef<'a>(pub &'a dyn ForceModel);
+/// # Why not just push a term into a [`CompositeForce`]
+/// Because [`CompositeForce`] holds `Box<dyn ForceModel>`, which is implicitly
+/// `Box<dyn ForceModel + 'static>`. A *borrowed* field cannot go in it at all, and
+/// Rust has no default lifetime parameters that would let `CompositeForce` grow a
+/// `'a` without rippling through every use site. Summing two references sidesteps
+/// that entirely and allocates nothing.
+///
+/// # The motivating caller
+/// A [`DeflectionScenario`](crate::deflection::DeflectionScenario) borrows its
+/// base field for its whole lifetime, but a gravity-tractor *duration* solve
+/// re-propagates under a **different** field on every probe: the base field plus
+/// a tow window of the length currently being tried. `ForceSum(base, tow)` is
+/// that per-probe field, and because the base side is the scenario's own
+/// `self.force` by construction, a probe cannot silently disagree with the
+/// nominal about the physics it is being compared against.
+pub struct ForceSum<'a>(pub &'a dyn ForceModel, pub &'a dyn ForceModel);
 
-impl ForceModel for ForceRef<'_> {
+impl ForceModel for ForceSum<'_> {
     fn acceleration(&self, epoch: Epoch, state: &StateVector) -> Result<Vector3<f64>, ForceError> {
-        self.0.acceleration(epoch, state)
+        // Short-circuits on the first failing side, matching `CompositeForce`.
+        Ok(self.0.acceleration(epoch, state)? + self.1.acceleration(epoch, state)?)
     }
 }
 

@@ -55,8 +55,8 @@ use crate::uncertainty::{
     StateCovariance, UncertaintyError, SAMPLE_CADENCE_DAYS,
 };
 use crate::{
-    geometry, Clock, DeflectionError, DeflectionScenario, Dop853, DvSolveTol, Epoch, Integrator,
-    OrbitalElements, ScanOptions, StateVector,
+    find_close_approaches, geometry, Clock, DeflectionError, DeflectionScenario, Dop853, DvSolveTol,
+    Epoch, Integrator, OrbitalElements, ScanOptions, StateVector,
 };
 
 /// Metres per kilometre — the km→m scale the DE440 states cross into SI on.
@@ -1238,17 +1238,53 @@ impl RealFieldScenario {
     /// `v_inf = √(v² − 2μ/r)` is not a catastrophic cancellation), and inside the
     /// scan gate. The propagation runs only to there plus one cadence of margin —
     /// there is no reason to fly past the epoch the answer is read at.
+    ///
+    /// **The anchor is the *first* encounter, indexed explicitly, and a second one
+    /// is an error rather than a silent re-anchoring.** This used to read
+    /// [`DeflectionScenario::nominal_encounter_epoch`], which reduces at the
+    /// *minimum-distance* approach. Today the shipping span holds exactly one
+    /// approach inside the gate, so the two agree and nothing was wrong. But the
+    /// keyhole work extends the span past a resonant return that is *deeper* than
+    /// the first encounter by construction — that is what a keyhole is — and on the
+    /// day it does, a min-distance anchor relocates `t_reduce` from 12 h before
+    /// encounter 1 to 12 h before encounter 2. Every column of the Jacobian would
+    /// then describe a different encounter than the caller asked about, and none of
+    /// it would error: the matrix stays finite, symmetric and plausible.
+    ///
+    /// So the fix is not to pick more cleverly. With two encounters in span, *which
+    /// one the covariance is being mapped to* is a question only the caller can
+    /// answer, and a chained two-encounter Jacobian is not defined here yet. Until
+    /// it is, this refuses rather than guesses. `nominal_encounter_epoch` keeps its
+    /// min-distance meaning for its ~30 other callers, who genuinely do want the
+    /// closest pass.
     fn uncertainty_sampling_plan(&self) -> Result<(Epoch, f64, u32), UncertaintyError> {
         let fail = |e: String| UncertaintyError::SampleFailed {
             column: None,
             message: e,
         };
         let ds = self.deflection().map_err(|e| fail(e.to_string()))?;
-        let ca = ds
-            .nominal_encounter_epoch()
-            .map_err(|e| fail(e.to_string()))?
+        let approaches = find_close_approaches(ds.nominal(), &self.earth, self.scan)
+            .map_err(|e| fail(e.to_string()))?;
+        let first = approaches
+            .first()
             .ok_or_else(|| fail("no nominal close approach inside the scan gate".into()))?;
-        let t_reduce = ca.shifted_by_seconds(-UNCERTAINTY_REDUCTION_LEAD_SECONDS);
+        if approaches.len() > 1 {
+            return Err(fail(format!(
+                "the nominal span holds {} close approaches inside the scan gate, and a \
+                 chained-encounter b-plane Jacobian is not defined here. Reduce the span to a \
+                 single encounter, or extend the Tier-3 map to name which encounter it maps to. \
+                 (Refusing rather than anchoring to one silently: the encounters are at {}.)",
+                approaches.len(),
+                approaches
+                    .iter()
+                    .map(|c| format!("{} ({:.0} km)", c.epoch.as_hifitime(), c.distance / 1.0e3))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )));
+        }
+        let t_reduce = first
+            .epoch
+            .shifted_by_seconds(-UNCERTAINTY_REDUCTION_LEAD_SECONDS);
 
         let cadence = SAMPLE_CADENCE_DAYS * 86_400.0;
         let span = t_reduce.tdb_seconds_past_j2000() - self.epoch0.tdb_seconds_past_j2000();
@@ -2198,6 +2234,70 @@ mod tests {
     ///   asserted large.
     ///
     /// Kernel-gated: skips (does not fail) with no kernel.
+    /// The Tier-3 reduction epoch anchors to the **first** encounter in span, and
+    /// today that is the same as the minimum-distance one because there is only one.
+    ///
+    /// This pins the equivalence rather than assuming it, and it is deliberately a
+    /// tripwire: the day someone extends the span past a resonant return — which is
+    /// the whole point of the keyhole work, and which lands *deeper* than encounter
+    /// 1 by construction — the census stops returning a single approach and
+    /// `uncertainty_sampling_plan` refuses. That refusal is the designed behaviour,
+    /// so this test failing means "go decide which encounter the map is about," not
+    /// "the plan broke."
+    ///
+    /// Without this, the anchor would have silently relocated to encounter 2 and
+    /// every Jacobian column would have described a different encounter than the
+    /// caller asked about, with nothing erroring — the matrix stays finite,
+    /// symmetric, and entirely plausible.
+    #[test]
+    fn the_tier3_reduction_epoch_anchors_to_the_first_encounter_and_refuses_a_second() {
+        if crate::kernels::resolve_for_test("tier3_reduction_epoch_anchors_to_the_first").is_none() {
+            return;
+        }
+
+        let sc = RealFieldScenario::build(&ImpactorConfig::default()).expect("scenario builds");
+        let ds = sc.deflection().expect("deflection");
+
+        let approaches = find_close_approaches(ds.nominal(), &sc.earth, sc.scan)
+            .expect("census the nominal span");
+        assert_eq!(
+            approaches.len(),
+            1,
+            "the shipping span is supposed to hold exactly one encounter inside the gate; \
+             found {} at {:?}. If this is intentional, uncertainty_sampling_plan now refuses \
+             and the Tier-3 map needs to name its encounter.",
+            approaches.len(),
+            approaches
+                .iter()
+                .map(|c| (c.epoch.as_hifitime().to_string(), c.distance / 1.0e3))
+                .collect::<Vec<_>>(),
+        );
+
+        // First and minimum-distance agree today, which is why the change of anchor
+        // is behaviour-preserving. Asserting it means a future divergence surfaces
+        // here rather than inside a Jacobian column.
+        let closest = ds
+            .nominal_encounter_epoch()
+            .expect("encounter epoch")
+            .expect("an encounter");
+        assert_eq!(
+            approaches[0].epoch.tdb_seconds_past_j2000(),
+            closest.tdb_seconds_past_j2000(),
+            "first-in-span and minimum-distance must name the same encounter while there is \
+             only one"
+        );
+
+        // And the plan really is 12 h before it.
+        let (t_reduce, _cadence, _n) = sc
+            .uncertainty_sampling_plan()
+            .expect("the single-encounter span yields a plan");
+        let lead = approaches[0].epoch.tdb_seconds_past_j2000() - t_reduce.tdb_seconds_past_j2000();
+        assert!(
+            (lead - UNCERTAINTY_REDUCTION_LEAD_SECONDS).abs() < 1.0e-3,
+            "reduction lead is {lead} s, expected {UNCERTAINTY_REDUCTION_LEAD_SECONDS} s"
+        );
+    }
+
     #[test]
     fn tier2_terms_leave_the_bplane_unchanged_off_and_shift_it_on() {
         if crate::kernels::resolve_for_test("tier2_terms_…_shift_it_on").is_none() {

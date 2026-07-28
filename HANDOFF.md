@@ -1270,14 +1270,25 @@ enough to aim at* — for the cost of one scenario build, before any of it is bu
   perigee along a single direction and so controls `|b|` but not `B̂`; hitting a
   resonance needs both knobs, and that is the targeting step.
 
-- **A dormant landmine, now located.** The census finds exactly **1** close
-  approach within 0.05 AU over the nominal span. `nominal_encounter_epoch` reduces
-  at the *minimum-distance* approach and `uncertainty_sampling_plan` anchors
+- **A dormant landmine, located and defused.** The census finds exactly **1** close
+  approach inside the gate over the nominal span. `nominal_encounter_epoch` reduces
+  at the *minimum-distance* approach and `uncertainty_sampling_plan` anchored
   `t_reduce` to it — so the moment the span is extended past a **deeper** second
-  encounter, which is the entire point of a keyhole, that anchor silently
-  relocates and the shipping Jacobian changes meaning **without erroring**. The
-  fix is to index `find_close_approaches` explicitly rather than take the minimum,
-  and it must land before the span grows.
+  encounter, which is the entire point of a keyhole, that anchor silently relocates
+  and every Jacobian column describes a different encounter than the caller asked
+  about, **without erroring**: the matrix stays finite, symmetric, and plausible.
+
+  `uncertainty_sampling_plan` now censuses with `find_close_approaches` and anchors
+  to the **first** encounter explicitly — identical behaviour today, since first and
+  minimum-distance are the same when there is one — and **refuses** if the span
+  holds more than one, naming the epochs and distances it found. That is the honest
+  answer rather than a cleverer guess: with two encounters in span, *which* one the
+  covariance maps to is a question only the caller can answer, and a chained
+  two-encounter Jacobian is not defined here yet. `nominal_encounter_epoch` keeps
+  its min-distance meaning for its ~30 other callers, who do want the closest pass.
+  `the_tier3_reduction_epoch_anchors_to_the_first_encounter_and_refuses_a_second`
+  pins the equivalence and is deliberately a tripwire: when it fails, the message is
+  "go decide which encounter the map is about," not "the plan broke."
 
 - **One worry that dissolved on inspection.** `Clock::state_at` evaluates DOP853
   **dense output** over the integrator's own adaptive sub-steps, not linear

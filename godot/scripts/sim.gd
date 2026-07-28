@@ -681,6 +681,15 @@ func _install_threat() -> void:
 	_install_catalog()
 	_build_events()
 	mission_ready.emit()
+	# **After `mission_ready`, not inside `_invalidate_derived_views`.** These wake
+	# handlers that redraw, and `mission_ready` is what rebuilds the nodes they draw
+	# into — so firing them earlier points those handlers at the previous scenario's
+	# nodes. Order matters here for the same reason `_on_mission_ready` had to
+	# become idempotent: on a rebuild, "the last scenario's leftovers" is a real
+	# state that used to be unreachable.
+	porkchop_changed.emit()
+	plan_changed.emit()
+	tractor_changed.emit()
 	event_logged.emit(_stamp(t) + "  THREAT SOLUTION ACQUIRED - 2031-XK TRACKING")
 
 
@@ -697,6 +706,14 @@ func _install_threat() -> void:
 ## `plan_lead_d`/`plan_dv_ms`/`plan_retro` are what the operator dialled and stay
 ## put across a rebuild — the same argument as the tractor knobs. What goes is
 ## everything that was an *answer* about the old orbit.
+##
+## **State only; the signals are emitted by the caller, after `mission_ready`.**
+## Emitting here would fire `plan_changed` while the 3D layer still holds the
+## *previous* scenario's nodes — `_rebuild_plan_visuals` would then re-sample the
+## deflected track into a `MeshInstance3D` that is about to be freed. It survives
+## that today, but only because the old node is still valid and `_line_im`
+## tolerates an empty point list: two unrelated tolerances holding up an ordering
+## that has no reason to be wrong in the first place.
 func _invalidate_derived_views() -> void:
 	# The launch-window map: the grid is gone from Rust, so the flag must follow,
 	# and the columns must go with it. Leaving the arrays behind with the flag
@@ -729,10 +746,6 @@ func _invalidate_derived_views() -> void:
 
 	# The tractor probe result is dropped in Rust; this is the flag beside it.
 	tractor_probing = false
-
-	porkchop_changed.emit()
-	plan_changed.emit()
-	tractor_changed.emit()
 
 
 ## Adopt the core's threat orbit as the panel's starting point — the knobs read

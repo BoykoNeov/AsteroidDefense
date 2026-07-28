@@ -599,6 +599,15 @@ func _build_interceptor() -> void:
 ## Plan-dependent geometry: deflected orbit, transfer arc, flash position.
 ## Rebuilt whenever the mission plan changes (Sim.plan_changed).
 func _rebuild_plan_visuals() -> void:
+	# **Belt to `_install_threat`'s braces.** That function now emits `plan_changed`
+	# only after `mission_ready` has rebuilt these nodes, so this should never see a
+	# missing one. The guard stays because the failure it prevents is silent: between
+	# `_clear_mission_nodes()` and the builders these are `null`, and a
+	# `plan_changed` arriving in that window would either null-deref or quietly
+	# re-sample the deflected track into a node about to be freed. This handler
+	# should not depend on the emit order of a function in another file.
+	if not is_instance_valid(_defl_orbit_line):
+		return
 	# Re-sampled from the core on every solve: the deflected arc is a different
 	# integration per plan, not a redraw of the same one.
 	_defl_orbit_line.mesh = _line_im(

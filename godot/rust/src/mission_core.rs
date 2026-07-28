@@ -571,6 +571,108 @@ pub struct Tier2Shifts {
     pub j2_perigee_m: f64,
 }
 
+// --- The threat orbit, as knobs ----------------------------------------------
+//
+// The frontend can put the rock on a different heliocentric orbit. Three knobs,
+// and the two that are deliberately absent matter as much as the three that are
+// there — see [`ThreatOrbitKnobs`].
+
+/// The threat orbit the operator can dial, in the units a knob is turned in.
+///
+/// # What is missing, and why
+/// [`ImpactorConfig`] also carries `impact_epoch` and `lead_years`. **Both are
+/// frozen here.** Together they *are* the mission clock: `epoch0 = impact −
+/// lead_years` is GDScript's `EPOCH0_TDB`, the origin every drawn `t` is measured
+/// from, and `impact_epoch` is `T_IMPACT`, which the event schedule and both
+/// porkchop axes are laid out against. Moving either does not put the rock on a
+/// different orbit — it slides the whole campaign along the timeline and
+/// invalidates the clock underneath everything already on screen.
+///
+/// The three that remain are exactly the ones that change the *orbit* while
+/// leaving the calendar alone, which is what makes a rebuild a bounded operation
+/// rather than a new session.
+///
+/// # Direction as two angles
+/// `v_rel_dir` is a 3-vector whose length is meaningless (the builder normalizes
+/// it), so three raw components would be one redundant knob and two unreadable
+/// ones. Azimuth/elevation in the ecliptic J2000 frame is the same information
+/// with the redundancy removed and a physical reading: elevation tilts the orbit
+/// out of the ecliptic, azimuth swings the approach from head-on (short period)
+/// through to catching Earth from behind (long period).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThreatOrbitKnobs {
+    /// Relative speed at the impact point, km/s.
+    pub v_rel_kms: f64,
+    /// Approach azimuth in the ecliptic plane, degrees, `atan2(y, x)`.
+    pub azimuth_deg: f64,
+    /// Approach elevation out of the ecliptic, degrees, `asin(z)`.
+    pub elevation_deg: f64,
+    /// Perpendicular offset of the impact point from Earth's centre, km.
+    ///
+    /// Reads like a b-plane number and is not one: the offset is laid
+    /// perpendicular to the relative velocity, so this is the **perigee** of the
+    /// geocentric hyperbola. Which is why its ceiling is Earth's radius, and why
+    /// the b-plane miss it produces is `b_offset · v_rel / v_inf`, over twice as
+    /// large. See [`ImpactorConfig::preview`].
+    pub b_offset_km: f64,
+}
+
+impl ThreatOrbitKnobs {
+    /// Read the knobs back off a config — the inverse of
+    /// [`to_config`](Self::to_config), and how an installed scenario says which
+    /// orbit it is on.
+    pub fn from_config(cfg: &ImpactorConfig) -> Self {
+        let d = cfg.v_rel_dir.normalize();
+        Self {
+            v_rel_kms: cfg.v_rel_kms,
+            azimuth_deg: d.y.atan2(d.x).to_degrees(),
+            elevation_deg: d.z.asin().to_degrees(),
+            b_offset_km: cfg.b_offset_km,
+        }
+    }
+
+    /// The shipping campaign's orbit, **derived from
+    /// [`ImpactorConfig::default`]** rather than restated.
+    ///
+    /// Restating would be the `payload_kg`-means-two-things bug again: the panel
+    /// would open on numbers that merely used to match the config. Because these
+    /// are derived, `the_shipping_knobs_round_trip_to_the_default_config` can
+    /// close the loop and prove the panel opens on the real thing.
+    pub fn shipping() -> Self {
+        Self::from_config(&ImpactorConfig::default())
+    }
+
+    /// The config these knobs describe — every frozen field taken straight from
+    /// [`ImpactorConfig::default`], so a knob can never quietly change one.
+    pub fn to_config(self) -> ImpactorConfig {
+        let az = self.azimuth_deg.to_radians();
+        let el = self.elevation_deg.to_radians();
+        ImpactorConfig {
+            v_rel_kms: self.v_rel_kms,
+            v_rel_dir: Vector3::new(el.cos() * az.cos(), el.cos() * az.sin(), el.sin()),
+            b_offset_km: self.b_offset_km,
+            ..Default::default()
+        }
+    }
+
+    /// Whether these are the shipping knobs, to within a knob's worth of
+    /// floating-point noise.
+    ///
+    /// The one thing this decides: whether the pinned
+    /// [`REQUIRED_DV_AT_ONE_PERIOD`] still describes the installed orbit, and so
+    /// whether the tractor bench may open with a margin already on it or has to
+    /// wait for a solve. Erring toward "not shipping" costs a solve; erring the
+    /// other way prints a stale margin, so the comparison is on the *config* the
+    /// builder will actually use, not on the angles the operator typed.
+    pub fn is_shipping(&self) -> bool {
+        let a = self.to_config();
+        let b = ImpactorConfig::default();
+        (a.v_rel_kms - b.v_rel_kms).abs() < 1.0e-9
+            && (a.b_offset_km - b.b_offset_km).abs() < 1.0e-9
+            && (a.v_rel_dir.normalize() - b.v_rel_dir.normalize()).norm() < 1.0e-9
+    }
+}
+
 /// A finished scenario and everything fixed at build time, ready to be handed to a
 /// [`MissionCore`] — the unit of work that crosses back from a worker thread.
 ///
@@ -611,6 +713,15 @@ pub struct BuiltScenario {
     ephemeris: Arc<Ephemeris>,
     /// Whether [`ephemeris`](Self::ephemeris) has the small-body kernel on it.
     small_bodies_mounted: bool,
+    /// The config this was built from, carried so [`MissionCore::install`] can
+    /// record *which* threat orbit is installed.
+    ///
+    /// Not a convenience: the one-period required-Δv anchor the tractor bench's
+    /// margin is formed from is a property of this config and nothing else, so a
+    /// core that has forgotten which orbit it is on cannot tell whether its anchor
+    /// still applies. Travels with the scenario for the same reason the almanac
+    /// and the orrery bodies do.
+    config: ImpactorConfig,
 }
 
 impl BuiltScenario {
@@ -667,6 +778,7 @@ impl BuiltScenario {
             nominal_frame,
             ephemeris,
             small_bodies_mounted,
+            config: *cfg,
         })
     }
 }
@@ -800,6 +912,20 @@ pub struct MissionCore {
     /// at add time, so the multi-body display scrubs cheaply. Independent of the
     /// threat/plan; indexed by insertion order.
     bodies: Vec<OrreryBody>,
+    /// Which threat orbit is installed — the config the current scenario was built
+    /// from. `None` before the first build.
+    config: Option<ImpactorConfig>,
+    /// The one-period required-Δv anchor **for the installed orbit**, m/s.
+    ///
+    /// `None` means "nobody has measured this orbit's requirement yet", and every
+    /// consumer must render that as an absence rather than fall back on
+    /// [`REQUIRED_DV_AT_ONE_PERIOD`] — which describes the shipping orbit and
+    /// nothing else. Set at [`install`](Self::install) time *only* when the
+    /// installed config is the shipping one (where the constant already is exactly
+    /// this measurement, paid for once and recorded); otherwise it stays empty
+    /// until [`solve_required_dv_anchor`] lands through
+    /// [`adopt_required_dv_anchor`](Self::adopt_required_dv_anchor).
+    required_dv_anchor: Option<f64>,
 }
 
 impl MissionCore {
@@ -855,6 +981,8 @@ impl MissionCore {
             tier2_shifts: None,
             plan: None,
             bodies: Vec::new(),
+            config: None,
+            required_dv_anchor: None,
         })
     }
 
@@ -935,6 +1063,42 @@ impl MissionCore {
         self.scenario = Some(Arc::new(built.scenario));
         self.plan = None; // a new scenario invalidates any prior plan
         self.bodies = bodies; // …and the catalog is replaced, not appended to
+
+        // The required-Δv anchor belongs to an orbit, so it dies with the old one.
+        // On the shipping orbit the answer is already known — `REQUIRED_DV_AT_ONE_PERIOD`
+        // *is* this solve, recorded — so seeding it costs nothing and keeps the
+        // ordinary boot exactly as immediate as it was before rebuilds existed.
+        // On any other orbit it stays `None`: an unmeasured requirement, shown as
+        // absent, until someone pays for it.
+        let knobs = ThreatOrbitKnobs::from_config(&built.config);
+        self.required_dv_anchor = knobs.is_shipping().then_some(REQUIRED_DV_AT_ONE_PERIOD);
+        self.config = Some(built.config);
+    }
+
+    /// Which threat orbit is installed, as the knobs that describe it — so a panel
+    /// can open on what is actually built rather than on what it last asked for.
+    pub fn threat_orbit_knobs(&self) -> Option<ThreatOrbitKnobs> {
+        self.config.as_ref().map(ThreatOrbitKnobs::from_config)
+    }
+
+    /// The one-period required-Δv anchor for the installed orbit, m/s, or `None` if
+    /// this orbit's requirement has not been measured. See the field's note.
+    pub fn required_dv_anchor(&self) -> Option<f64> {
+        self.required_dv_anchor
+    }
+
+    /// Adopt an anchor solved elsewhere (a worker thread; see
+    /// [`solve_required_dv_anchor`]).
+    ///
+    /// Rejects a non-positive or non-finite value rather than storing it: a zero
+    /// anchor would divide into a margin of zero and read as "this tow achieves
+    /// nothing", which is a physics claim, not a missing measurement.
+    pub fn adopt_required_dv_anchor(&mut self, dv_m_s: f64) -> bool {
+        if !dv_m_s.is_finite() || dv_m_s <= 0.0 {
+            return false;
+        }
+        self.required_dv_anchor = Some(dv_m_s);
+        true
     }
 
     /// Append catalog bodies to the **current** scenario, without replacing it.
@@ -1902,16 +2066,73 @@ pub const REQUIRED_DV_LAW_MIN_PERIODS: f64 = 1.0;
 /// to clear [`SAFE_PERIGEE_TARGET_M`] — `None` below
 /// [`REQUIRED_DV_LAW_MIN_PERIODS`], where the law does not hold.
 ///
-/// `Δv(n) ≈ Δv(1) / n`. An **estimate**, and labelled one wherever it is shown:
+/// `Δv(n) ≈ anchor / n`. An **estimate**, and labelled one wherever it is shown:
 /// the exact answer is `required_dv_along_track`, which bisects on the real
 /// perigee and costs 236.6 s measured at eight periods — not a number that can
 /// sit beside a live panel. Same bargain the planner's `REQ DV EST` already
 /// strikes, and for the same reason.
 ///
 /// Accuracy against the recorded sweep: 0.1 % at two periods, 3.9 % at eight.
-pub fn required_dv_estimate(lead_periods: f64) -> Option<f64> {
-    (lead_periods >= REQUIRED_DV_LAW_MIN_PERIODS)
-        .then(|| REQUIRED_DV_AT_ONE_PERIOD / lead_periods)
+///
+/// # Why the anchor is an argument and not [`REQUIRED_DV_AT_ONE_PERIOD`]
+/// There used to be a no-anchor convenience here that reached for the constant.
+/// It was deleted the moment the threat orbit became dialable, because the
+/// constant is a measurement of one specific rock on one specific heliocentric
+/// orbit. Put the threat somewhere else and it is a number about a different
+/// mission: the law's *shape* (`anchor/n`) is geometry and survives, its *scale*
+/// does not. A convenience overload would have been the easy call at every future
+/// call site and wrong at most of them — and wrong invisibly, since it returns a
+/// plausible number on the right order for any orbit.
+///
+/// See [`solve_required_dv_anchor`], which is where a non-shipping anchor comes
+/// from, and why it cannot be shortcut by rescaling this one.
+pub fn required_dv_estimate_from(anchor_dv_m_s: f64, lead_periods: f64) -> Option<f64> {
+    (lead_periods >= REQUIRED_DV_LAW_MIN_PERIODS && anchor_dv_m_s > 0.0)
+        .then(|| anchor_dv_m_s / lead_periods)
+}
+
+/// Solve the one-period required-Δv anchor for whatever orbit `sc` is on — the
+/// scale [`required_dv_estimate_from`] needs after a rebuild.
+///
+/// One `required_dv_along_track` at a one-period lead against
+/// [`SAFE_PERIGEE_TARGET_M`], i.e. exactly the point
+/// [`REQUIRED_DV_AT_ONE_PERIOD`] records for the shipping config — so running
+/// this on the shipping config must reproduce that constant, which
+/// `the_anchor_solve_reproduces_the_shipping_constant` holds it to.
+///
+/// **Expensive, and it belongs on a worker** — measured **28.8 s**, against ~10 s
+/// for the scenario build it follows.
+///
+/// # It cannot be replaced by rescaling the shipping anchor
+/// The obvious shortcut is `Δv ∝ 1/lead` ⇒ scale [`REQUIRED_DV_AT_ONE_PERIOD`] by
+/// the period ratio and skip the solve. Measured on a 2.66 yr orbit against the
+/// 0.79 yr shipping one, that prediction is out by **~3×** (it expects a 3.4×
+/// reduction; the real requirement falls ~10×). The two orbits share a `v_inf` and
+/// a `b_offset`, so they need the *same* b-plane shift — what differs is how much
+/// of that shift a heliocentric along-track nudge buys, and that is approach
+/// geometry, not period. `a_rebuilt_orbit_changes_what_the_tractor_must_deliver`
+/// pins the gap, because the shortcut would fail invisibly: a plausible number, on
+/// the right order, wrong for every orbit.
+///
+/// The clamp guard is not defensive noise: [`RealFieldScenario::sweep`] silently
+/// pulls a lead back to the campaign start if one period would precede it, and a
+/// clamped point is an anchor at *some other* lead being labelled as the
+/// one-period one — the exact substitution this function exists to prevent.
+pub fn solve_required_dv_anchor(sc: &RealFieldScenario) -> Result<f64, ScenarioError> {
+    let points = sc.sweep(&[REQUIRED_DV_LAW_MIN_PERIODS], SAFE_PERIGEE_TARGET_M)?;
+    let p = points.first().ok_or_else(|| {
+        ScenarioError::Integration("the anchor sweep returned no points".into())
+    })?;
+    if (p.lead_periods - REQUIRED_DV_LAW_MIN_PERIODS).abs() > 1.0e-6 {
+        return Err(ScenarioError::Integration(format!(
+            "one period ({:.3} yr) does not fit inside the campaign, so the sweep \
+             clamped the anchor to {:.4} periods — this orbit cannot be scored by \
+             the 1/lead law",
+            sc.period_seconds / (365.25 * 86_400.0),
+            p.lead_periods,
+        )));
+    }
+    Ok(p.required_dv)
 }
 
 /// The impulsive-equivalent Δv of a tow: what a single along-track impulse at
@@ -2139,8 +2360,21 @@ pub fn probe_tow_plan(
 
 /// Score a [`TractorPlan`] with arithmetic only. `period_seconds` is the
 /// threat's heliocentric period, which converts the lead into the periods the
-/// required-Δv law is stated in.
-pub fn tractor_readout(plan: &TractorPlan, period_seconds: f64) -> TractorReadout {
+/// required-Δv law is stated in — and it must be the **built** scenario's period,
+/// never [`ThreatOrbitPreview::period_seconds`], which is 0.23 % off and lands
+/// straight in the margin (see that field's note).
+///
+/// `anchor_dv_m_s` is the one-period required Δv for the orbit currently
+/// installed. `None` — the honest state after a rebuild, before
+/// [`solve_required_dv_anchor`] has landed — leaves `required_dv_estimate_m_s`
+/// and `margin` absent, the same way a sub-one-period lead does. A panel that
+/// prints no requirement is telling the truth; one that prints the previous
+/// orbit's requirement is not.
+pub fn tractor_readout(
+    plan: &TractorPlan,
+    period_seconds: f64,
+    anchor_dv_m_s: Option<f64>,
+) -> TractorReadout {
     let hover = plan.hover();
     let flyable = plan.is_flyable();
     // A spacecraft inside the asteroid has no tow to report. Reporting `None`
@@ -2156,7 +2390,7 @@ pub fn tractor_readout(plan: &TractorPlan, period_seconds: f64) -> TractorReadou
     } else {
         0.0
     };
-    let required = required_dv_estimate(lead_periods);
+    let required = anchor_dv_m_s.and_then(|a| required_dv_estimate_from(a, lead_periods));
     TractorReadout {
         tow_acceleration_m_s2: tow,
         station_keeping_thrust_n: flyable
@@ -3726,7 +3960,8 @@ mod tests {
 
         // Inside its stated range the law is good to a few percent.
         let (two_periods, live_two_periods) = live[2];
-        let est = required_dv_estimate(two_periods).expect("2 periods is inside the law");
+        let est = required_dv_estimate_from(REQUIRED_DV_AT_ONE_PERIOD, two_periods)
+            .expect("2 periods is inside the law");
         let est_rel = (est - live_two_periods).abs() / live_two_periods;
         assert!(
             est_rel < 0.05,
@@ -3743,7 +3978,7 @@ mod tests {
         // guess someone could "tidy" away.
         let (half_period, live_half_period) = live[0];
         assert!(
-            required_dv_estimate(half_period).is_none(),
+            required_dv_estimate_from(REQUIRED_DV_AT_ONE_PERIOD, half_period).is_none(),
             "the estimate must decline below {REQUIRED_DV_LAW_MIN_PERIODS} period(s), \
              not extrapolate into a regime it does not describe"
         );
@@ -4891,18 +5126,333 @@ mod tests {
             tow_equivalent_dv(a, lead, lead)
         );
 
-        // The required-Δv law and its floor.
-        assert_eq!(required_dv_estimate(1.0), Some(REQUIRED_DV_AT_ONE_PERIOD));
-        assert_eq!(required_dv_estimate(2.0), Some(REQUIRED_DV_AT_ONE_PERIOD / 2.0));
-        assert!(required_dv_estimate(0.999).is_none());
+        // The required-Δv law and its floor, on the shipping orbit's anchor.
+        let ship = REQUIRED_DV_AT_ONE_PERIOD;
+        assert_eq!(required_dv_estimate_from(ship, 1.0), Some(ship));
+        assert_eq!(required_dv_estimate_from(ship, 2.0), Some(ship / 2.0));
+        assert!(required_dv_estimate_from(ship, 0.999).is_none());
+        // An unmeasured (or nonsensical) anchor yields no estimate rather than a
+        // zero one — the same absence the floor produces. See the function's note
+        // on why there is no anchor-free overload to fall back on.
+        assert!(required_dv_estimate_from(0.0, 4.0).is_none());
+        assert!(required_dv_estimate_from(-1.0, 4.0).is_none());
         // The 8-period constant the headlines quote must sit on the same law it
         // anchors, or the panel and HANDOFF describe different curves.
-        let est_eight = required_dv_estimate(8.0).expect("8 periods is inside the law");
+        let est_eight = required_dv_estimate_from(ship, 8.0).expect("8 periods is inside the law");
         let rel8 = (est_eight - REQUIRED_DV_AT_EIGHT_PERIODS).abs() / REQUIRED_DV_AT_EIGHT_PERIODS;
         assert!(
             rel8 < 0.05,
             "the law and the recorded 8-period point must agree to a few percent: \
              est {est_eight:.6} vs recorded {REQUIRED_DV_AT_EIGHT_PERIODS:.6} (rel {rel8:.3})"
+        );
+    }
+
+    /// **The panel must open on the config, not on numbers that used to match it.**
+    ///
+    /// `ThreatOrbitKnobs::shipping()` is derived from `ImpactorConfig::default()`,
+    /// so this closes the loop the other way: turn the derived knobs back into a
+    /// config and it must be the one they came from. Change the default's approach
+    /// direction and this fails here rather than in a panel quietly showing the old
+    /// azimuth beside a threat built on the new one.
+    ///
+    /// The direction comparison is on the **normalized** vector because that is
+    /// what the builder uses — `v_rel_dir`'s length is discarded, so a round trip
+    /// through two angles cannot and need not preserve it. Kernel-free.
+    #[test]
+    fn the_shipping_knobs_round_trip_to_the_default_config() {
+        let cfg = ImpactorConfig::default();
+        let round = ThreatOrbitKnobs::shipping().to_config();
+
+        assert_eq!(round.v_rel_kms, cfg.v_rel_kms);
+        assert_eq!(round.b_offset_km, cfg.b_offset_km);
+        let drift = (round.v_rel_dir.normalize() - cfg.v_rel_dir.normalize()).norm();
+        assert!(
+            drift < 1.0e-12,
+            "az/el must reconstruct the default approach direction exactly (drift {drift:.2e})"
+        );
+        // The two frozen fields must survive a trip through the knobs untouched —
+        // they are the mission clock, and a knob that moved one would slide the
+        // whole campaign along the timeline. See `ThreatOrbitKnobs`.
+        assert_eq!(round.impact_epoch, cfg.impact_epoch);
+        assert_eq!(round.lead_years, cfg.lead_years);
+
+        assert!(ThreatOrbitKnobs::shipping().is_shipping());
+        // And it must be able to say *no*, or seeding the pinned anchor would be
+        // unconditional and every rebuilt orbit would inherit a stale margin.
+        let moved = ThreatOrbitKnobs {
+            azimuth_deg: ThreatOrbitKnobs::shipping().azimuth_deg + 1.0,
+            ..ThreatOrbitKnobs::shipping()
+        };
+        assert!(!moved.is_shipping(), "one degree of azimuth is a different orbit");
+    }
+
+    /// **No anchor means no margin — not a margin of zero, and not last orbit's.**
+    ///
+    /// The state this pins is the one a rebuild creates: a threat that is fully
+    /// built, drawable and probeable, whose *requirement* nobody has measured yet.
+    /// The readout must render that as the same absence a sub-one-period lead
+    /// produces. A zero margin would read as "this tow achieves nothing", which is
+    /// a physics claim; the shipping anchor would read as a number about a
+    /// different mission. Kernel-free.
+    #[test]
+    fn a_readout_with_no_anchor_declines_to_print_a_margin() {
+        let plan = TractorPlan {
+            spacecraft_mass_kg: 2.0e4,
+            hover_radii: TRACTOR_HOVER_RADII,
+            rock_radius_m: THREAT_RADIUS_M,
+            lead_seconds: 8.0 * 0.79 * 365.25 * 86_400.0,
+            duration_seconds: 8.0 * 0.79 * 365.25 * 86_400.0,
+            retrograde: false,
+        };
+        let period = 0.79 * 365.25 * 86_400.0;
+
+        let blind = tractor_readout(&plan, period, None);
+        assert!(blind.required_dv_estimate_m_s.is_none());
+        assert!(blind.margin.is_none());
+        // Everything that does *not* depend on the requirement must still be there:
+        // an unmeasured requirement is not a broken panel.
+        assert!(blind.tow_acceleration_m_s2.is_some());
+        assert!(blind.equivalent_dv_m_s > 0.0);
+
+        // With an anchor the two keys come back, and the margin is formed from the
+        // equivalent Δv rather than the delivered one — the +21 % lie this layer
+        // already refuses. Re-asserted here because `tractor_readout` gained an
+        // argument, and a signature change is exactly when that could be rewired.
+        let scored = tractor_readout(&plan, period, Some(REQUIRED_DV_AT_ONE_PERIOD));
+        let req = scored.required_dv_estimate_m_s.expect("anchored");
+        let margin = scored.margin.expect("anchored");
+        assert!((margin - scored.equivalent_dv_m_s / req).abs() < 1.0e-12);
+        assert!(
+            margin < scored.delivered_dv_m_s / req,
+            "the margin must come from the impulsive equivalent, not the delivered Δv"
+        );
+    }
+
+    /// **The bench must be able to teach success, not only failure.**
+    ///
+    /// The shipping configuration is 12.6× short, which is the honest headline —
+    /// but a teaching surface whose every reachable setting fails teaches only that
+    /// the exercise is rigged. This walks the knobs to a plan the panel can
+    /// actually reach and shows the margin crossing 1.
+    ///
+    /// It is arithmetic on the shipping anchor, so it costs nothing, and it pins
+    /// the *reachability* rather than the value: the point is that a closing plan
+    /// exists inside the knob ranges `Sim.TRACTOR_KNOBS` declares, not that it
+    /// closes by any particular factor. Kernel-free.
+    #[test]
+    fn some_reachable_tractor_plan_actually_closes() {
+        // All four inside the shipping knob ranges: mass ≤ 4000 t, hover ≥ the
+        // plume wall, the default rock, and a lead ≤ 11.5 orbits at full duty.
+        let period = 0.79 * 365.25 * 86_400.0;
+        let lead = 11.5 * period;
+        let plan = TractorPlan {
+            spacecraft_mass_kg: 4.0e6,
+            hover_radii: 1.15,
+            rock_radius_m: THREAT_RADIUS_M,
+            lead_seconds: lead,
+            duration_seconds: lead,
+            retrograde: false,
+        };
+        assert!(plan.is_flyable() && plan.holds_station());
+
+        let r = tractor_readout(&plan, period, Some(REQUIRED_DV_AT_ONE_PERIOD));
+        let margin = r.margin.expect("11.5 periods is inside the law");
+        eprintln!(
+            "closing plan: {:.0} t at {:.2} radii for {:.1} orbits — margin {margin:.2}x",
+            plan.spacecraft_mass_kg / 1000.0,
+            plan.hover_radii,
+            r.lead_periods,
+        );
+        assert!(
+            margin >= 1.0,
+            "the knobs must be able to reach a plan that closes; best here was {margin:.3}x"
+        );
+    }
+
+    /// Kernel-gated (release-run). **The pinned anchor and the live solve must be
+    /// the same measurement**, and this is what measures how much that solve costs.
+    ///
+    /// `REQUIRED_DV_AT_ONE_PERIOD` is a recorded number from `curve.json`. Once a
+    /// rebuilt orbit can ask for its own anchor, the code path that answers has to
+    /// be the *same* path that produced the recorded one — otherwise the shipping
+    /// orbit and every other orbit are scored by two different solvers, and only
+    /// the shipping one is validated.
+    ///
+    /// The elapsed time is printed rather than asserted: it is the number that
+    /// decides whether the anchor may ride the build (it may not) and whether the
+    /// frontend must show progress while it runs (it must). A threshold here would
+    /// be a flaky benchmark; the doc on `begin_required_dv_anchor` carries the
+    /// figure.
+    #[test]
+    fn the_anchor_solve_reproduces_the_shipping_constant() {
+        if !have_kernels() {
+            eprintln!("skipping the_anchor_solve_reproduces_the_shipping_constant: no DE kernel");
+            return;
+        }
+        let mut mc = MissionCore::load().expect("load kernels");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+
+        // Seeded, not solved: the shipping orbit arrives with its anchor already
+        // known, which is what keeps an ordinary boot as immediate as it was.
+        assert_eq!(mc.required_dv_anchor(), Some(REQUIRED_DV_AT_ONE_PERIOD));
+        assert!(
+            mc.threat_orbit_knobs().expect("built").is_shipping(),
+            "a default build must report itself as the shipping orbit"
+        );
+
+        let sc = mc.scenario_arc().expect("scenario");
+        let t0 = std::time::Instant::now();
+        let live = solve_required_dv_anchor(&sc).expect("the anchor solves");
+        let secs = t0.elapsed().as_secs_f64();
+        eprintln!(
+            "one-period anchor solve: {secs:.1} s — live {live:.6} m/s vs recorded \
+             {REQUIRED_DV_AT_ONE_PERIOD:.6}"
+        );
+
+        let rel = (live - REQUIRED_DV_AT_ONE_PERIOD).abs() / REQUIRED_DV_AT_ONE_PERIOD;
+        assert!(
+            rel < 0.02,
+            "the live anchor solve drifted from the recorded constant: \
+             {live:.6} vs {REQUIRED_DV_AT_ONE_PERIOD:.6} (rel {rel:.4}) — one of the two \
+             is describing a different curve"
+        );
+    }
+
+    /// Kernel-gated (release-run). **The point of the whole threat-orbit layer, in
+    /// one measurement: a different orbit is a different mission.**
+    ///
+    /// Rebuild the threat on a long-period orbit — the operator catching Earth from
+    /// behind instead of head-on — and check three things that must all move
+    /// together:
+    ///
+    /// 1. The core stops calling itself the shipping orbit, so the pinned anchor is
+    ///    *not* seeded and the margin goes absent rather than stale. This is the
+    ///    silent-failure mode the layer exists to prevent: everything else about a
+    ///    rebuilt scenario works, so a margin that kept printing the old orbit's
+    ///    requirement would look entirely healthy.
+    /// 2. Its own anchor, solved live, differs materially from the shipping one.
+    ///    A rebuild that quietly produced the same requirement would mean the knobs
+    ///    were decorative.
+    /// 3. **The same tractor plan scores differently on the two orbits** — which is
+    ///    the thing an operator is supposed to learn by turning these knobs, and the
+    ///    only assertion here that is about teaching rather than correctness.
+    ///
+    /// ~40 s: one build plus one anchor solve.
+    #[test]
+    fn a_rebuilt_orbit_changes_what_the_tractor_must_deliver() {
+        if !have_kernels() {
+            eprintln!("skipping a_rebuilt_orbit_changes_what_the_tractor_must_deliver: no kernel");
+            return;
+        }
+        // Through the knobs, not through a raw config: this is the path the frontend
+        // takes, so it is the path that must be exercised. Near-prograde — `v_inf`
+        // added to Earth's 29.8 km/s instead of subtracted from it.
+        let knobs = ThreatOrbitKnobs {
+            azimuth_deg: -168.1,
+            elevation_deg: 2.95,
+            ..ThreatOrbitKnobs::shipping()
+        };
+        assert!(!knobs.is_shipping());
+
+        let mut mc = MissionCore::load().expect("load kernels");
+        mc.build_scenario(&knobs.to_config())
+            .expect("the rebuilt orbit builds");
+
+        // (1) No seeded anchor, because this is not the orbit the constant describes.
+        assert_eq!(
+            mc.required_dv_anchor(),
+            None,
+            "a rebuilt orbit must arrive with its requirement unmeasured, not with \
+             the shipping orbit's"
+        );
+        let installed = mc.threat_orbit_knobs().expect("built");
+        assert!(!installed.is_shipping());
+        assert!(
+            (installed.azimuth_deg - knobs.azimuth_deg).abs() < 1.0e-9,
+            "the core must report the orbit it was built on"
+        );
+
+        let period = mc.period_seconds();
+        let shipping_period = 0.7899 * 365.25 * 86_400.0;
+        assert!(
+            period > 1.5 * shipping_period,
+            "this geometry is meant to be the long-period end: got {:.3} yr",
+            period / (365.25 * 86_400.0)
+        );
+
+        // (2) Its own requirement, solved the same way the recorded one was.
+        let sc = mc.scenario_arc().expect("scenario");
+        let anchor = solve_required_dv_anchor(&sc).expect("the rebuilt orbit's anchor solves");
+        assert!(mc.adopt_required_dv_anchor(anchor));
+        let spread = (anchor - REQUIRED_DV_AT_ONE_PERIOD).abs() / REQUIRED_DV_AT_ONE_PERIOD;
+        eprintln!(
+            "rebuilt orbit: T {:.3} yr (shipping 0.790), one-period anchor {anchor:.6} m/s \
+             vs shipping {REQUIRED_DV_AT_ONE_PERIOD:.6} ({:+.1}%)",
+            period / (365.25 * 86_400.0),
+            100.0 * (anchor - REQUIRED_DV_AT_ONE_PERIOD) / REQUIRED_DV_AT_ONE_PERIOD,
+        );
+        assert!(
+            spread > 0.2,
+            "a different orbit must want a materially different Δv, or the knobs are \
+             decorative: {anchor:.6} vs {REQUIRED_DV_AT_ONE_PERIOD:.6} ({:.1}%)",
+            100.0 * spread
+        );
+
+        // **And the solve cannot be shortcut by rescaling the period.** This is the
+        // tempting optimisation — one period is 3.36× longer here, the 1/lead law
+        // says Δv ∝ 1/lead, so scale the shipping anchor and skip 28.8 s. Measured,
+        // that prediction is out by ~3×: the requirement fell ~10×, not ~3.4×.
+        //
+        // `v_inf` and `b_offset` are untouched between these two orbits, so the
+        // b-plane shift being bought is the *same* shift — what changed is how much
+        // of it a heliocentric along-track nudge buys, which is a property of the
+        // approach geometry and not of the period. Pinned because a future
+        // "optimisation" here would be invisible: it would produce a plausible
+        // number, on the right order, for every orbit, and be wrong on all of them.
+        let period_scaled = REQUIRED_DV_AT_ONE_PERIOD * shipping_period / period;
+        let shortcut_error = (period_scaled - anchor).abs() / anchor;
+        eprintln!(
+            "period-scaling shortcut would predict {period_scaled:.6} m/s — off by \
+             {:.1}x, which is why the anchor is solved and not scaled",
+            period_scaled / anchor,
+        );
+        assert!(
+            shortcut_error > 1.0,
+            "if 1/period predicted the anchor this well ({period_scaled:.6} vs \
+             {anchor:.6}), the 28.8 s solve would not be worth paying for — re-check \
+             before deleting it"
+        );
+
+        // (3) The teaching claim: one plan, two orbits, two verdicts. Same
+        // spacecraft, same rock, same lead **in years** — only the orbit differs,
+        // and it moves both sides of the margin (the lead buys a different number
+        // of orbits, and those orbits demand a different Δv).
+        let lead = 6.0 * 365.25 * 86_400.0;
+        let plan = TractorPlan {
+            spacecraft_mass_kg: 2.0e5,
+            hover_radii: TRACTOR_HOVER_RADII,
+            rock_radius_m: THREAT_RADIUS_M,
+            lead_seconds: lead,
+            duration_seconds: lead,
+            retrograde: false,
+        };
+        let here = tractor_readout(&plan, period, Some(anchor));
+        let there = tractor_readout(&plan, shipping_period, Some(REQUIRED_DV_AT_ONE_PERIOD));
+        let (m_here, m_there) = (
+            here.margin.expect("inside the law"),
+            there.margin.expect("inside the law"),
+        );
+        eprintln!(
+            "same 200 t plan over a 6.0 yr lead: rebuilt orbit {:.2} periods -> margin \
+             {m_here:.3}x, shipping orbit {:.2} periods -> margin {m_there:.3}x",
+            here.lead_periods, there.lead_periods,
+        );
+        let ratio = (m_here / m_there).max(m_there / m_here);
+        assert!(
+            ratio > 1.2,
+            "the same plan must score visibly differently on the two orbits, or the \
+             bench cannot teach what the orbit costs: {m_here:.3}x vs {m_there:.3}x"
         );
     }
 

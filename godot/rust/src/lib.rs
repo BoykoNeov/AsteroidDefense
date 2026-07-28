@@ -28,8 +28,9 @@ use asteroid_core::{Epoch, OrbitalElements};
 use mission_core::{
     display_comet, heaviest_deliverable_kg, launch_vehicle, launch_vehicle_count, load_neo_bodies,
     measure_tier2_shifts, mount_small_bodies, probe_tow_plan, required_cell_mass, seed_orrery_body,
-    tractor_readout as score_tractor_plan, verify_porkchop_cell, BuiltScenario, CellVerdict,
-    MissionCore, OrreryBody, PorkchopView, Tier2Shifts, TractorPlan, REQUIRED_DV_LAW_MIN_PERIODS,
+    solve_required_dv_anchor, tractor_readout as score_tractor_plan, verify_porkchop_cell,
+    BuiltScenario, CellVerdict, MissionCore, OrreryBody, PorkchopView, ThreatOrbitKnobs,
+    Tier2Shifts, TractorPlan, REQUIRED_DV_LAW_MIN_PERIODS,
     SB441_BODIES, THREAT_RADIUS_M, TRACTOR_HOVER_RADII,
 };
 use mission_core::tractor_min_hover_radii;
@@ -147,6 +148,19 @@ struct Mission {
     /// The last mass requirement and the cell it belongs to. Same staleness
     /// discipline as `verdict`: shown only against the cell it was solved for.
     mass_requirement: Option<(i64, i64, MassSolveOutcome)>,
+    /// The in-flight one-period required-Δv anchor solve — a **seventh** channel.
+    ///
+    /// Unlike the other six this one is not fired repeatedly: it is asked once per
+    /// *orbit*, because that is what it describes. It gets its own channel anyway,
+    /// on the same principle — a rebuilt threat wants its requirement measured, and
+    /// that must not block or be blocked by the grid the operator rebuilds next.
+    ///
+    /// No pending-identity field beside it, and that is deliberate rather than an
+    /// omission: `begin_required_dv_anchor` cannot start while a build is in
+    /// flight and a build cannot start while this is, so the orbit it was solved
+    /// for is necessarily still the installed one when it lands. The pairing the
+    /// other workers need is enforced here by exclusion instead.
+    anchor_build: Option<mpsc::Receiver<Result<f64, String>>>,
     error: GString,
     base: Base<RefCounted>,
 }
@@ -328,12 +342,101 @@ impl Mission {
     /// thread boundary — only a plain `Arc` out and a `BuiltScenario` back.
     #[func]
     fn begin_build_scenario(&mut self) -> bool {
+        self.spawn_build(ImpactorConfig::default())
+    }
+
+    /// Rebuild the campaign with the threat on a **different heliocentric orbit**.
+    ///
+    /// Same worker, same ~10 s, same [`poll_build`](Self::poll_build) — the only
+    /// difference is the config. `azimuth_deg`/`elevation_deg` give the approach
+    /// direction; see [`ThreatOrbitKnobs`] for why those three knobs and not the
+    /// other two.
+    ///
+    /// # It refuses while *any* other worker is in flight, and that is not caution
+    /// The porkchop grid, the Tier-2 preview, the cell verify, the mass solve and
+    /// the tow probe each hold an `Arc` clone of the **current** scenario. Start a
+    /// rebuild underneath one and it keeps computing — correctly — about a threat
+    /// that no longer exists, then lands *after* `poll_build` has cleared the
+    /// state it belongs to and installs itself as current. Every one of those is a
+    /// number attributed to the wrong orbit.
+    ///
+    /// Refusing by name is the cheap fix and the honest one: the operator is told
+    /// what to wait for. A generation counter threaded through six result types
+    /// would be the expensive fix, and it would still have to say the same thing.
+    ///
+    /// Returns `false` + [`last_error`](Self::last_error) if something is running,
+    /// the kernels are not loaded, or the geometry is one
+    /// [`ImpactorConfig::preview`] already knows the builder would reject — the
+    /// last of which is the whole reason the preview exists, since the builder
+    /// charges 10 s to reach the same verdict.
+    #[func]
+    fn begin_rebuild_scenario(
+        &mut self,
+        v_rel_kms: f64,
+        azimuth_deg: f64,
+        elevation_deg: f64,
+        b_offset_km: f64,
+    ) -> bool {
+        if let Some(busy) = self.busy_worker() {
+            self.error = format!(
+                "cannot rebuild the threat while {busy} is running — it is solving \
+                 against the orbit that is about to be replaced"
+            )
+            .as_str()
+            .into();
+            return false;
+        }
+        let Some(core) = self.core.as_ref() else {
+            self.error = "load() must succeed before begin_rebuild_scenario()".into();
+            return false;
+        };
+        let cfg = ThreatOrbitKnobs {
+            v_rel_kms,
+            azimuth_deg,
+            elevation_deg,
+            b_offset_km,
+        }
+        .to_config();
+
+        // The cheap wall in front of the expensive one. `preview` reaches the same
+        // two rejections in microseconds that `build_with` reaches in ~10 s.
+        match cfg.preview(&core.ephemeris_arc()) {
+            Err(e) => {
+                self.error = e.to_string().as_str().into();
+                return false;
+            }
+            Ok(p) if !p.is_hit => {
+                self.error = format!(
+                    "this geometry misses Earth: the incoming asymptote passes \
+                     {:.0} km from the centre, outside the {:.0} km capture disc — \
+                     there is no impact to deflect",
+                    p.impact_parameter / 1000.0,
+                    p.capture_radius / 1000.0,
+                )
+                .as_str()
+                .into();
+                return false;
+            }
+            Ok(_) => {}
+        }
+        self.spawn_build(cfg)
+    }
+
+    /// The shared body of [`begin_build_scenario`](Self::begin_build_scenario) and
+    /// [`begin_rebuild_scenario`](Self::begin_rebuild_scenario) — one worker, one
+    /// small-body mount, one catalog seed, parameterised only by the config.
+    ///
+    /// Extracted rather than copied: the boot path and the rebuild path must
+    /// produce scenarios that differ *only* in their orbit. A second worker written
+    /// beside this one would be free to drift in what it mounts or what it seeds,
+    /// and the difference would show up as a rebuilt threat with no comet.
+    fn spawn_build(&mut self, cfg: ImpactorConfig) -> bool {
         if self.build.is_some() {
             self.error = "a scenario build is already in flight".into();
             return false;
         }
         let Some(core) = self.core.as_ref() else {
-            self.error = "load() must succeed before begin_build_scenario()".into();
+            self.error = "load() must succeed before building a scenario".into();
             return false;
         };
         let served = core.ephemeris_arc();
@@ -361,8 +464,7 @@ impl Mission {
             // The error is flattened to a String on this side of the channel: only
             // the message ever reaches the HUD, and a plain String is unambiguously
             // safe to send.
-            let result =
-                BuiltScenario::build(Arc::clone(&eph), &ImpactorConfig::default(), mounted)
+            let result = BuiltScenario::build(Arc::clone(&eph), &cfg, mounted)
                     // The Tier-2 shift preview is DELIBERATELY not measured here: it is ~64 s
                     // of propagation that would sit *before* `install`, delaying the threat
                     // solution and the planner — the core gameplay — by that much. It is
@@ -1097,6 +1199,273 @@ impl Mission {
         heaviest_deliverable_kg()
     }
 
+    // --- The threat orbit ------------------------------------------------------
+
+    /// Which named worker is running, for a refusal message that says what to wait
+    /// for. `None` when the core is idle.
+    ///
+    /// Order is worst-first: if several are somehow in flight, the message names
+    /// the longest one rather than whichever happens to be checked first.
+    fn busy_worker(&self) -> Option<&'static str> {
+        if self.build.is_some() {
+            Some("a scenario build")
+        } else if self.anchor_build.is_some() {
+            Some("the required-Δv anchor solve")
+        } else if self.tier2_build.is_some() {
+            Some("the Tier-2 force-model preview")
+        } else if self.porkchop_build.is_some() {
+            Some("the launch-window map build")
+        } else if self.mass_build.is_some() {
+            Some("the required-mass solve")
+        } else if self.verify_build.is_some() {
+            Some("a launch-window cell verify")
+        } else if self.tow_build.is_some() {
+            Some("a gravity-tractor probe")
+        } else {
+            None
+        }
+    }
+
+    /// The shipping threat orbit as knobs, plus the bounds a control must respect.
+    ///
+    /// Same contract as [`tractor_defaults`](Self::tractor_defaults): GDScript
+    /// restates no physics constant. The shipping values are *derived from*
+    /// `ImpactorConfig::default()` rather than copied, so the panel cannot open on
+    /// numbers that merely used to match the config.
+    ///
+    /// `max_b_offset_km` is Earth's equatorial radius, and it is a real bound, not
+    /// a tidy one: the impact offset is laid perpendicular to the relative
+    /// velocity, so it *is* the geocentric perigee, and past `R⊕` the designed
+    /// impact stops being an impact. There is deliberately **no**
+    /// `min_b_offset_km`, because that wall moves with `v_rel_kms` (Earth escape at
+    /// the offset distance) and a fixed number would be wrong at every other speed
+    /// — [`threat_orbit_preview`](Self::threat_orbit_preview) reports it live
+    /// instead.
+    #[func]
+    fn threat_orbit_defaults(&self) -> VarDictionary {
+        let k = ThreatOrbitKnobs::shipping();
+        let mut d = VarDictionary::new();
+        d.set("v_rel_kms", k.v_rel_kms);
+        d.set("azimuth_deg", k.azimuth_deg);
+        d.set("elevation_deg", k.elevation_deg);
+        d.set("b_offset_km", k.b_offset_km);
+        d.set(
+            "max_b_offset_km",
+            asteroid_core::geometry::EARTH_EQUATORIAL_RADIUS_M / 1000.0,
+        );
+        d
+    }
+
+    /// Which threat orbit is **installed**, as knobs — empty before the first
+    /// build.
+    ///
+    /// Distinct from [`threat_orbit_defaults`](Self::threat_orbit_defaults) the
+    /// moment a rebuild lands, and that difference is the point: a panel showing
+    /// the knobs it last sent is showing an intention, while this is the orbit the
+    /// numbers beside it were actually computed on. `is_shipping` is what decides
+    /// whether the pinned required-Δv anchor still applies.
+    #[func]
+    fn threat_orbit(&self) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        let Some(k) = self.core.as_ref().and_then(MissionCore::threat_orbit_knobs) else {
+            return d;
+        };
+        d.set("v_rel_kms", k.v_rel_kms);
+        d.set("azimuth_deg", k.azimuth_deg);
+        d.set("elevation_deg", k.elevation_deg);
+        d.set("b_offset_km", k.b_offset_km);
+        d.set("is_shipping", k.is_shipping());
+        d
+    }
+
+    /// What a set of knobs would produce, in **closed form** — free, and safe to
+    /// call every frame while a knob is turning.
+    ///
+    /// This is the whole reason the threat orbit is dialable at all. A rebuild is
+    /// ~10 s and can fail two different ways; without a preview the panel would be
+    /// a set of knobs whose only feedback is a ten-second wait followed by an
+    /// error. With it, the operator watches the orbit change as they turn.
+    ///
+    /// Keys always present: `ok`. When `ok`: `v_inf_m_s`, `impact_parameter_m`,
+    /// `capture_radius_m`, `is_hit`, `semi_major_axis_m`, `eccentricity`,
+    /// `inclination_deg`, `period_seconds`. When not: `error`.
+    ///
+    /// # `is_hit` is false, not an error
+    /// A geometry that has stopped being an impact still has a perfectly good
+    /// `v_inf` and a perfectly good miss distance, and those two numbers are
+    /// exactly what explains *why* it stopped. Collapsing that to a refusal would
+    /// throw away the explanation and leave the operator guessing which knob to
+    /// turn back.
+    ///
+    /// # `period_seconds` labels; it does not score
+    /// Osculating at the impact epoch, against a build that reports vis-viva at the
+    /// seed 12 years earlier — measured 0.23 % apart at worst. Fine on a readout,
+    /// not fine divided into a lead to form a margin. The tractor bench keeps
+    /// taking its period from the built scenario.
+    #[func]
+    fn threat_orbit_preview(
+        &self,
+        v_rel_kms: f64,
+        azimuth_deg: f64,
+        elevation_deg: f64,
+        b_offset_km: f64,
+    ) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        let Some(core) = self.core.as_ref() else {
+            d.set("ok", false);
+            d.set("error", "kernels are not loaded");
+            return d;
+        };
+        let cfg = ThreatOrbitKnobs {
+            v_rel_kms,
+            azimuth_deg,
+            elevation_deg,
+            b_offset_km,
+        }
+        .to_config();
+        match cfg.preview(&core.ephemeris_arc()) {
+            Ok(p) => {
+                d.set("ok", true);
+                d.set("v_inf_m_s", p.v_inf);
+                d.set("impact_parameter_m", p.impact_parameter);
+                d.set("capture_radius_m", p.capture_radius);
+                d.set("is_hit", p.is_hit);
+                d.set("semi_major_axis_m", p.semi_major_axis_m);
+                d.set("eccentricity", p.eccentricity);
+                d.set("inclination_deg", p.inclination_rad.to_degrees());
+                d.set("period_seconds", p.period_seconds);
+            }
+            Err(e) => {
+                d.set("ok", false);
+                d.set("error", e.to_string().as_str());
+            }
+        }
+        d
+    }
+
+    // --- The required-Δv anchor ------------------------------------------------
+
+    /// The one-period required-Δv anchor for the **installed** orbit, m/s, or `0`
+    /// if this orbit's requirement has not been measured.
+    ///
+    /// Zero is a safe sentinel here only because a real anchor cannot be zero — a
+    /// threat that needs no deflection is not a threat — and
+    /// `adopt_required_dv_anchor` refuses to store one. Callers should still prefer
+    /// [`has_required_dv_anchor`](Self::has_required_dv_anchor), which says the
+    /// same thing without asking anyone to know that.
+    #[func]
+    fn required_dv_anchor(&self) -> f64 {
+        self.core
+            .as_ref()
+            .and_then(MissionCore::required_dv_anchor)
+            .unwrap_or(0.0)
+    }
+
+    /// Whether the installed orbit's one-period requirement has been measured.
+    ///
+    /// `true` immediately on the shipping orbit — the constant *is* that
+    /// measurement, recorded — and `false` after a rebuild until
+    /// [`begin_required_dv_anchor`](Self::begin_required_dv_anchor) lands.
+    #[func]
+    fn has_required_dv_anchor(&self) -> bool {
+        self.core
+            .as_ref()
+            .and_then(MissionCore::required_dv_anchor)
+            .is_some()
+    }
+
+    /// Solve this orbit's one-period required Δv on a worker thread.
+    ///
+    /// **The expensive half of a rebuild, and it is separate on purpose.**
+    /// Measured **28.8 s**, against ~10 s for the build itself. The scenario build
+    /// gives back a threat that can be drawn, planned against and probed; only the
+    /// tractor bench's *margin* needs this. Folding it into the build would make
+    /// every rebuild wait three times as long for a number most of the frontend
+    /// does not use — the same argument that keeps the Tier-2 preview off the build
+    /// path.
+    ///
+    /// 28.8 s is also why the frontend must show this running rather than merely
+    /// go quiet: it is well past the point where a still panel reads as a hang.
+    ///
+    /// Refuses while any other worker is running, for the reason
+    /// [`begin_rebuild_scenario`](Self::begin_rebuild_scenario) documents.
+    #[func]
+    fn begin_required_dv_anchor(&mut self) -> bool {
+        if let Some(busy) = self.busy_worker() {
+            self.error = format!("cannot solve the anchor while {busy} is running")
+                .as_str()
+                .into();
+            return false;
+        }
+        let Some(core) = self.core.as_ref() else {
+            self.error = "build the scenario before solving for its required Δv".into();
+            return false;
+        };
+        let Some(scenario) = core.scenario_arc() else {
+            self.error = "build the scenario before solving for its required Δv".into();
+            return false;
+        };
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(solve_required_dv_anchor(&scenario).map_err(|e| e.to_string()));
+        });
+        self.anchor_build = Some(rx);
+        self.error = GString::new();
+        true
+    }
+
+    /// Whether the anchor solve is in flight.
+    #[func]
+    fn is_solving_required_dv_anchor(&self) -> bool {
+        self.anchor_build.is_some()
+    }
+
+    /// Pump the anchor worker. `true` while **still running**, `false` once
+    /// finished (or none in flight) — then
+    /// [`has_required_dv_anchor`](Self::has_required_dv_anchor) says whether it
+    /// succeeded. Non-blocking; safe every frame.
+    #[func]
+    fn poll_required_dv_anchor(&mut self) -> bool {
+        let Some(rx) = self.anchor_build.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Ok(Ok(dv)) => {
+                self.anchor_build = None;
+                match self.core.as_mut() {
+                    Some(core) => {
+                        if core.adopt_required_dv_anchor(dv) {
+                            self.error = GString::new();
+                        } else {
+                            // A solve that came back non-positive is not an anchor,
+                            // and storing it would divide into a margin of zero — a
+                            // physics claim, made by arithmetic that failed.
+                            self.error = format!(
+                                "the anchor solve returned {dv:.4e} m/s, which is not a \
+                                 requirement — the margin stays unmeasured"
+                            )
+                            .as_str()
+                            .into();
+                        }
+                    }
+                    None => self.error = "the anchor solved but the kernels are gone".into(),
+                }
+                false
+            }
+            Ok(Err(message)) => {
+                self.anchor_build = None;
+                self.error = message.as_str().into();
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.anchor_build = None;
+                self.error = "the anchor solve thread died without reporting".into();
+                false
+            }
+        }
+    }
+
     // --- The gravity tractor -------------------------------------------------
 
     /// The shipping tractor configuration and the bounds the panel's knobs move
@@ -1165,7 +1534,12 @@ impl Mission {
             retrograde,
         };
         let period = self.core.as_ref().map_or(0.0, MissionCore::period_seconds);
-        let r = score_tractor_plan(&plan, period);
+        // The anchor is a property of the *installed* orbit, so it comes from the
+        // core rather than from a constant. After a rebuild it is `None` until the
+        // solve lands, and the two keys below simply do not appear — the same
+        // absence a sub-one-period lead produces, and for the same reason.
+        let anchor = self.core.as_ref().and_then(MissionCore::required_dv_anchor);
+        let r = score_tractor_plan(&plan, period, anchor);
         let mut d = VarDictionary::new();
         d.set("flyable", plan.is_flyable());
         d.set("holds_station", r.holds_station);

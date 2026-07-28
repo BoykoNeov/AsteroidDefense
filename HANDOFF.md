@@ -1133,6 +1133,25 @@ and the probability. Keyholes are the second and are not in this batch.
   widens from 1e-5 to 1e-1 m/s. Nothing about the asteroid changed; only how well
   anyone knows where it is.
 
+- **The sampling plan is threaded, not re-derived — a fix to the same failure one
+  level up.** `bplane_uncertainty_checked` originally called
+  `uncertainty_sampling_plan()` a second time for the shell, while differencing the
+  shell's flown displacements against a mean measured at the *first* plan's epoch.
+  Both scans return the same `t_reduce` today and nothing enforced it; let them
+  drift and the linearity report compares two different reduction epochs and calls
+  the difference nonlinearity — precisely the failure this module exists to prevent,
+  reintroduced by the code that checks for it. One plan now flows through both.
+
+- **The reduction epoch's margin was measured by breaking it.** Moving the lead and
+  watching the kernel-gated test: 12 d fails at 107 %, 48 h at 6.5 %, 30 h at 2.3 %,
+  26 h passes clean. So the asymptotic invariance holds out to about a day and the
+  shipping 12 h has ~2.5× margin. The test also gained a direct
+  `∂r_p/∂v_along`-both-ways assertion, because the perigee agreement it had been
+  checking is a *proxy* for the property the Jacobian rests on — though the same
+  sweep shows the perigee gate is the one that trips first here, so the derivative
+  gate did not prove tighter on this scenario. It stays because it checks the claim
+  itself, and a faster encounter need not preserve that ordering.
+
 - **What is not here.** Keyholes and resonant returns; the ξ,ζ pinning they force;
   real SBDB covariance ingestion (published in equinoctial or Keplerian elements,
   at their own epoch, in mixed units — a conversion to validate by round-tripping,

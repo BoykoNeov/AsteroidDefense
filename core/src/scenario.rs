@@ -1306,8 +1306,9 @@ impl RealFieldScenario {
         covariance: &StateCovariance,
         n_sigma: f64,
     ) -> Result<(BPlaneUncertainty, LinearityReport), UncertaintyError> {
-        let sens = self.bplane_sensitivity()?;
-        let (t_reduce, cadence, n_snapshots) = self.uncertainty_sampling_plan()?;
+        // One plan, shared: the shell must fly at the epoch the mean was measured
+        // at, or the report is comparing reduction epochs and calling it curvature.
+        let (sens, (t_reduce, cadence, n_snapshots)) = self.sensitivity_with_plan()?;
         let mean = sens.mean();
 
         let offsets = covariance.sigma_shell(n_sigma);
@@ -1350,18 +1351,41 @@ impl RealFieldScenario {
     /// number, and the mean of a distribution has to be measured by the same
     /// instrument as its spread or the two do not belong to one another.
     pub fn bplane_sensitivity(&self) -> Result<BPlaneSensitivity, UncertaintyError> {
-        let (t_reduce, cadence, n_snapshots) = self.uncertainty_sampling_plan()?;
+        Ok(self.sensitivity_with_plan()?.0)
+    }
+
+    /// [`bplane_sensitivity`](Self::bplane_sensitivity), handing back the sampling
+    /// plan it used rather than leaving a caller to re-derive one.
+    ///
+    /// The re-derivation is the hazard. A second
+    /// [`uncertainty_sampling_plan`](Self::uncertainty_sampling_plan) call scans the
+    /// nominal again and *today* returns the same `t_reduce`, so nothing is wrong —
+    /// but nothing enforces it either, and the σ-shell differences its flown
+    /// displacements against a mean measured at the **first** plan's epoch. Let the
+    /// two drift apart and the linearity report compares two different reduction
+    /// epochs and calls the difference nonlinearity: the module's own founding
+    /// failure mode, one level up, wearing a plausible number. Threading the plan
+    /// through makes "the mean and the spread were measured by the same instrument"
+    /// a fact about the code rather than a claim in a doc comment.
+    fn sensitivity_with_plan(
+        &self,
+    ) -> Result<(BPlaneSensitivity, (Epoch, f64, u32)), UncertaintyError> {
+        let plan = self.uncertainty_sampling_plan()?;
+        let (t_reduce, cadence, n_snapshots) = plan;
         let nominal = self.uncertainty_sample(self.seed, t_reduce, cadence, n_snapshots)?;
         let basis = BPlaneBasis::from_encounter(&nominal);
         let jacobian = bplane_jacobian(self.seed, |s| -> Result<Vector2<f64>, UncertaintyError> {
             let enc = self.uncertainty_sample(s, t_reduce, cadence, n_snapshots)?;
             Ok(basis.project(&enc))
         })?;
-        Ok(BPlaneSensitivity {
-            nominal,
-            basis,
-            jacobian,
-        })
+        Ok((
+            BPlaneSensitivity {
+                nominal,
+                basis,
+                jacobian,
+            },
+            plan,
+        ))
     }
 
     /// Sample the encounter frame using an already-built [`DeflectionScenario`] and
@@ -2700,6 +2724,51 @@ mod tests {
         );
         let rel_v = (sens.nominal.v_inf - nominal_at_ca.v_inf).abs() / nominal_at_ca.v_inf;
         assert!(rel_v < 0.02, "v_inf disagrees by {:.3}%", rel_v * 100.0);
+
+        // …and the *derivative*, which is the property the module actually rests on
+        // rather than a correlate of it — ∂r_p/∂v_along computed at the fixed epoch
+        // and at each run's own closest approach, four propagations. Measured at
+        // 0.025%; gated at 1%.
+        //
+        // Both gates were probed by moving the reduction lead and watching this test:
+        // 12 d fails at 107%, 48 h at 6.5%, 30 h at 2.3%, and 26 h passes cleanly.
+        // So the asymptotic invariance holds out to about a day and the shipping
+        // 12 h has ~2.5× margin — and, honestly, on *this* scenario the perigee gate
+        // is the one that trips first, so the derivative gate did not prove tighter.
+        // It stays because it checks the claim directly instead of by proxy, and a
+        // faster encounter or a different geometry need not preserve that ordering.
+        let plan = sc.uncertainty_sampling_plan().expect("sampling plan");
+        let (t_reduce, cadence, n_snap) = plan;
+        let t_hat = crate::deflection::along_track_unit(seed).expect("along-track");
+        let h = crate::uncertainty::FD_STEP_VELOCITY_MS;
+        let mut fixed = [0.0_f64; 2];
+        let mut at_ca = [0.0_f64; 2];
+        for (i, sign) in [1.0_f64, -1.0].iter().enumerate() {
+            let s = StateVector::new(seed.position, seed.velocity + sign * h * t_hat);
+            fixed[i] = sc
+                .uncertainty_sample(s, t_reduce, cadence, n_snap)
+                .expect("fixed-epoch sample")
+                .perigee;
+            let clock = sc
+                .propagate_free(sc.epoch0(), s, cadence, n_snap)
+                .expect("propagate");
+            at_ca[i] = crate::close_approach::closest_approach(&clock, &sc.earth, sc.scan)
+                .expect("scan")
+                .expect("close approach in gate")
+                .b_plane(sc.mu_earth, sc.earth_radius)
+                .expect("b-plane")
+                .perigee;
+        }
+        let d_fixed = (fixed[0] - fixed[1]) / (2.0 * h);
+        let d_at_ca = (at_ca[0] - at_ca[1]) / (2.0 * h);
+        let d_rel = (d_fixed - d_at_ca).abs() / d_at_ca.abs();
+        assert!(
+            d_rel < 0.01,
+            "∂r_p/∂v_along disagrees by {:.4}% between the fixed-epoch reduction \
+             ({d_fixed:.5e}) and the closest-approach one ({d_at_ca:.5e}) — the Jacobian is \
+             built on those being the same measurement",
+            d_rel * 100.0
+        );
 
         // The projected mean must carry the impact parameter — if it does not, the
         // frame is not the b-plane's and every covariance pushed through it is

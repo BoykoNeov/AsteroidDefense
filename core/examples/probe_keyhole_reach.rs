@@ -80,10 +80,17 @@ use std::time::Instant;
 const AU: f64 = 1.495_978_707e11;
 /// Julian year in seconds, the unit `h` counts in `a' = (h/k)^(2/3)`.
 const JULIAN_YEAR_S: f64 = 365.25 * 86_400.0;
-/// Distance gate for the close-approach census. Without a gate the scan reports
-/// every local range-rate minimum over the whole cruise — one per synodic period,
-/// most of them tens of millions of km away and irrelevant.
-const CENSUS_GATE_AU: f64 = 0.05;
+/// The close-approach distance gate **the shipping scenario actually uses**
+/// (`scenario.rs`, `RealFieldScenario::build_with`). Mirrored rather than guessed,
+/// and not `ScanOptions::default()` — default has *no* gate, so censusing with it
+/// would count approaches the pipeline never sees, and, worse, would leave a
+/// resonant locus lying outside the gate looking perfectly reachable. A locus is
+/// only usable if the *perigee* it implies stays inside this radius, which is a
+/// stricter test than the impact parameter passing it.
+///
+/// If this ever drifts from the scenario's value the probe is measuring a
+/// different pipeline than the one that ships.
+const SHIPPING_SCAN_GATE_M: f64 = 5.0e8;
 /// How far before the encounter to sample the real pre-encounter orbit for the
 /// round-trip check. Far enough out that Earth's pull has not yet bent the
 /// heliocentric orbit appreciably, close enough that it is unambiguously the same
@@ -144,13 +151,15 @@ fn main() {
         ds.nominal(),
         &earth,
         ScanOptions {
-            max_distance: Some(CENSUS_GATE_AU * AU),
-            ..Default::default()
+            max_sample_dt: 6.0 * 3600.0,
+            time_tol_seconds: 1.0e-3,
+            max_distance: Some(SHIPPING_SCAN_GATE_M),
         },
     )
     .expect("close-approach census");
     println!(
-        "\nclose approaches within {CENSUS_GATE_AU} AU over the nominal span: {}",
+        "\nclose approaches inside the shipping {:.0} km gate over the nominal span: {}",
+        SHIPPING_SCAN_GATE_M / 1e3,
         census.len()
     );
     for (i, ca) in census.iter().enumerate() {
@@ -392,7 +401,14 @@ fn main() {
         // The perigee to hand `required_dv` to put the shipping rock here:
         // invert b² = r_p² + 2μ⊕r_p/v∞².
         let c = mu_earth / (v_inf * v_inf);
-        let r_p = -c + (c * c + b_lo * b_lo).sqrt();
+        let perigee_at = |b: f64| -c + (c * c + b * b).sqrt();
+        let r_p = perigee_at(b_lo);
+        // Gate test on the *perigee*, not on `b`. The scan reports an approach by
+        // its closest distance, so a locus whose far end implies a perigee outside
+        // `SHIPPING_SCAN_GATE_M` is partly invisible to the pipeline that would
+        // have to find it — a keyhole nothing can detect is not a keyhole.
+        let r_p_far = perigee_at(b_hi);
+        let gate_ok = r_p_far <= SHIPPING_SCAN_GATE_M;
 
         println!(
             "\n  {h}:{k} resonance — a' = {:.6} AU, returns in {h} yr after {k} revs",
@@ -431,15 +447,27 @@ fn main() {
             },
         );
         println!(
-            "    perigee to dial   : {:.0} km ({:.2} R⊕){}",
+            "    perigee to dial   : {:.0} .. {:.0} km ({:.2} .. {:.2} R⊕){}",
             r_p / 1e3,
+            r_p_far / 1e3,
             r_p / enc.earth_radius,
-            if r_p > enc.earth_radius {
-                " — a real miss, reachable by required_dv"
-            } else {
+            r_p_far / enc.earth_radius,
+            if r_p <= enc.earth_radius {
                 " — INSIDE Earth: not a miss, this locus is unreachable by deflection"
+            } else if !gate_ok {
+                " — real misses, but see gate below"
+            } else {
+                " — real misses, reachable by required_dv"
             },
         );
+        if !gate_ok {
+            println!(
+                "    *** OUTSIDE THE SCAN GATE: the locus reaches perigee {:.0} km, past the \
+                 shipping {:.0} km gate, so that part of it is invisible to the pipeline.",
+                r_p_far / 1e3,
+                SHIPPING_SCAN_GATE_M / 1e3,
+            );
+        }
     }
 
     println!(

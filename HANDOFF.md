@@ -1222,8 +1222,20 @@ enough to aim at* — for the cost of one scenario build, before any of it is bu
   real miss, reachable by the existing `required_dv` solver. So the deflected
   trajectory — already owed anyway, because it is the only way to show P *rise* —
   can be dialled onto the resonance, and the purpose-built threat orbit and the
-  Apophis oracle both stay out of this batch. 7:9 is wider still (48.7–131.5 km,
-  0.29–0.78 σ) at 29.7 R⊕ if more margin is wanted.
+  Apophis oracle both stay out of this batch.
+
+- **The scan gate picks the winner, and it is not `ScanOptions::default()`.** The
+  scenario ships `max_distance: Some(5.0e8)` — a **500 000 km** gate — and the test
+  that matters is on the *perigee* a locus implies, not on its impact parameter,
+  because that is what the scan reports an approach by. 3:4's locus implies
+  perigees of 54 385–146 822 km and clears the gate with room to spare. **7:9,
+  which has the wider keyhole (48.7–131.5 km, 0.29–0.78 σ), reaches perigee
+  549 389 km and is partly invisible to the pipeline that would have to find it**;
+  18:23 is worse. So 3:4 is not merely a good candidate, it is the widest keyhole
+  that fits entirely inside the gate — and a keyhole nothing can detect is not a
+  keyhole. The probe mirrors the shipping gate as a named constant and warns when a
+  locus leaves it; censusing with `Default` (no gate at all) would have hidden
+  this.
 
 - **A width that diverges is flagged, not quoted.** `Δb = Δa'/|∂a'/∂b|` is a
   linearisation and blows up where the locus is *tangent* to a level set of `a'`.

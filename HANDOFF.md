@@ -970,12 +970,14 @@ could not put the threat anywhere else at all.
   number than the Rust suite did.** The one-period anchor solve is **28.8 s on the
   shipping orbit** against ~10 s for the build, which is why it is a separate
   on-demand action rather than part of the rebuild. But the harness, on the 1.44 yr
-  orbit it dials to, took **40–63 s** — because the cost **scales with the period**:
+  orbit it dials to, took **41–74 s** across three runs — because the cost
+  **scales with the period**:
   a one-period lead on a longer orbit is a proportionally longer propagation, and
   the knobs reach past 3 yr. So the long-period orbits an operator goes looking for
   are exactly the slow ones to score. The UI copy therefore says **"about a
-  minute"** and deliberately not a range: the first draft promised "30–60 s" and
-  the very next run took 63. Quoting the figure measured on the one orbit nobody
+  minute"** and deliberately not a range: the first draft promised "30–60 s", the
+  next run took 63, and the one after that 74. Quoting the figure measured on the
+  one orbit nobody
   rebuilds *to* is an accurate number and a misleading promise. The live solve on
   the shipping orbit
   reproduces the recorded constant to all six digits, so every orbit is scored by

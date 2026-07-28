@@ -11,7 +11,7 @@ extends Node
 ##
 ## # This harness DOES drive the rebuild, and that was a choice
 ##
-## The rebuild is ~10 s and the anchor solve 40–63 s on the orbit this dials to,
+## The rebuild is ~10 s and the anchor solve 41–74 s on the orbit this dials to,
 ## so covering them costs about a minute of bounded waiting. The alternative —
 ## cover only the free preview and the refusals, and verify the rest by picture —
 ## was tempting and rejected: the rebuild is the only path that exercises

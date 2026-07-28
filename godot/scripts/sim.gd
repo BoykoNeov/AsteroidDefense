@@ -840,7 +840,7 @@ func request_threat_rebuild() -> void:
 
 ## Solve this orbit's one-period required Δv — about a minute on a worker, and
 ## **scaling with the period** (one period of lead on a longer orbit is a longer
-## propagation). Measured 28.8 s on the shipping orbit, 40–63 s on a 1.44 yr one;
+## propagation). Measured 28.8 s on the shipping orbit, 41–74 s on a 1.44 yr one;
 ## the copy says "about a minute" rather than a range because the knobs reach past
 ## 3 yr and an earlier draft's "30–60 s" was exceeded on the very next run.
 ##

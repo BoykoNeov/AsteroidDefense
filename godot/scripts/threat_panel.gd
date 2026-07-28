@@ -46,8 +46,8 @@ extends Control
 ##     SOLVING      about a minute, shown running because a still panel that long
 ##                  reads as a hang
 ##
-## Measured 28.8 s (shipping orbit), 40.6 s and 63 s (a 1.44 yr one, windowed and
-## headless). The copy says "about a minute" rather than a range, because the cost
+## Measured 28.8 s (shipping orbit), then 41 / 63 / 74 s on a 1.44 yr one across
+## three runs. The copy says "about a minute" rather than a range, because the cost
 ## **scales with the period** — one period of lead on a longer orbit is a longer
 ## propagation — and the knobs reach past 3 yr. A stated range would be a promise
 ## the solver can already exceed; the first draft said "30-60 s" and a run took 63.

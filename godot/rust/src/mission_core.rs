@@ -2101,7 +2101,7 @@ pub fn required_dv_estimate_from(anchor_dv_m_s: f64, lead_periods: f64) -> Optio
 /// `the_anchor_solve_reproduces_the_shipping_constant` holds it to.
 ///
 /// **Expensive, and it belongs on a worker** — measured **28.8 s** on the shipping
-/// orbit and **40–63 s** on a 1.44 yr one, against ~10 s for the scenario build it
+/// orbit and **41–74 s** on a 1.44 yr one, against ~10 s for the scenario build it
 /// follows. The cost scales with the period: one period of lead on a longer orbit
 /// is a proportionally longer propagation.
 ///

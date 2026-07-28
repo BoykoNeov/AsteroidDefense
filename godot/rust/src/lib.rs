@@ -1404,7 +1404,7 @@ impl Mission {
     /// Solve this orbit's one-period required Δv on a worker thread.
     ///
     /// **The expensive half of a rebuild, and it is separate on purpose.**
-    /// Measured **28.8 s on the shipping orbit** (0.79 yr period) and **40–63 s on
+    /// Measured **28.8 s on the shipping orbit** (0.79 yr period) and **41–74 s on
     /// a 1.44 yr one**, against ~10 s for the build itself. The cost **scales with
     /// the period**, because a one-period lead on a longer orbit is a
     /// proportionally longer propagation — so the long-period orbits an operator
@@ -1419,8 +1419,9 @@ impl Mission {
     ///
     /// That is also why the frontend must show this running rather than merely go
     /// quiet, and why its copy says "about a minute" rather than a range: the
-    /// first draft promised "30–60 s" and a run took 63. A number measured on the
-    /// one orbit nobody rebuilds *to* is accurate and still a misleading promise.
+    /// first draft promised "30–60 s", the next run took 63, and the one after
+    /// that 74. A number measured on the one orbit nobody rebuilds *to* is
+    /// accurate and still a misleading promise.
     ///
     /// Refuses while any other worker is running, for the reason
     /// [`begin_rebuild_scenario`](Self::begin_rebuild_scenario) documents.

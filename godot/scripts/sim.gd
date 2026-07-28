@@ -312,6 +312,56 @@ var tractor_hover_min := 1.0
 
 signal tractor_changed
 
+## ----------------------------------------------------------- threat orbit ---
+##
+## The threat's own heliocentric orbit ([T], HANDOFF §5). Same cursor idiom and
+## same table shape as `TRACTOR_KNOBS`, for the same reason — a seventh knob here
+## is one row and nothing else.
+##
+## **This is the only panel whose knobs cost ~10 s to apply**, so it is split in
+## two: turning a knob is free and re-previews in closed form (`v_inf`, the
+## b-plane miss, and the orbit it lands on), while `[R]` spends the rebuild. The
+## preview is not decoration — a rebuild can fail two different ways, and without
+## it the panel would be knobs whose only feedback is a ten-second wait and an
+## error.
+##
+## The two `ImpactorConfig` fields that are **not** here — `impact_epoch` and
+## `lead_years` — are the mission clock (`EPOCH0_TDB`, `T_IMPACT`). Moving them
+## would not put the rock on a different orbit, it would slide the whole campaign
+## along the timeline and invalidate every date already on screen. See the core's
+## `ThreatOrbitKnobs`.
+const THREAT_KNOBS := [
+	["v_rel", "APPROACH SPEED", "KM/S", 8.0, 40.0, 0.5, false],
+	["az", "APPROACH AZIMUTH", "DEG", -180.0, 180.0, 5.0, false],
+	["el", "APPROACH ELEVATION", "DEG", -80.0, 80.0, 2.5, false],
+	# The upper bound is a PLACEHOLDER, overridden from the core in
+	# `_seed_threat_defaults`. The real ceiling is Earth's radius: the offset is
+	# laid perpendicular to the relative velocity, so it *is* the geocentric
+	# perigee, and past R_E the designed impact stops being an impact. The lower
+	# wall is not a constant at all — it moves with approach speed (Earth escape
+	# at the offset distance), so the preview reports it live instead.
+	#
+	# **Deliberately slack, so the core's value is always the binding one.** It was
+	# 6378.0, which looks like Earth's radius and is 136.6 m short of it — so the
+	# placeholder, not the physics, set the ceiling, and the knob stopped just
+	# inside the grazing boundary instead of on it. A rounded-looking literal is
+	# worse than an obviously-wrong one here: it agrees to four digits and is
+	# still the wrong authority.
+	["offset", "IMPACT OFFSET", "KM", 200.0, 9000.0, 100.0, false],
+]
+
+## Live threat-orbit knob values. Seeded from the core in `_install_threat`, never
+## restated here — these are `ImpactorConfig::default()` read back as angles.
+var threat_knobs := {"v_rel": 18.0, "az": 0.0, "el": 0.0, "offset": 3000.0}
+var threat_row := 0
+var threat_panel_open := false
+var threat_rebuilding := false         # the ~10 s rebuild worker is running
+var threat_anchor_solving := false     # the ~1 min required-Δv anchor solve is running
+## Earth's radius in km, from the core — the offset knob's real ceiling.
+var threat_offset_max := 6378.0
+
+signal threat_changed
+
 var plan_lead_d := 180.0               # intercept lead before impact epoch, days
 var plan_dv_ms := 30.0                 # impulse magnitude, m/s
 var plan_retro := true                 # true = retrograde (against velocity)
@@ -425,6 +475,7 @@ func _process(delta: float) -> void:
 	_poll_cell_verify()
 	_poll_required_mass()
 	_poll_tow_probe()
+	_poll_anchor_solve()
 	_tick_plan_debounce(delta)
 
 	if paused:
@@ -538,12 +589,30 @@ func _poll_build() -> void:
 		return
 	if mission.poll_build():
 		return
-	if not mission.is_ready():
+	# `last_build_failed()`, NOT `not is_ready()`. They agree on a first build and
+	# disagree on a rebuild: a failed rebuild leaves the *previous* scenario
+	# installed, so `is_ready()` is still true and the old test would have read a
+	# blown-up rebuild as a success — announcing a threat solution that was never
+	# built, over a threat that had not changed.
+	if mission.last_build_failed():
 		build_state = Build.FAILED
 		build_error = mission.last_error()
+		# A *rebuild* that fails is survivable in a way a first build is not: the
+		# previous threat is still installed and still correct, so the mission
+		# carries on with the operator's knobs left showing what they asked for.
+		# `threat_knobs_are_installed()` is then false, which is how the panel
+		# knows to mark them as not applied rather than as current.
+		if threat_rebuilding:
+			threat_rebuilding = false
+			build_state = Build.READY
+			event_logged.emit(_stamp(t) + "  REBUILD FAILED - " + build_error
+				+ " (PREVIOUS THREAT RETAINED)")
+			threat_changed.emit()
+			return
 		event_logged.emit(_stamp(t) + "  THREAT SOLUTION FAILED - " + build_error)
 		return
 	build_state = Build.READY
+	threat_rebuilding = false
 	_install_threat()
 
 
@@ -583,11 +652,25 @@ func _install_threat() -> void:
 	tier2_ready = false
 	tier2_measuring = false
 
+	# **`mission_online` was already true through a rebuild, deliberately.**
+	# `_begin_build` does not clear it, so for the ~10 s a rebuild runs the orrery,
+	# the b-plane view and the clock keep drawing the *previous* threat. That is
+	# the honest reading: the old threat is a real, fully-solved trajectory right
+	# up until the new one replaces it, and blanking the display for ten seconds
+	# would claim there is no threat when there is one. `threat_rebuilding` is what
+	# panels use to grey their own readouts and say a replacement is coming.
+	var first_install := not mission_online
 	mission_online = true
 	# The tractor bench opens on the core's own configuration, not on numbers
 	# restated in GDScript — seeded here because the shipping hover distance is a
-	# core constant and this is the first moment it is readable.
-	_seed_tractor_defaults()
+	# core constant and this is the first moment it is readable. Bounds refresh on
+	# every install; the operator's knob *values* survive a rebuild.
+	_seed_tractor_defaults(first_install)
+	_seed_threat_defaults()
+	# Everything downstream of the old scenario dies here. On a first install this
+	# is all no-ops; on a rebuild it is the difference between an honest panel and
+	# one showing a launch window solved against a threat that no longer exists.
+	_invalidate_derived_views()
 	# The b-plane frame is built with the scenario, so the close-up is live the
 	# moment the threat is.
 	encounter_online = true
@@ -599,6 +682,192 @@ func _install_threat() -> void:
 	_build_events()
 	mission_ready.emit()
 	event_logged.emit(_stamp(t) + "  THREAT SOLUTION ACQUIRED - 2031-XK TRACKING")
+
+
+## Drop every GDScript-side artifact of the *previous* scenario.
+##
+## The Rust side already does its half: `poll_build` drops the porkchop grid, the
+## cell verdict, the mass requirement and the tow probe, and `MissionCore::install`
+## clears the plan and the Tier-2 shifts. **None of that reaches the flags kept
+## here**, and a flag is what most consumers actually gate on — `pork_online` is
+## set from `has_porkchop()` once and never asked again, so a rebuilt threat would
+## leave the launch-window map lit over an emptied grid.
+##
+## The division is deliberate: *results* are cleared, *intentions* are not.
+## `plan_lead_d`/`plan_dv_ms`/`plan_retro` are what the operator dialled and stay
+## put across a rebuild — the same argument as the tractor knobs. What goes is
+## everything that was an *answer* about the old orbit.
+func _invalidate_derived_views() -> void:
+	# The launch-window map: the grid is gone from Rust, so the flag must follow,
+	# and the columns must go with it. Leaving the arrays behind with the flag
+	# down would be safe today and a stale heatmap the first time a consumer reads
+	# a column without checking `pork_online`.
+	pork_online = false
+	pork_building = false
+	pork_verifying = false
+	pork_mass_solving = false
+	pork_rows = 0
+	pork_cols = 0
+	pork_launch_tdb = PackedFloat64Array()
+	pork_arrival_tdb = PackedFloat64Array()
+	pork_c3 = PackedFloat64Array()
+	pork_along = PackedFloat64Array()
+	pork_revs = PackedInt32Array()
+	pork_payload = PackedFloat64Array()
+	pork_dv = PackedFloat64Array()
+	pork_i = 0
+	pork_j = 0
+
+	# The plan verdict. The core has already forgotten the plan, so `has_plan()`
+	# is false and most readouts bail — but `plan_clean_miss` and `deflect_ok` are
+	# cached booleans that no longer describe anything, and a pending debounce
+	# would fire a solve for an orbit that has been replaced.
+	plan_clean_miss = false
+	deflect_ok = false
+	plan_solving = false
+	_plan_dirty = false
+
+	# The tractor probe result is dropped in Rust; this is the flag beside it.
+	tractor_probing = false
+
+	porkchop_changed.emit()
+	plan_changed.emit()
+	tractor_changed.emit()
+
+
+## Adopt the core's threat orbit as the panel's starting point — the knobs read
+## back off the config that was actually built, not the ones last sent.
+##
+## Those differ the moment a rebuild fails: the operator's knobs hold what they
+## asked for, this holds what is installed. Seeding from the core is what lets the
+## panel show both and mark the difference.
+func _seed_threat_defaults() -> void:
+	if not mission_online:
+		return
+	threat_offset_max = float(mission.threat_orbit_defaults().get("max_b_offset_km", 6378.0))
+	var o: Dictionary = mission.threat_orbit()
+	if o.is_empty():
+		return
+	threat_knobs.v_rel = float(o.v_rel_kms)
+	threat_knobs.az = float(o.azimuth_deg)
+	threat_knobs.el = float(o.elevation_deg)
+	threat_knobs.offset = float(o.b_offset_km)
+	threat_changed.emit()
+
+
+## Step the selected threat-orbit knob. All four are additive: unlike spacecraft
+## mass these have natural unit intervals and none of them spans decades.
+func adjust_threat(dir: int) -> void:
+	var knob: Array = THREAT_KNOBS[threat_row]
+	var id: String = knob[0]
+	var hi: float = knob[4]
+	# The offset ceiling is a physics bound (Earth's radius) read from the core,
+	# not the table's placeholder — same treatment the hover row's floor gets.
+	if id == "offset":
+		hi = minf(hi, threat_offset_max)
+	var v: float = float(threat_knobs[id]) + float(knob[5]) * dir
+	# Azimuth is periodic — it wraps rather than clamping, because -180 and +180
+	# are the same approach and a knob that stops there would pretend otherwise.
+	if id == "az":
+		threat_knobs[id] = wrapf(v, -180.0, 180.0)
+	else:
+		threat_knobs[id] = clampf(v, float(knob[3]), hi)
+	threat_changed.emit()
+
+
+func move_threat_cursor(d: int) -> void:
+	threat_row = wrapi(threat_row + d, 0, THREAT_KNOBS.size())
+	threat_changed.emit()
+
+
+## What the current knobs would produce, in closed form — free, so the panel calls
+## it every frame while a knob is turning. `{}` before the threat solution exists.
+func threat_preview() -> Dictionary:
+	if not mission_online:
+		return {}
+	return mission.threat_orbit_preview(
+		threat_knobs.v_rel, threat_knobs.az, threat_knobs.el, threat_knobs.offset)
+
+
+## Whether the knobs on screen still describe the orbit that is installed.
+##
+## The panel's staleness marker, and the answer to "did my rebuild take?". Compared
+## against what the *core* reports rather than against a flag set when the rebuild
+## was requested, so a rebuild that failed leaves this true and says so.
+func threat_knobs_are_installed() -> bool:
+	if not mission_online:
+		return false
+	var o: Dictionary = mission.threat_orbit()
+	if o.is_empty():
+		return false
+	return absf(float(o.v_rel_kms) - threat_knobs.v_rel) < 1e-6 \
+		and absf(float(o.azimuth_deg) - threat_knobs.az) < 1e-6 \
+		and absf(float(o.elevation_deg) - threat_knobs.el) < 1e-6 \
+		and absf(float(o.b_offset_km) - threat_knobs.offset) < 1e-6
+
+
+## Rebuild the campaign with the threat on the dialled orbit — ~10 s on a worker.
+func request_threat_rebuild() -> void:
+	if not mission_online or threat_rebuilding:
+		return
+	if threat_knobs_are_installed():
+		event_logged.emit("THREAT ALREADY ON THIS ORBIT - NOTHING TO REBUILD")
+		return
+	if not mission.begin_rebuild_scenario(
+			threat_knobs.v_rel, threat_knobs.az, threat_knobs.el, threat_knobs.offset):
+		# Every refusal here is reachable by turning a knob to a documented wall,
+		# so the core's message names which wall rather than failing generically.
+		event_logged.emit("REBUILD REFUSED - " + str(mission.last_error()))
+		return
+	threat_rebuilding = true
+	build_state = Build.RUNNING
+	event_logged.emit(_stamp(t) + "  REDESIGNING THREAT - REBUILDING CAMPAIGN")
+	threat_changed.emit()
+
+
+## Solve this orbit's one-period required Δv — about a minute on a worker, and
+## **scaling with the period** (one period of lead on a longer orbit is a longer
+## propagation). Measured 28.8 s on the shipping orbit, 40–63 s on a 1.44 yr one;
+## the copy says "about a minute" rather than a range because the knobs reach past
+## 3 yr and an earlier draft's "30–60 s" was exceeded on the very next run.
+##
+## Only ever needed after a rebuild: the shipping orbit's anchor is a recorded
+## constant the core seeds for free. Without it the tractor bench has a tow and no
+## requirement to measure it against, which it renders as an absence rather than
+## as a margin it cannot justify.
+func request_anchor_solve() -> void:
+	if not mission_online or threat_anchor_solving:
+		return
+	if mission.has_required_dv_anchor():
+		event_logged.emit("REQUIRED DV ALREADY KNOWN FOR THIS ORBIT")
+		return
+	if not mission.begin_required_dv_anchor():
+		event_logged.emit("ANCHOR SOLVE REFUSED - " + str(mission.last_error()))
+		return
+	threat_anchor_solving = true
+	event_logged.emit(_stamp(t) + "  SOLVING REQUIRED DV FOR THIS ORBIT - ABOUT A MINUTE")
+	threat_changed.emit()
+
+
+func _poll_anchor_solve() -> void:
+	if not threat_anchor_solving:
+		return
+	if mission.poll_required_dv_anchor():
+		return
+	threat_anchor_solving = false
+	if mission.has_required_dv_anchor():
+		event_logged.emit(_stamp(t) + "  REQUIRED DV %.4f M/S AT ONE ORBIT OF LEAD"
+			% mission.required_dv_anchor())
+	else:
+		event_logged.emit(_stamp(t) + "  ANCHOR SOLVE FAILED - " + str(mission.last_error()))
+	threat_changed.emit()
+	tractor_changed.emit()
+
+
+## Whether the installed orbit's required Δv is known. False after a rebuild until
+## the solve lands — the tractor bench's margin is absent for exactly that window.
+func threat_anchor_known() -> bool:
+	return mission_online and mission.has_required_dv_anchor()
 
 
 ## Whether the threat exists at a mission time. False outside the propagated span
@@ -1347,18 +1616,29 @@ func _poll_required_mass() -> void:
 ## the law's validity floor are *core* facts. Restating them here would be the
 ## bug `tractor_defaults()` exists to prevent — the panel and the physics quietly
 ## describing different tractors.
-func _seed_tractor_defaults() -> void:
+## **Bounds every install; values only the first.** The split exists because the
+## threat orbit became rebuildable: `_install_threat` runs again on every rebuild,
+## and the version of this that seeded both would reset the operator's spacecraft
+## to 20 t at 1.5 radii every time they turned an orbit knob. The bench and the
+## threat orbit are independent experiments — "change the orbit, watch the margin
+## move" is only a measurement if the tractor stays put across it.
+##
+## The bounds are re-read regardless, because they are core facts that a rebuild
+## could in principle move, and re-reading a constant costs nothing.
+func _seed_tractor_defaults(first_install: bool) -> void:
 	if not mission_online:
 		return
 	var d: Dictionary = mission.tractor_defaults()
-	tractor.hover = float(d.hover_radii)
-	tractor.radius = float(d.rock_radius_m)
 	tractor_law_min_periods = float(d.law_min_periods)
 	tractor_target_perigee_m = float(d.target_perigee_m)
 	tractor_hover_min = float(d.min_hover_radii)
+	if first_install:
+		tractor.hover = float(d.hover_radii)
+		tractor.radius = float(d.rock_radius_m)
 	# Seeding the bound is not enough — the *current* value must be pulled inside
 	# it too, or a default that predates the bound sits below it untouched until
-	# the knob is first turned.
+	# the knob is first turned. Applies on a rebuild as well: the bound is
+	# re-read there, so a value that was legal before must still be checked.
 	tractor.hover = maxf(tractor.hover, tractor_hover_min)
 
 

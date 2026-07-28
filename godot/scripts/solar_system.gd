@@ -56,7 +56,18 @@ func _ready() -> void:
 
 
 ## The threat landed: build its nodes and start tracking plan changes.
+##
+## **Idempotent, because `mission_ready` now fires more than once.** It used to
+## fire exactly once per session, so every builder below could simply `append` and
+## `add_child`. The threat-orbit designer ([N]) made a rebuild a normal operation,
+## and the second firing then built a *second* set of every catalog node on top of
+## the first: `_neo_nodes` grew past `Sim.neos`, and `_process` — which iterates
+## the node array and indexes the element array — walked off the end once per
+## frame. That is how it announced itself; the quieter half is that every
+## duplicated body was still being drawn, at the position its stale element
+## dictionary reported.
 func _on_mission_ready() -> void:
+	_clear_mission_nodes()
 	_build_threat()
 	_build_asteroids()
 	_build_neos()
@@ -66,8 +77,47 @@ func _on_mission_ready() -> void:
 		_build_interceptor()
 	# The deflected orbit is re-sampled from the core on every solve, so it must
 	# follow `plan_changed` — the line drawn at build time is only the first plan.
-	Sim.plan_changed.connect(_rebuild_plan_visuals)
+	# `CONNECT_REFERENCE_COUNTED` is wrong here: this must be ONE connection no
+	# matter how many rebuilds happen, and a second identical connect() would
+	# otherwise re-sample the deflected track twice per solve.
+	if not Sim.plan_changed.is_connected(_rebuild_plan_visuals):
+		Sim.plan_changed.connect(_rebuild_plan_visuals)
 	_rebuild_plan_visuals()
+
+
+## Free everything `_on_mission_ready` builds, so it can run again.
+##
+## Frees the *nodes*, not just the references: an orphaned `MeshInstance3D` is
+## still a child of this node and still drawn, so dropping the array alone would
+## leave a ghost threat on a rebuilt orbit — visible, wrong, and attached to
+## nothing that could ever update it again.
+func _clear_mission_nodes() -> void:
+	for n: Node in [ast_nominal, ast_deflected, _nom_orbit_line, _defl_orbit_line,
+			comet_node, comet_tail, _comet_orbit_line,
+			interceptor, intercept_flash, _intercept_path_line]:
+		if is_instance_valid(n):
+			n.queue_free()
+	ast_nominal = null
+	ast_deflected = null
+	_nom_orbit_line = null
+	_defl_orbit_line = null
+	comet_node = null
+	comet_tail = null
+	_comet_orbit_line = null
+	interceptor = null
+	intercept_flash = null
+	_intercept_path_line = null
+
+	for arr: Array in [_asteroid_nodes, _neo_nodes, _neo_orbit_lines]:
+		for n: Node in arr:
+			if is_instance_valid(n):
+				n.queue_free()
+	# Cleared, not rebuilt in place: `_process` index-aligns these arrays against
+	# `Sim.asteroids` / `Sim.neos`, which `_install_catalog` has already replaced
+	# by the time this runs.
+	_asteroid_nodes.clear()
+	_neo_nodes.clear()
+	_neo_orbit_lines.clear()
 
 
 func _process(_delta: float) -> void:

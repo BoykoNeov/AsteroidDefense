@@ -178,6 +178,16 @@ func _draw() -> void:
 	if r.has("required_dv_m_s"):
 		_t(Vector2(xv, y), "%.4f MM/S  (EST, 1/LEAD LAW)" %
 			(float(r.required_dv_m_s) * 1000.0), mid)
+	elif Sim.threat_anchor_solving:
+		_t(Vector2(xv, y), "SOLVING FOR THIS ORBIT - ABOUT A MINUTE..." if Sim.blink(1.6) else "", bright)
+	elif not Sim.threat_anchor_known():
+		# **A second reason to have no requirement, and it is not the law's floor.**
+		# The threat is on a rebuilt orbit whose one-period Δv nobody has solved
+		# for. The shipping constant would be a number about a different mission —
+		# it is a measurement of one rock on one orbit — so the panel goes absent
+		# here exactly as it does below the floor, and says which absence this is.
+		# The two look identical on screen otherwise, and only one is fixable.
+		_t(Vector2(xv, y), "UNMEASURED ON THIS ORBIT - [N] THEN [E]", bright)
 	else:
 		# Below one orbit the `1/lead` law is not imprecise, it is the wrong
 		# shape — measured 1.73x wrong at half a period. Declining to print is
@@ -254,6 +264,11 @@ func _knob_value(id: String, r: Dictionary) -> String:
 ## looks exactly like one that does.
 func _margin_label(r: Dictionary) -> String:
 	if not r.has("margin"):
+		# Two different absences, and the operator can act on one of them. Naming
+		# which is the whole reason the anchor is a per-orbit measurement rather
+		# than a constant.
+		if not Sim.threat_anchor_known():
+			return "-- (THIS ORBIT'S REQUIREMENT IS UNMEASURED)"
 		return "-- (NO VALID REQUIREMENT AT THIS LEAD)"
 	var m := float(r.margin)
 	if m >= 1.0:

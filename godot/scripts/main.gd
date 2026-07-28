@@ -21,6 +21,7 @@ var pork: PorkchopPlot
 var planner: PlannerPanel
 var tier2_panel: Tier2Panel
 var tractor_panel: TractorPanel
+var threat_panel: ThreatPanel
 var boot: BootScreen
 var time_bar: TimeBar
 
@@ -98,6 +99,10 @@ func _ready() -> void:
 	tractor_panel = TractorPanel.new()
 	tractor_panel.name = "TractorPanel"
 	viewport.add_child(tractor_panel)
+
+	threat_panel = ThreatPanel.new()
+	threat_panel.name = "ThreatPanel"
+	viewport.add_child(threat_panel)
 
 	boot = BootScreen.new()
 	boot.name = "Boot"
@@ -222,6 +227,23 @@ func _input(event: InputEvent) -> void:
 		# [E] means the same thing in both views — "stop estimating and go measure
 		# it in the full field" — so it is deliberately the same key.
 		Sim.request_tow_probe()
+	# The threat-orbit designer claims the arrows on the same terms as the bench,
+	# and it reuses two keys rather than minting new ones. [ENTER] is `plan_commit`
+	# ("apply what is dialled") and [E] is `pork_verify`, which by now means "stop
+	# estimating and go measure it" in three views — solving this orbit's required
+	# Δv is exactly that. A fifth knob is one row in `Sim.THREAT_KNOBS`.
+	elif threat_panel.visible and event.is_action_pressed("pork_cursor_up"):
+		Sim.move_threat_cursor(-1)
+	elif threat_panel.visible and event.is_action_pressed("pork_cursor_down"):
+		Sim.move_threat_cursor(1)
+	elif threat_panel.visible and event.is_action_pressed("pork_cursor_left"):
+		Sim.adjust_threat(-1)
+	elif threat_panel.visible and event.is_action_pressed("pork_cursor_right"):
+		Sim.adjust_threat(1)
+	elif threat_panel.visible and event.is_action_pressed("plan_commit"):
+		Sim.request_threat_rebuild()
+	elif threat_panel.visible and event.is_action_pressed("pork_verify"):
+		Sim.request_anchor_solve()
 	elif event.is_action_pressed("focus_next"):
 		_focus_idx = (_focus_idx + 1) % _focus_targets.size()
 		_apply_focus()
@@ -235,11 +257,11 @@ func _input(event: InputEvent) -> void:
 		else:
 			planner.visible = not planner.visible
 			Sim.planner_open = planner.visible
-			# Symmetric to [K]: same origin, same arrow keys, and here the bench
-			# would keep the arrows because its guards sit earlier in the chain.
-			if planner.visible and tractor_panel.visible:
-				tractor_panel.visible = false
-				Sim.tractor_panel_open = false
+			# Symmetric to [K]/[N]: same origin, same arrow keys, and here the
+			# other two would keep the arrows because their guards sit earlier in
+			# the chain.
+			if planner.visible:
+				_close_other_bottom_panels(planner)
 	elif planner.visible and event.is_action_pressed("plan_lead_up"):
 		Sim.adjust_lead(10.0)
 	elif planner.visible and event.is_action_pressed("plan_lead_down"):
@@ -288,15 +310,39 @@ func _input(event: InputEvent) -> void:
 		else:
 			tractor_panel.visible = not tractor_panel.visible
 			Sim.tractor_panel_open = tractor_panel.visible
-			# The two bottom-centre overlays are mutually exclusive, and not for
-			# tidiness: they draw at the same origin, and the guard chain above
-			# puts the bench's arrow branches first — so with both open the
-			# planner's lead/dv keys would stop responding with nothing on screen
-			# to say why. The porkchop avoids this by being a full-frame view;
-			# these two have to be told.
-			if tractor_panel.visible and planner.visible:
-				planner.visible = false
-				Sim.planner_open = false
+			if tractor_panel.visible:
+				_close_other_bottom_panels(tractor_panel)
+	elif event.is_action_pressed("threat_toggle"):
+		# Gated like the bench and the planner. Free to open and free to turn:
+		# the preview is closed form, and nothing is spent until [ENTER] or [E].
+		if not Sim.mission_online:
+			Sim.event_logged.emit("THREAT DESIGNER OFFLINE - AWAITING THREAT SOLUTION")
+		else:
+			threat_panel.visible = not threat_panel.visible
+			Sim.threat_panel_open = threat_panel.visible
+			if threat_panel.visible:
+				_close_other_bottom_panels(threat_panel)
+
+
+## Close every bottom-centre overlay except `keep`.
+##
+## **Not tidiness.** All three draw at the same origin, and all three claim the
+## arrow keys through guards in one `elif` chain — so two open at once means the
+## later one's keys silently stop responding with nothing on screen to say why.
+## It was a two-way check between the planner and the bench; the threat designer
+## made it a third case, which is the point at which writing it out by hand at
+## each toggle starts dropping a pair. The porkchop avoids all of this by being a
+## full-frame view.
+func _close_other_bottom_panels(keep: Control) -> void:
+	if planner != keep and planner.visible:
+		planner.visible = false
+		Sim.planner_open = false
+	if tractor_panel != keep and tractor_panel.visible:
+		tractor_panel.visible = false
+		Sim.tractor_panel_open = false
+	if threat_panel != keep and threat_panel.visible:
+		threat_panel.visible = false
+		Sim.threat_panel_open = false
 
 
 ## Show exactly one of the full-frame overlay views (or `null` for the 3D world),
@@ -341,7 +387,8 @@ func _apply_focus() -> void:
 
 func _sync_overlay_sizes() -> void:
 	var vs := Vector2(viewport.size)
-	for c: Control in [map2d, enc, pork, tags, hud, planner, tier2_panel, tractor_panel, boot]:
+	for c: Control in [map2d, enc, pork, tags, hud, planner, tier2_panel, tractor_panel,
+			threat_panel, boot]:
 		if is_instance_valid(c):
 			c.position = Vector2.ZERO
 			c.size = vs

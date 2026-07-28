@@ -323,7 +323,7 @@ That MVP delivers the whole lesson *and* an honest hit→miss flip. Everything b
 - **Godot 3D view** (gdext): SubViewport composition (2D schematic/HUD over 3D, or vice versa); floating origin / double-precision as needed (§7)
 - **Tier 2 force model**: enable 1PN relativity, Yarkovsky, SRP, J2, and the 16 asteroid perturbers (on top of the DE440/441 ephemeris perturber field already used in the MVP) — validated against **ASSIST**, then **Horizons** on real asteroids
 - Real NEOs from the JPL Small-Body Database (§9): Apophis, Bennu, Didymos/Dimorphos
-- Nuclear standoff + gravity-tractor methods — **DONE 2026-07-27**: the standoff term as an impulse sibling of the kinetic model, the **gravity tractor** as a windowed `forces/` term with its own duration solve. §5's spectrum is closed. The tractor also has a **frontend** — the `[K]` bench, six live knobs over a cheap model scored against the real field, with an on-demand full-field probe on `[E]`. The nuclear half remains core-only. See *The deflection spectrum, nuclear half*, *…tractor half*, and *The tractor on the frontend*.
+- Nuclear standoff + gravity-tractor methods — **DONE 2026-07-27**: the standoff term as an impulse sibling of the kinetic model, the **gravity tractor** as a windowed `forces/` term with its own duration solve. §5's spectrum is closed. The tractor also has a **frontend** — the `[K]` bench, six live knobs over a cheap model scored against the real field, with an on-demand full-field probe on `[E]`. The nuclear half remains core-only. And since **2026-07-28** the *rock* is dialable too: `[N]` rebuilds the campaign with the threat on a different heliocentric orbit, so the bench compares rather than merely reports — the same 200 t plan scores **0.372× on the shipping orbit and 1.096× on a long-period one**. See *The deflection spectrum, nuclear half*, *…tractor half*, *The tractor on the frontend*, and *The threat orbit became a knob*.
 - Lambert / porkchop mission design (makes the impulse *deliverable*, not assumed)
 - **Tier 3 uncertainty**: orbit covariance → b-plane → impact probability; keyholes; covariance ellipse shrinking with observations
 
@@ -880,3 +880,140 @@ in deciding *what number it is honest to print while a key is held*.
 - ~~Clock sub-snapshot interpolation~~ → **served from dop853 dense output, not linear interp.** (§4, §7, §10)
 - ~~Scenario/fixture format~~ → **JSON** (crosses the Python boundary natively); RON optional for Rust-only authoring. (§6)
 - Added: **task-0.5 ASSIST/DE build de-risk spike + fallback-to-B trigger** (§10); **delivery + determinism honesty caveats** in UI copy (§1); **impulse soft-cap** to kinetic-impactor plausibility (§5).
+
+---
+
+### The threat orbit became a knob — 2026-07-28 session (`[N]`, a closed-form preview, and the requirement that had to move with it)
+
+The `[K]` bench above lets an operator change everything about the *tractor* and
+nothing about the *rock*. The obvious next lever — "test the tractor at different
+orbits, some effective, some not" — turned out to be blocked by one line:
+`begin_build_scenario` hardcoded `ImpactorConfig::default()`, so the frontend
+could not put the threat anywhere else at all.
+
+- **Three knobs ship, and the two that are frozen are the interesting decision.**
+  `ImpactorConfig` also carries `impact_epoch` and `lead_years`, and together they
+  *are* the mission clock: `epoch0` is GDScript's `EPOCH0_TDB`, the origin every
+  drawn `t` is measured from, and `impact_epoch` is `T_IMPACT`, which the event
+  schedule and both porkchop axes are laid against. Moving either does not put the
+  rock on a different orbit — it slides the whole campaign along the timeline and
+  invalidates every date already on screen. So the knobs are approach **speed**,
+  **direction** (azimuth/elevation, not three redundant vector components), and
+  **impact offset**: exactly the three that change the orbit while leaving the
+  calendar alone. That is what keeps a rebuild a bounded operation.
+
+- **A rebuild costs ~10 s and can fail two ways, so it needed a preview — and the
+  preview is free because of a geometric accident.** The designed impact lays its
+  offset *perpendicular* to the relative velocity, which makes the impact point the
+  **perigee of the geocentric hyperbola**. So the flyby can be undone
+  analytically — `BPlaneEncounter::from_relative_state` gives `v_inf` and the
+  incoming asymptote in closed form, and the incoming heliocentric velocity is just
+  `v_earth + v_inf·S`. `ImpactorConfig::preview` is microseconds against the
+  builder's ten seconds.
+
+- **Measured against real builds, and the two halves behave completely
+  differently.** The encounter geometry is **exact** — `v_inf` and `b` match the
+  propagated nominal's own b-plane reduction to **0.001 %**, which is not a
+  tolerance being met but the same closed form arriving at the same answer. The
+  *orbit* is an estimate: osculating at the impact epoch against a build reporting
+  vis-viva at the seed twelve years earlier, worst observed **0.23 %** across
+  0.68–2.66 yr of period. Good enough to label a knob, not good enough to score a
+  plan — so the tractor bench keeps taking `period_seconds()` from the built
+  scenario, and the panel says which number it is showing.
+
+- **The "too wide to be a hit" wall is exactly Earth's radius, and the estimate
+  that said otherwise was wrong for an instructive reason.** The first prediction
+  held `v_inf` fixed and grew `b = b_offset·v_rel/v_inf` until it reached the
+  11 311 km capture disc, giving ~4790 km. Measuring said 6400. The error: widening
+  the offset also *raises* `v_inf` (less of Earth's well to climb out of), which
+  grows `b` more slowly **and shrinks `b_capture` at the same time**. They meet
+  where they must — `b <= b_capture` is the same statement as `r_perigee <= R_E`,
+  and the perigee *is* the offset. So `b_offset` is a perigee-altitude dial wearing
+  a b-plane name, and at the knob's ceiling the harness measures `b/b_capture = 1`
+  to nine digits: the widest impact that exists.
+
+- **The other wall closes from the opposite direction, which is the
+  counter-intuitive part.** The flyby exists only while `v_rel > sqrt(2*mu/b_offset)`
+  — 16.3 km/s at the shipping 3000 km against a shipping 18 — and **shrinking** the
+  offset *raises* that bar (28.2 km/s at 1000 km). Pulling the hit toward Earth's
+  centre is what falls off the cliff. New `ScenarioError::ImpactNotHyperbolic`.
+
+- **THE SILENT FAILURE THIS LAYER EXISTS TO PREVENT.**
+  `REQUIRED_DV_AT_ONE_PERIOD = 0.50975` is a measurement of one rock on one
+  heliocentric orbit. Everything else about a rebuilt scenario keeps working — the
+  threat draws, the planner solves, the probe runs — so a margin still quoting the
+  *previous* orbit's requirement would look entirely healthy while being a number
+  about a different mission. The anchor is now a field on the core, seeded free
+  only when the installed config is the shipping one, and `tractor_readout` takes
+  it as `Option<f64>`: absent means the bench prints **no requirement and no
+  margin**, the same absence a sub-one-period lead already produces, and says which
+  of the two absences it is. `required_dv_estimate(n)` was **deleted** rather than
+  kept as a convenience — it reached for the constant, which would be the easy call
+  at every future call site and wrong at most of them.
+
+- **And the anchor cannot be shortcut by rescaling.** The tempting optimisation is
+  `dv ∝ 1/lead` ⇒ scale the shipping constant by the period ratio and skip 28.8 s.
+  Measured on a 2.66 yr orbit against the 0.79 yr shipping one it predicts a 3.4×
+  reduction; the real requirement falls **~10×**. Off by 2.9×. Both orbits share a
+  `v_inf` and a `b_offset`, so they need the *same* b-plane shift — what differs is
+  how much of that shift an along-track nudge buys, which is approach geometry and
+  not period. Pinned by a test, because that shortcut fails invisibly: a plausible
+  number, on the right order, wrong for every orbit.
+
+- **It teaches what it was asked to.** One 200 t tractor plan, one 6.0 yr lead, two
+  orbits: **margin 0.372× on the shipping orbit and 1.096× on a long-period one** —
+  fails and closes, from one knob. Separately pinned kernel-free, a plan inside the
+  shipping knob ranges reaches **29×**, so the bench can teach success and not only
+  the 12.6× shortfall.
+
+- **Costs, measured rather than assumed — and the frontend measured a different
+  number than the Rust suite did.** The one-period anchor solve is **28.8 s on the
+  shipping orbit** against ~10 s for the build, which is why it is a separate
+  on-demand action rather than part of the rebuild. But the harness, on the 1.44 yr
+  orbit it dials to, took **40–63 s** — because the cost **scales with the period**:
+  a one-period lead on a longer orbit is a proportionally longer propagation, and
+  the knobs reach past 3 yr. So the long-period orbits an operator goes looking for
+  are exactly the slow ones to score. The UI copy therefore says **"about a
+  minute"** and deliberately not a range: the first draft promised "30–60 s" and
+  the very next run took 63. Quoting the figure measured on the one orbit nobody
+  rebuilds *to* is an accurate number and a misleading promise. The live solve on
+  the shipping orbit
+  reproduces the recorded constant to all six digits, so every orbit is scored by
+  the code path the validated one validated.
+
+- **The rebuild refuses while *any* other worker runs, and that is a correctness
+  fix.** The porkchop grid, the Tier-2 preview, the cell verify, the mass solve and
+  the tow probe each hold an `Arc` clone of the current scenario. Start a rebuild
+  underneath one and it keeps computing — correctly — about a threat that no longer
+  exists, then lands *after* `poll_build` cleared the state it belonged to and
+  installs itself as current. Refusing by name tells the operator what to wait for;
+  a generation counter threaded through six result types costs more and says the
+  same thing. `poll_build` also learned to drop the **tow probe**, which had
+  survived only because a stale one used to be unreachable.
+
+- **A rebuild must invalidate results and leave intentions alone.** Rust drops the
+  grid, verdict, mass requirement, plan and probe; none of that reaches the *flags*
+  GDScript gates on, so `_invalidate_derived_views()` clears `pork_online` and the
+  grid columns, the plan verdict booleans and the pending debounce. What survives
+  is what the operator dialled — the planner's lead/Δv, and the tractor's six
+  knobs. The first version re-seeded the bench on every install, which would have
+  reset the spacecraft to 20 t every time the orbit moved and quietly made "change
+  the orbit, watch the margin" a comparison between two different tractors. The
+  harness asserts the survival, not just the clearing.
+
+- **One new input action for a whole panel.** `[N]` opens it; `[ENTER]` is
+  `plan_commit` ("apply what is dialled") and `[E]` is `pork_verify`, which by now
+  means "stop estimating and go measure it in the full field" in three views —
+  solving this orbit's required Δv is exactly that. The knobs are a table
+  (`Sim.THREAT_KNOBS`) like the bench's, so a fifth is one row and no `main.gd`
+  edit. The three bottom-centre panels became mutually exclusive through one helper
+  rather than three hand-written pairs, which is the point at which the
+  hand-written version starts dropping a case.
+
+- **A rounded literal is worse than an obviously wrong one.** The offset knob's
+  table placeholder read `6378.0` — Earth's radius to four digits, and 136.6 m
+  short of it — so the *placeholder* set the ceiling instead of the core's
+  `6378.1366`, and the knob stopped just inside the grazing boundary rather than on
+  it. The harness caught it only because the tolerance was tight enough to care.
+  Placeholders in these tables are now deliberately slack (`9000.0`), so the core
+  is always the binding authority. Same rule as every drawn body naming a source.

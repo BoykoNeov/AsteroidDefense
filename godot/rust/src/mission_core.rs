@@ -2100,8 +2100,10 @@ pub fn required_dv_estimate_from(anchor_dv_m_s: f64, lead_periods: f64) -> Optio
 /// this on the shipping config must reproduce that constant, which
 /// `the_anchor_solve_reproduces_the_shipping_constant` holds it to.
 ///
-/// **Expensive, and it belongs on a worker** — measured **28.8 s**, against ~10 s
-/// for the scenario build it follows.
+/// **Expensive, and it belongs on a worker** — measured **28.8 s** on the shipping
+/// orbit and **40–63 s** on a 1.44 yr one, against ~10 s for the scenario build it
+/// follows. The cost scales with the period: one period of lead on a longer orbit
+/// is a proportionally longer propagation.
 ///
 /// # It cannot be replaced by rescaling the shipping anchor
 /// The obvious shortcut is `Δv ∝ 1/lead` ⇒ scale [`REQUIRED_DV_AT_ONE_PERIOD`] by

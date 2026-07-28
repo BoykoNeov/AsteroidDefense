@@ -161,6 +161,15 @@ struct Mission {
     /// for is necessarily still the installed one when it lands. The pairing the
     /// other workers need is enforced here by exclusion instead.
     anchor_build: Option<mpsc::Receiver<Result<f64, String>>>,
+    /// Whether the **most recent** build attempt failed.
+    ///
+    /// Distinct from `!is_ready()`, and the distinction only started existing when
+    /// rebuilds did. `is_ready()` asks "is a scenario installed", which after a
+    /// failed *rebuild* is still **true** — the previous threat is untouched and
+    /// still correct. A frontend using `!is_ready()` as its failure test therefore
+    /// sees a rebuild that blew up as a success and announces a new threat
+    /// solution that was never built.
+    build_failed: bool,
     error: GString,
     base: Base<RefCounted>,
 }
@@ -439,6 +448,9 @@ impl Mission {
             self.error = "load() must succeed before building a scenario".into();
             return false;
         };
+        // A new attempt clears the previous verdict, so a stale failure cannot be
+        // read as this build's.
+        self.build_failed = false;
         let served = core.ephemeris_arc();
         let (bsp, pca, small_bodies) = core.kernel_paths();
         let (tx, rx) = mpsc::channel();
@@ -520,8 +532,12 @@ impl Mission {
 
     /// Pump the background build: install the scenario if it has landed. Returns
     /// `true` while the build is **still running**, `false` once it is finished —
-    /// at which point [`is_ready`](Self::is_ready) says whether it succeeded and
-    /// [`last_error`](Self::last_error) says why if it did not.
+    /// at which point [`last_build_failed`](Self::last_build_failed) says whether
+    /// it succeeded and [`last_error`](Self::last_error) says why if it did not.
+    ///
+    /// **Ask `last_build_failed`, not `!is_ready`.** They agree on a first build
+    /// and disagree on a rebuild, where a failure leaves the previous scenario
+    /// installed and `is_ready()` perfectly true.
     ///
     /// Non-blocking, so it is safe to call every frame. Cheap: a `try_recv` on an
     /// empty channel.
@@ -545,12 +561,21 @@ impl Mission {
                         self.porkchop = None;
                         self.verdict = None;
                         self.mass_requirement = None;
+                        // …and so does a tow probe. It is a perigee reached by
+                        // towing *this* rock through *this* field over *this*
+                        // trajectory; against a rebuilt threat it is a measurement
+                        // of a mission that no longer exists. It survived here
+                        // until the threat orbit became dialable, when a stale
+                        // probe stopped being unreachable and became one keypress
+                        // away.
+                        self.tow_probe = None;
                         self.error = GString::new();
                     }
                     // The kernels were dropped (a failed re-load) while the build
                     // ran, so there is nothing to install it into. Say so rather
                     // than discard it silently and read as "still not ready".
                     None => {
+                        self.build_failed = true;
                         self.error =
                             "the scenario finished building but the kernels are no longer loaded"
                                 .into()
@@ -560,6 +585,7 @@ impl Mission {
             }
             Ok(Err(message)) => {
                 self.build = None;
+                self.build_failed = true;
                 self.error = message.as_str().into();
                 false
             }
@@ -567,6 +593,7 @@ impl Mission {
             // without a word must not leave the frontend polling forever.
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.build = None;
+                self.build_failed = true;
                 self.error = "the scenario build thread died without reporting".into();
                 false
             }
@@ -1377,15 +1404,23 @@ impl Mission {
     /// Solve this orbit's one-period required Δv on a worker thread.
     ///
     /// **The expensive half of a rebuild, and it is separate on purpose.**
-    /// Measured **28.8 s**, against ~10 s for the build itself. The scenario build
-    /// gives back a threat that can be drawn, planned against and probed; only the
-    /// tractor bench's *margin* needs this. Folding it into the build would make
-    /// every rebuild wait three times as long for a number most of the frontend
-    /// does not use — the same argument that keeps the Tier-2 preview off the build
-    /// path.
+    /// Measured **28.8 s on the shipping orbit** (0.79 yr period) and **40–63 s on
+    /// a 1.44 yr one**, against ~10 s for the build itself. The cost **scales with
+    /// the period**, because a one-period lead on a longer orbit is a
+    /// proportionally longer propagation — so the long-period orbits an operator
+    /// is most likely to go looking for are the slow ones to score, and the knobs
+    /// reach past 3 yr.
     ///
-    /// 28.8 s is also why the frontend must show this running rather than merely
-    /// go quiet: it is well past the point where a still panel reads as a hang.
+    /// The scenario build gives back a threat that can be drawn, planned against
+    /// and probed; only the tractor bench's *margin* needs this. Folding it into
+    /// the build would make every rebuild wait three to six times as long for a
+    /// number most of the frontend does not use — the same argument that keeps the
+    /// Tier-2 preview off the build path.
+    ///
+    /// That is also why the frontend must show this running rather than merely go
+    /// quiet, and why its copy says "about a minute" rather than a range: the
+    /// first draft promised "30–60 s" and a run took 63. A number measured on the
+    /// one orbit nobody rebuilds *to* is accurate and still a misleading promise.
     ///
     /// Refuses while any other worker is running, for the reason
     /// [`begin_rebuild_scenario`](Self::begin_rebuild_scenario) documents.
@@ -1852,6 +1887,17 @@ impl Mission {
     #[func]
     fn is_ready(&self) -> bool {
         self.core.as_ref().is_some_and(|c| c.has_scenario())
+    }
+
+    /// Whether the most recent build attempt failed — the test a frontend should
+    /// use after [`poll_build`](Self::poll_build) returns `false`.
+    ///
+    /// See the field's note for why `!is_ready()` is not that test: a failed
+    /// *rebuild* leaves the previous threat installed and ready, so `is_ready()`
+    /// reports success for a build that produced nothing.
+    #[func]
+    fn last_build_failed(&self) -> bool {
+        self.build_failed
     }
 
     /// The reason the last `load`/`build_scenario` failed (empty if none).

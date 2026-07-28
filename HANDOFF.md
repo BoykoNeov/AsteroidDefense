@@ -1152,9 +1152,103 @@ and the probability. Keyholes are the second and are not in this batch.
   gate did not prove tighter on this scenario. It stays because it checks the claim
   itself, and a faster encounter need not preserve that ordering.
 
-- **What is not here.** Keyholes and resonant returns; the ξ,ζ pinning they force;
-  real SBDB covariance ingestion (published in equinoctial or Keplerian elements,
-  at their own epoch, in mixed units — a conversion to validate by round-tripping,
-  not by inspection); a frontend. And the probability sweep above only *falls*,
-  because the shipping nominal is a designed hit: showing it *rise* as observations
-  accumulate needs a nominal miss, which is the deflected trajectory.
+- **What is not here.** The keyhole machinery itself and the ξ,ζ pinning it forces
+  (now *scoped* — see below); real SBDB covariance ingestion (published in
+  equinoctial or Keplerian elements, at their own epoch, in mixed units — a
+  conversion to validate by round-tripping, not by inspection); a frontend. And the
+  probability sweep above only *falls*, because the shipping nominal is a designed
+  hit: showing it *rise* as observations accumulate needs a nominal miss, which is
+  the deflected trajectory.
+
+### Keyholes priced before designing them — 2026-07-28
+
+`probe_keyhole_reach` answers the question that gates the whole keyhole batch —
+*which resonant returns can this rock's flyby even reach, and is the keyhole wide
+enough to aim at* — for the cost of one scenario build, before any of it is built.
+
+- **The theory is derived, not transcribed.** The flyby turns the Earth-relative
+  velocity through `δ` where `tan(δ/2) = μ⊕/(b·v∞²)`; rotating `Ŝ` toward `−B̂` by
+  `δ` and adding Earth's heliocentric velocity gives the outgoing orbit, so
+  `a'(b, B̂)` is closed-form and `a' = (h/k)^(2/3) AU` is the resonant locus. That
+  *is* the analytical resonant-return theory, reached through the deflection this
+  project already models — which means it can be checked instead of trusted.
+  Incidentally it settles a convention by derivation: at incoming infinity
+  `v ∝ (√(e²−1)/e)·[p̂ + √(e²−1)q̂]`, which normalises to exactly `geometry.rs`'s
+  `s_hat`, so `Ŝ` is the incoming **direction of motion**.
+
+- **The round-trip gate runs first and everything is downstream of it.**
+  Un-rotated, `V⊕ + v∞·Ŝ` must reproduce the rock's real pre-encounter
+  heliocentric `a`. Measured: **8.669e-5** relative (0.853937 vs 0.854011 AU),
+  against a predicted approximation ceiling of 1.3e-4. A frame mix-up, an
+  SSB-versus-Sun-centred slip, a flipped `Ŝ`, or a vis-viva error would all show
+  up here at the percent level, so this is what licenses the sweep rather than a
+  claim about it. The probe exits non-zero if it fails.
+
+- **What the approximation costs, stated before the numbers are read.** Taking the
+  encounter position as Earth's own costs `η ≈ 7e-5` in heliocentric radius, so
+  `δa/a ≈ 1.3e-4`; over a 7-year return that is a ~12 h timing slip, during which
+  Earth moves ~1.3e6 km — **about a hundred capture radii**. So absolute `a'`
+  answers "which resonances are in band" and nothing else: it is ~4 orders too
+  coarse to place the return on the disc and ~7 too coarse for a 600 m
+  Apophis-class keyhole. But `∂a'/∂b` **is** trustworthy, because the `r ≈ R⊕ₒᵣᵦ`
+  error is common-mode across neighbouring `b` and cancels to first order in the
+  derivative. That is why the derivative, not the placement, is the deliverable.
+
+- **The band is enormous and the count is not the interesting number.** From the
+  grazing `b_capture` = 11 311 km outward, over the full 2π, `a'` reaches
+  **0.687 .. 1.579 AU** against an incoming 0.854 AU — because at grazing this
+  encounter turns by ~63°. **135 resonances** fall in band with returns inside
+  1.5–20 yr. Sweeping the whole circle also keeps the result independent of the
+  b-vector sign `geometry.rs` deliberately leaves unasserted.
+
+- **The wide keyholes are the far ones, which inverts the intuition and is the
+  single most useful thing measured here.** Near-grazing resonances have the
+  steepest `∂a'/∂b` and are therefore the *narrowest*: 19:10 at 1.00–1.05 capture
+  radii is **17 m** wide. The wide ones sit far out where the deflection is weak —
+  3:4 at 5.4–13.6 capture radii is **11.6–24.9 km**. Since the keyhole width is
+  exactly the accuracy encounter-1 must be placed to, **choosing a far resonance
+  moves the required propagation accuracy from tens of metres to tens of
+  kilometres.** A metre-level 12-year round trip is not happening; a 12–25 km one
+  plausibly is. Any keyhole batch that had started at the grazing end would have
+  spent itself discovering it could not verify anything.
+
+- **The verdict: the shipping rock hosts a usable keyhole, so no new rock is
+  needed.** The **3:4** resonance (`a' = 0.825482 AU`, 4 revolutions in 3 years)
+  has its locus at `b` = 60 843–153 511 km, crossed by 26 of 72 directions, with
+  `|∂a'/∂b|` = 1.74e-7–3.75e-7 AU/km and a keyhole **11.6–24.9 km** wide —
+  **0.069–0.148 σ_b** against the σ_b = 168.7 × 0.8 km ellipse the existing Tier-3
+  map produces for the invented along-track covariance. Inverting
+  `b² = r_p² + 2μ⊕r_p/v∞²` gives a target perigee of **54 385 km (8.53 R⊕)**: a
+  real miss, reachable by the existing `required_dv` solver. So the deflected
+  trajectory — already owed anyway, because it is the only way to show P *rise* —
+  can be dialled onto the resonance, and the purpose-built threat orbit and the
+  Apophis oracle both stay out of this batch. 7:9 is wider still (48.7–131.5 km,
+  0.29–0.78 σ) at 29.7 R⊕ if more margin is wanted.
+
+- **A width that diverges is flagged, not quoted.** `Δb = Δa'/|∂a'/∂b|` is a
+  linearisation and blows up where the locus is *tangent* to a level set of `a'`.
+  Five resonances (15:19, 19:24, 4:5 among them) span >100× in `|∂a'/∂b|` across
+  directions and so contain such a tangency; 15:19's "1801 km" keyhole is that
+  artifact, not a measurement. The probe prints a `NEAR-TANGENCY` warning on them
+  and the good candidates (ratios 1.9–2.7×) are untouched by it. The keyhole-width
+  tolerance itself — the `Δa'` that slides the return by one capture diameter, via
+  `Δt = h·yr·1.5·Δa'/a'` and `V⊕·Δt` — is an order-unity definition, stated as one
+  so it can be argued with rather than assumed.
+
+- **A dormant landmine, now located.** The census finds exactly **1** close
+  approach within 0.05 AU over the nominal span. `nominal_encounter_epoch` reduces
+  at the *minimum-distance* approach and `uncertainty_sampling_plan` anchors
+  `t_reduce` to it — so the moment the span is extended past a **deeper** second
+  encounter, which is the entire point of a keyhole, that anchor silently
+  relocates and the shipping Jacobian changes meaning **without erroring**. The
+  fix is to index `find_close_approaches` explicitly rather than take the minimum,
+  and it must land before the span grows.
+
+- **One worry that dissolved on inspection.** `Clock::state_at` evaluates DOP853
+  **dense output** over the integrator's own adaptive sub-steps, not linear
+  interpolation between the 10-day snapshots (`clock.rs:208`, and
+  `dense_subsnapshot_beats_linear_interpolation` measures the gap at >1e4×). So
+  propagating *through* encounter 1 is not a correctness problem: the integrator
+  densifies through the flyby on its own, and the 10-day cadence remains what it
+  already was — the cadence a Jacobian's columns converged at, owed a
+  re-measurement across a deep flyby but not a landmine.

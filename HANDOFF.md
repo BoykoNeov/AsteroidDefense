@@ -1247,6 +1247,29 @@ enough to aim at* — for the cost of one scenario build, before any of it is bu
   `Δt = h·yr·1.5·Δa'/a'` and `V⊕·Δt` — is an order-unity definition, stated as one
   so it can be argued with rather than assumed.
 
+- **The rotated branch is measured, not assumed — and the b-vector sign is now
+  pinned by experiment.** The reach probe's round trip only exercises `δ = 0`; it
+  cannot see a sign error in `Ŝ_out = cos δ·Ŝ − sin δ·B̂`, because `geometry.rs`
+  leaves `b_vector`'s sign unasserted and a full-2π sweep is symmetric under
+  `B̂ → −B̂`. A flip changes neither the band nor `|∂a'/∂b|` — it **mirrors the
+  locus**, corrupting exactly the per-resonance `b_res` the batch depends on. So
+  `probe_keyhole_rotation` solves the impulse for a 21 R⊕ miss (**Δv = 0.205 m/s**
+  at 12 years' lead, a 190 s bracket-and-bisect), flies it, and predicts the
+  post-encounter heliocentric `a` both ways against the flown truth read 45 days
+  past the encounter: **`−B̂` matches to 1.518e-4 and `+B̂` misses by 7.428e-2, a
+  489× separation.** The branch stands, in magnitude as well as sign, and the
+  convention is now measured on a real flyby rather than adopted.
+
+  Two things that came out of it worth keeping. The wrong branch predicted
+  **0.8231 AU against the 3:4 resonance's 0.8255 AU** — a flip does not produce
+  nonsense here, it produces a plausible near-hit on the very resonance being
+  targeted, which is exactly why guessing was not an option. And the sign is not
+  cosmetic: `−B̂` *raises* `a'` (0.854 → 0.889) while `+B̂` lowers it, and 3:4 sits
+  on the lowering side — so reaching it needs a deflection of the **opposite
+  sense** to the along-track impulse, not a bigger one. `required_dv` targets a
+  perigee along a single direction and so controls `|b|` but not `B̂`; hitting a
+  resonance needs both knobs, and that is the targeting step.
+
 - **A dormant landmine, now located.** The census finds exactly **1** close
   approach within 0.05 AU over the nominal span. `nominal_encounter_epoch` reduces
   at the *minimum-distance* approach and `uncertainty_sampling_plan` anchors

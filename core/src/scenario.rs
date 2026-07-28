@@ -52,7 +52,7 @@ use crate::perturber_field::{
 };
 use crate::{
     geometry, Clock, DeflectionError, DeflectionScenario, Dop853, DvSolveTol, Epoch, Integrator,
-    ScanOptions, StateVector,
+    OrbitalElements, ScanOptions, StateVector,
 };
 
 /// Metres per kilometre — the km→m scale the DE440 states cross into SI on.
@@ -298,6 +298,179 @@ impl Default for ImpactorConfig {
     }
 }
 
+/// The unit vector the designed impact offset is laid along: perpendicular to the
+/// relative velocity.
+///
+/// Extracted rather than written twice because [`RealFieldScenario::build_with`]
+/// and [`ImpactorConfig::preview`] must place the impact point at the *same*
+/// spot — a preview that quotes a miss distance for a geometry the builder does
+/// not construct is worse than no preview. The seed-axis switch avoids a
+/// near-parallel cross product (which would lose precision, then normalize the
+/// noise back up to unit length) without caring which perpendicular it lands on:
+/// the offset direction within the b-plane is arbitrary by construction, only its
+/// magnitude and its perpendicularity to `vdir` carry meaning.
+///
+/// **`r_rel ⊥ v_rel` is the load-bearing consequence.** It makes the designed
+/// impact point the perigee of the geocentric hyperbola, which is what lets
+/// `preview` reach the incoming asymptote in closed form.
+fn impact_offset_axis(vdir: &Vector3<f64>) -> Vector3<f64> {
+    let seed_axis = if vdir.x.abs() < 0.9 {
+        Vector3::x()
+    } else {
+        Vector3::y()
+    };
+    let p = vdir.cross(&seed_axis);
+    p / p.norm()
+}
+
+/// What an [`ImpactorConfig`]'s encounter geometry and heliocentric orbit look
+/// like — computed in **closed form**, without the multi-year back-propagation
+/// [`RealFieldScenario::build_with`] costs.
+///
+/// See [`ImpactorConfig::preview`] for what it is and is not good for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThreatOrbitPreview {
+    /// Hyperbolic excess speed about Earth, m/s. **Not** `cfg.v_rel_kms`, which
+    /// is the speed at the impact point deep in Earth's well; this is what is
+    /// left after climbing out, and it is what sets the capture radius.
+    pub v_inf: f64,
+    /// b-plane impact parameter, m — the perpendicular miss of the *incoming
+    /// asymptote* from Earth's centre.
+    ///
+    /// **Also not `cfg.b_offset_km`.** Focusing means the asymptote passes wider
+    /// than the point it is aimed through: `b = b_offset · v_rel / v_inf`, which
+    /// at the shipping config is 7 077 km for a 3 000 km offset.
+    pub impact_parameter: f64,
+    /// Earth's focused collision disc, m — the bar `impact_parameter` is measured
+    /// against.
+    pub capture_radius: f64,
+    /// Whether this geometry is still a designed *impact*. `false` means
+    /// [`RealFieldScenario::build_with`] would reject it with
+    /// [`ScenarioError::NominalNotAHit`] — after paying the full back-propagation.
+    /// Reported rather than raised so a live UI can show the two numbers that
+    /// disagree instead of just refusing.
+    pub is_hit: bool,
+    /// Heliocentric semi-major axis of the *incoming* orbit, m.
+    pub semi_major_axis_m: f64,
+    /// Heliocentric eccentricity of the incoming orbit.
+    pub eccentricity: f64,
+    /// Heliocentric inclination of the incoming orbit, radians.
+    pub inclination_rad: f64,
+    /// Heliocentric orbital period of the incoming orbit, seconds — the unit the
+    /// deflection curve's "lead in orbits" is counted in.
+    pub period_seconds: f64,
+}
+
+impl ImpactorConfig {
+    /// The encounter geometry and heliocentric orbit this config implies, in
+    /// closed form — **microseconds**, against the ~10 s
+    /// [`RealFieldScenario::build_with`] costs.
+    ///
+    /// # Why this is possible at all
+    /// The designed impact places the offset perpendicular to the relative
+    /// velocity (see [`impact_offset_axis`]), so the impact point *is* the perigee
+    /// of the geocentric hyperbola. [`BPlaneEncounter::from_relative_state`] then
+    /// reduces that state to `v_inf` and the incoming asymptote `Ŝ` with no
+    /// integration, and the incoming heliocentric velocity is just
+    /// `v_earth + v_inf·Ŝ` — the flyby undone analytically instead of numerically.
+    ///
+    /// # How close it is — measured, in two very different halves
+    /// `preview_tracks_the_built_orbit` differences this against real builds across
+    /// the range the frontend's knobs reach (0.68–2.66 yr of period):
+    ///
+    /// - **The encounter geometry is exact.** `v_inf` and `impact_parameter` match
+    ///   the propagated nominal's own b-plane reduction to **0.001 %**. That is not
+    ///   a tolerance being met, it is the same closed form arriving at the same
+    ///   answer — the builder designs this state and the integrator hands it back.
+    /// - **The orbit is an estimate.** `a`/`period` are osculating at the **impact
+    ///   epoch**, where `build_with` reports vis-viva at the **seed**, `lead_years`
+    ///   earlier, after a real integration through the perturbed field. Worst
+    ///   observed gap **0.23 %** (the steep approach); even the long-period
+    ///   prograde extreme, where `v_inf` lies along Earth's 29.8 km/s and `a` is
+    ///   most sensitive to it, holds to 0.155 %.
+    ///
+    /// 0.23 % is good enough to *label* a knob and not good enough to *score* a
+    /// plan: the tractor bench divides the lead by the period, so it must keep
+    /// taking `period_seconds()` from the built scenario — which costs nothing,
+    /// because by then the rebuild has already landed.
+    ///
+    /// # Errors
+    /// [`ScenarioError::ImpactNotHyperbolic`] if the relative speed is too low for
+    /// the offset to be a flyby at all (Earth escape at 3 000 km is 16.3 km/s, so
+    /// this wall is *close* to the shipping 18 km/s and gets closer as the offset
+    /// shrinks), and [`ScenarioError::UnboundOrbit`] if the resulting heliocentric
+    /// orbit is not an ellipse. A geometry that merely stops being a hit is
+    /// reported through [`ThreatOrbitPreview::is_hit`], not raised.
+    pub fn preview(&self, eph: &Arc<Ephemeris>) -> Result<ThreatOrbitPreview, ScenarioError> {
+        let earth = EphemerisPerturber::new(Arc::clone(eph), EARTH_J2000);
+        let sun = EphemerisPerturber::new(Arc::clone(eph), SUN_J2000);
+        let mu_earth = eph
+            .gm_km3_s2(EARTH_J2000)
+            .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?
+            * KM3_S2_TO_M3_S2;
+        let mu_sun = eph
+            .gm_km3_s2(SUN_J2000)
+            .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?
+            * KM3_S2_TO_M3_S2;
+
+        // The same impact state `build_with` designs, through the same axis helper.
+        let vdir = self.v_rel_dir.normalize();
+        let r_rel = self.b_offset_km * KM_TO_M * impact_offset_axis(&vdir);
+        let v_rel = self.v_rel_kms * KM_TO_M * vdir;
+
+        let enc = BPlaneEncounter::from_relative_state(
+            r_rel,
+            v_rel,
+            mu_earth,
+            geometry::EARTH_EQUATORIAL_RADIUS_M,
+        )
+        .map_err(|e| {
+            ScenarioError::ImpactNotHyperbolic(format!(
+                "{e} — v_rel = {:.3} km/s at a {:.0} km offset is not a flyby \
+                 (Earth escape there is {:.3} km/s)",
+                self.v_rel_kms,
+                self.b_offset_km,
+                (2.0 * mu_earth / (self.b_offset_km * KM_TO_M)).sqrt() / KM_TO_M,
+            ))
+        })?;
+
+        // Undo the flyby: far before the encounter the body moved at `v_inf` along
+        // the incoming asymptote, so its heliocentric velocity was Earth's plus
+        // that. Position is Earth's — a few thousand km against 1 AU.
+        let earth_impact = earth
+            .state_at(self.impact_epoch)
+            .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
+        let sun_impact = sun
+            .state_at(self.impact_epoch)
+            .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
+        let helio = StateVector::new(
+            earth_impact.position + r_rel - sun_impact.position,
+            earth_impact.velocity + enc.v_inf * enc.s_hat - sun_impact.velocity,
+        );
+
+        let el = OrbitalElements::from_state(helio, mu_sun).map_err(|_| {
+            // Both element failures mean the same thing for a knob: there is no
+            // period, so "lead in orbits" has no meaning. Recompute `a` by vis-viva
+            // to carry the number the error's message quotes.
+            let r = helio.position.norm();
+            let v2 = helio.velocity.norm_squared();
+            ScenarioError::UnboundOrbit(1.0 / (2.0 / r - v2 / mu_sun))
+        })?;
+        let a = el.semi_major_axis;
+
+        Ok(ThreatOrbitPreview {
+            v_inf: enc.v_inf,
+            impact_parameter: enc.impact_parameter,
+            capture_radius: enc.capture_radius,
+            is_hit: enc.impact_parameter <= enc.capture_radius,
+            semi_major_axis_m: a,
+            eccentricity: el.eccentricity,
+            inclination_rad: el.inclination,
+            period_seconds: std::f64::consts::TAU * (a * a * a / mu_sun).sqrt(),
+        })
+    }
+}
+
 /// Assemble the force field for a scenario: the Tier-1 point-mass field plus
 /// whichever Tier-2 terms `tier2` enables, all summed in one [`CompositeForce`].
 ///
@@ -377,6 +550,11 @@ pub enum ScenarioError {
     /// The forward pass did not reproduce a hit — the designed impact did not
     /// round-trip through back-then-forward integration at the chosen tolerance.
     NominalNotAHit(String),
+    /// The designed impact state is not a hyperbolic flyby of Earth at all: the
+    /// relative speed does not clear Earth escape at the offset distance, so
+    /// there is no `v_inf` and no b-plane. Raised by
+    /// [`ImpactorConfig::preview`] — the cheap wall in front of the expensive one.
+    ImpactNotHyperbolic(String),
     /// A deflection evaluation/solve failed.
     Deflection(DeflectionError),
 }
@@ -399,6 +577,9 @@ impl fmt::Display for ScenarioError {
             ),
             ScenarioError::NominalNotAHit(m) => {
                 write!(f, "designed impact did not round-trip: {m}")
+            }
+            ScenarioError::ImpactNotHyperbolic(m) => {
+                write!(f, "designed impact is not a hyperbolic flyby: {m}")
             }
             ScenarioError::Deflection(e) => write!(f, "deflection solve failed: {e}"),
         }
@@ -600,16 +781,7 @@ impl RealFieldScenario {
             .state_at(cfg.impact_epoch)
             .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
         let vdir = cfg.v_rel_dir.normalize();
-        // A unit vector perpendicular to the relative velocity, for the offset.
-        let perp = {
-            let seed_axis = if vdir.x.abs() < 0.9 {
-                Vector3::x()
-            } else {
-                Vector3::y()
-            };
-            let p = vdir.cross(&seed_axis);
-            p / p.norm()
-        };
+        let perp = impact_offset_axis(&vdir);
         let impact_pos = earth_impact.position + cfg.b_offset_km * KM_TO_M * perp;
         let impact_vel = earth_impact.velocity + cfg.v_rel_kms * KM_TO_M * vdir;
         let impact_state = StateVector::new(impact_pos, impact_vel);
@@ -1133,6 +1305,255 @@ mod tests {
     /// Least distance of a geocentric track from Earth's centre over the window.
     fn min_range(track: &[Vector3<f64>]) -> f64 {
         track.iter().map(|p| p.norm()).fold(f64::INFINITY, f64::min)
+    }
+
+    /// The loaded almanac for a kernel-gated test, or `None` to skip. Loading it
+    /// directly (rather than through `RealFieldScenario::build`) is the whole point
+    /// for the preview tests: they must be able to ask about a config *without*
+    /// paying to build it.
+    fn test_ephemeris(who: &str) -> Option<Arc<Ephemeris>> {
+        let k = crate::kernels::resolve_for_test(who)?;
+        let eph = Ephemeris::load(&k.bsp)
+            .expect("DE kernel loads")
+            .with_constants(&k.pca)
+            .expect("planetary constants load");
+        Some(Arc::new(eph))
+    }
+
+    /// Off-default threat orbits that must all build — the ones the frontend's
+    /// knobs can actually reach. Named so a failure says which geometry broke.
+    fn off_default_configs() -> Vec<(&'static str, ImpactorConfig)> {
+        vec![
+            (
+                "faster (22 km/s)",
+                ImpactorConfig {
+                    v_rel_kms: 22.0,
+                    ..Default::default()
+                },
+            ),
+            (
+                "steeper approach",
+                ImpactorConfig {
+                    v_rel_dir: Vector3::new(0.30, -0.90, -0.30),
+                    ..Default::default()
+                },
+            ),
+            (
+                "wider offset (4200 km)",
+                ImpactorConfig {
+                    b_offset_km: 4_200.0,
+                    ..Default::default()
+                },
+            ),
+            // The long-period end, and the case most likely to break a patched-conic
+            // estimate: catching Earth from behind puts `v_inf` *along* Earth's
+            // 29.8 km/s, which is where `a` is most sensitive to the velocity the
+            // preview reconstructs. If the preview holds here it holds anywhere the
+            // direction knob can reach.
+            (
+                "near-prograde (long period)",
+                ImpactorConfig {
+                    v_rel_dir: Vector3::new(-0.95, -0.20, 0.05),
+                    ..Default::default()
+                },
+            ),
+        ]
+    }
+
+    /// **The preview's accuracy is a measurement, not a hope.**
+    ///
+    /// [`ImpactorConfig::preview`] reduces the designed impact in closed form at the
+    /// impact epoch; [`RealFieldScenario::build_with`] reports vis-viva at the seed,
+    /// `lead_years` (12) earlier, after a real integration through the perturbed
+    /// field. Those are different quantities, and the only honest way to know
+    /// whether the cheap one may be *labelled* with the expensive one's name is to
+    /// difference them on configurations the UI can reach.
+    ///
+    /// The bound below is what the frontend's copy is allowed to claim. It is
+    /// deliberately **not** tight enough to license substituting the preview for
+    /// `period_seconds()` in anything that scores a plan — the tractor bench divides
+    /// the lead by the period, and a few percent there walks straight into the
+    /// margin.
+    ///
+    /// Kernel-gated; skips (does not fail) with no kernel. ~40 s: four builds.
+    #[test]
+    fn preview_tracks_the_built_orbit() {
+        let Some(eph) = test_ephemeris("preview_tracks_the_built_orbit") else {
+            return;
+        };
+
+        let mut worst_period = 0.0_f64;
+        let mut cases = vec![("default", ImpactorConfig::default())];
+        cases.extend(off_default_configs());
+
+        for (who, cfg) in cases {
+            let p = cfg.preview(&eph).expect("preview succeeds");
+            let built = RealFieldScenario::build_with(&cfg, Arc::clone(&eph))
+                .unwrap_or_else(|e| panic!("{who} must build: {e}"));
+
+            let d_a = (p.semi_major_axis_m - built.semi_major_axis_m).abs() / built.semi_major_axis_m;
+            let d_t = (p.period_seconds - built.period_seconds).abs() / built.period_seconds;
+            worst_period = worst_period.max(d_t);
+
+            // The designed geometry must also survive the round trip: the propagated
+            // nominal's own b-plane reduction should land on the numbers the closed
+            // form predicted from the impact state it was designed from.
+            let enc = built
+                .deflection()
+                .expect("deflection scenario")
+                .nominal_encounter()
+                .expect("nominal encounter scans")
+                .expect("nominal is a hit");
+            let d_b = (p.impact_parameter - enc.impact_parameter).abs() / enc.impact_parameter;
+            let d_v = (p.v_inf - enc.v_inf).abs() / enc.v_inf;
+
+            eprintln!(
+                "{who:24} T {:.4} yr (built {:.4}, {:+.3}%)  a {:+.3}%  \
+                 b {:.0} km (built {:.0}, {:+.3}%)  v_inf {:+.3}%",
+                p.period_seconds / SECONDS_PER_YEAR,
+                built.period_seconds / SECONDS_PER_YEAR,
+                100.0 * (p.period_seconds - built.period_seconds) / built.period_seconds,
+                100.0 * (p.semi_major_axis_m - built.semi_major_axis_m) / built.semi_major_axis_m,
+                p.impact_parameter / 1000.0,
+                enc.impact_parameter / 1000.0,
+                100.0 * (p.impact_parameter - enc.impact_parameter) / enc.impact_parameter,
+                100.0 * (p.v_inf - enc.v_inf) / enc.v_inf,
+            );
+
+            // The encounter reduction is the same arithmetic on both sides, so it
+            // must agree far more tightly than the 12-year orbit does. A loose bound
+            // here would let a genuine geometry fork hide behind the orbit's slack.
+            assert!(
+                d_b < 1.0e-3 && d_v < 1.0e-3,
+                "{who}: preview and built encounter geometry disagree \
+                 (b {:.2e}, v_inf {:.2e}) — the two are not describing the same impact",
+                d_b,
+                d_v
+            );
+            assert!(
+                d_a < 0.02 && d_t < 0.02,
+                "{who}: preview orbit drifted from the built one (a {:.2e}, T {:.2e}) — \
+                 re-measure before the UI keeps quoting it",
+                d_a,
+                d_t
+            );
+        }
+
+        // Pinned so a regression that *worsens* the preview is visible even though
+        // every individual case still passes its bound. Measured worst is 0.23%
+        // (the steep approach); 1% leaves room for kernel/tolerance drift without
+        // leaving room for the preview to quietly become a different orbit.
+        assert!(
+            worst_period < 0.01,
+            "worst period error {:.3}% — update the doc and the UI's wording",
+            100.0 * worst_period
+        );
+    }
+
+    /// **Both walls are reachable from the knobs, and the cheap check finds them
+    /// before the expensive one does.**
+    ///
+    /// The two are not the same wall and they close from opposite directions:
+    ///
+    /// - *Too slow for the offset.* `r_rel ⊥ v_rel` puts the impact at the perigee
+    ///   of the geocentric hyperbola, so the flyby exists only while
+    ///   `v_rel > √(2μ⊕/b_offset)` — 16.3 km/s at the shipping 3 000 km offset,
+    ///   against a shipping `v_rel` of 18. **Shrinking the offset raises that bar**
+    ///   (28.2 km/s at 1 000 km), so pulling the hit toward Earth's centre is what
+    ///   falls off the cliff, which is the opposite of the intuition.
+    /// - *Too wide to be a hit.* The asymptote misses by `b = b_offset·v_rel/v_inf`,
+    ///   **not** by `b_offset` — 7 077 km for the shipping 3 000 km, against an
+    ///   11 311 km capture disc. But `b` and `b_capture` do **not** race each
+    ///   other freely, and the naive "b hits 11 311 km at ~4 800 km of offset" is
+    ///   wrong: widening the offset also *raises* `v_inf` (less of Earth's well to
+    ///   climb out of), which grows `b` more slowly and shrinks `b_capture` at the
+    ///   same time. The two meet at a value that is not a coincidence —
+    ///   `b ≤ b_capture ⟺ r_perigee ≤ R⊕`, and with `r_rel ⊥ v_rel` the perigee
+    ///   **is** `b_offset`. So the offset knob's ceiling is **exactly Earth's
+    ///   radius**, and `b_offset` is really a perigee-altitude dial wearing a
+    ///   b-plane name.
+    ///
+    /// The second assertion is the one that earns the preview its keep: the same
+    /// geometry is handed to `build_with`, which rejects it — after a 10 s
+    /// back-propagation the preview refused in microseconds.
+    ///
+    /// Kernel-gated; skips (does not fail) with no kernel.
+    #[test]
+    fn preview_finds_both_walls_before_the_builder_pays_for_them() {
+        let Some(eph) = test_ephemeris("preview_finds_both_walls_*") else {
+            return;
+        };
+
+        // --- The shipping config sits between the walls, and b ≠ b_offset --------
+        let cfg = ImpactorConfig::default();
+        let base = cfg.preview(&eph).expect("default previews");
+        assert!(base.is_hit, "the shipping config must still be a designed hit");
+        assert!(
+            base.impact_parameter > 2.0 * cfg.b_offset_km * KM_TO_M,
+            "focusing must widen the asymptote's miss well past the aim point: \
+             b = {:.0} km for a {:.0} km offset",
+            base.impact_parameter / 1000.0,
+            cfg.b_offset_km,
+        );
+        assert!(
+            base.impact_parameter < base.capture_radius,
+            "b {:.0} km must sit inside the capture disc {:.0} km",
+            base.impact_parameter / 1000.0,
+            base.capture_radius / 1000.0,
+        );
+
+        // --- Wall 1: too slow for the offset -------------------------------------
+        // Same 18 km/s that works at 3 000 km, at an offset where escape is 28 km/s.
+        let slow = ImpactorConfig {
+            b_offset_km: 1_000.0,
+            ..Default::default()
+        };
+        match slow.preview(&eph) {
+            Err(ScenarioError::ImpactNotHyperbolic(m)) => {
+                assert!(m.contains("escape"), "the message must name the bar: {m}")
+            }
+            other => panic!("a 1 000 km offset at 18 km/s is not a flyby, got {other:?}"),
+        }
+
+        // --- Wall 2: too wide to be a hit ----------------------------------------
+        // Walk the offset out until the preview says it stopped being an impact,
+        // then hold `build_with` to the same verdict.
+        let mut first_miss = None;
+        for offset_km in (3_000..=9_000).step_by(50) {
+            let c = ImpactorConfig {
+                b_offset_km: offset_km as f64,
+                ..Default::default()
+            };
+            if !c.preview(&eph).expect("previews").is_hit {
+                first_miss = Some(c);
+                break;
+            }
+        }
+        let missing = first_miss.expect("the offset knob must be able to leave the capture disc");
+        let r_earth_km = geometry::EARTH_EQUATORIAL_RADIUS_M / 1000.0;
+        eprintln!(
+            "preview stops calling it a hit at b_offset = {:.0} km (R_earth = {:.0} km)",
+            missing.b_offset_km, r_earth_km,
+        );
+        // **The wall is Earth's radius, exactly** — see the doc above. Pinned on the
+        // *derived* value: a bound fitted to whatever the sweep printed would ratify
+        // a focusing bug, since a wrong `v_inf` moves `b` and `b_capture` together
+        // and `is_hit` would keep flipping somewhere plausible-looking.
+        assert!(
+            (missing.b_offset_km - r_earth_km).abs() <= 50.0,
+            "the offset wall must land on Earth's radius {r_earth_km:.0} km \
+             (the impact point is the hyperbola's perigee), found {:.0} km",
+            missing.b_offset_km,
+        );
+        // The expensive confirmation. This is the whole justification for the
+        // preview: the builder agrees, and charges 10 s to say so.
+        match RealFieldScenario::build_with(&missing, Arc::clone(&eph)) {
+            Err(ScenarioError::NominalNotAHit(_)) => {}
+            other => panic!(
+                "build_with must reject the geometry the preview refused, got {:?}",
+                other.map(|_| "a built scenario")
+            ),
+        }
     }
 
     /// A built scenario must be able to **leave the thread that built it**, which

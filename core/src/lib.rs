@@ -35,6 +35,7 @@ pub mod perturber_field;
 pub mod propagator;
 pub mod scenario;
 pub mod state;
+pub mod uncertainty;
 
 pub use clock::{Clock, ClockError};
 pub use close_approach::{
@@ -46,9 +47,10 @@ pub use deflection::{
     DvSolveTol, TowSolveTol,
 };
 pub use elements::{ElementsError, OrbitalElements};
-pub use horizons::{Neo, NeoError};
 pub use epoch::Epoch;
-pub use forces::relativity::{CentralBodyState, FixedCentralBody, Relativity1PN, SPEED_OF_LIGHT_M_S};
+pub use forces::relativity::{
+    CentralBodyState, FixedCentralBody, Relativity1PN, SPEED_OF_LIGHT_M_S,
+};
 pub use forces::srp::SolarRadiationPressure;
 pub use forces::tractor::{GravityTractor, HoverGeometry, TowDirection, TowWindow};
 pub use forces::yarkovsky::YarkovskyA2;
@@ -56,6 +58,7 @@ pub use forces::{CompositeForce, ForceError, ForceModel, ForceSum, GRAVITATIONAL
 pub use geometry::{
     BPlaneEncounter, GeometryError, EARTH_EQUATORIAL_RADIUS_M, EARTH_MEAN_RADIUS_M,
 };
+pub use horizons::{Neo, NeoError};
 pub use integrator::{propagate_fixed, DenseSegment, Dop853, Integrator, IntegratorError, Rk4};
 pub use lambert::{lambert_universal, LambertError, LambertSolution};
 pub use launch_vehicle::{LaunchVehicle, LAUNCH_VEHICLES};
@@ -64,15 +67,21 @@ pub use mission::{
     CellDelivery, MassSolveOutcome, MissionError, Porkchop, PorkchopCell, TransferMetrics,
 };
 pub use perturber_field::{
-    sb441_perturber_field, tier1_perturber_field, EphemerisPerturber,
-    SB441_PERTURBER_GM_AU3_DAY2, TIER1_PERTURBER_FRAMES,
+    sb441_perturber_field, tier1_perturber_field, EphemerisPerturber, SB441_PERTURBER_GM_AU3_DAY2,
+    TIER1_PERTURBER_FRAMES,
 };
 pub use propagator::{KeplerPropagator, Propagator, PropagatorError};
 pub use scenario::{
     DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError, SweepPoint,
     Tier2Config, ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES, SAFE_PERIGEE_TARGET_M,
+    UNCERTAINTY_REDUCTION_LEAD_SECONDS,
 };
 pub use state::StateVector;
+pub use uncertainty::{
+    bplane_jacobian, BPlaneBasis, BPlaneSensitivity, BPlaneUncertainty, LinearityReport,
+    ShellSample, StateCovariance, UncertaintyError, FD_STEP_POSITION_M, FD_STEP_VELOCITY_MS,
+    SAMPLE_CADENCE_DAYS,
+};
 
 /// Crate version string, surfaced so the viewer/validation layers can report
 /// which core build produced a result (determinism = same-build-same-output).

@@ -325,7 +325,7 @@ That MVP delivers the whole lesson *and* an honest hit→miss flip. Everything b
 - Real NEOs from the JPL Small-Body Database (§9): Apophis, Bennu, Didymos/Dimorphos
 - Nuclear standoff + gravity-tractor methods — **DONE 2026-07-27**: the standoff term as an impulse sibling of the kinetic model, the **gravity tractor** as a windowed `forces/` term with its own duration solve. §5's spectrum is closed. The tractor also has a **frontend** — the `[K]` bench, six live knobs over a cheap model scored against the real field, with an on-demand full-field probe on `[E]`. The nuclear half remains core-only. And since **2026-07-28** the *rock* is dialable too: `[N]` rebuilds the campaign with the threat on a different heliocentric orbit, so the bench compares rather than merely reports — the same 200 t plan scores **0.372× on the shipping orbit and 1.096× on a long-period one**. See *The deflection spectrum, nuclear half*, *…tractor half*, *The tractor on the frontend*, and *The threat orbit became a knob*.
 - Lambert / porkchop mission design (makes the impulse *deliverable*, not assumed)
-- **Tier 3 uncertainty**: orbit covariance → b-plane → impact probability; keyholes; covariance ellipse shrinking with observations
+- **Tier 3 uncertainty**: orbit covariance → b-plane → impact probability; keyholes; covariance ellipse shrinking with observations — **first half DONE 2026-07-28**: `core/src/uncertainty.rs` maps a 6×6 state covariance through a measured 2×6 b-plane Jacobian and integrates the result over the focused capture disc, with the linearisation it rests on probed by a deterministic ±3σ shell. The covariance is *invented and labelled as such* (the shipping rock is synthetic and has no observation arc). **Still open:** keyholes and resonant returns, the ξ,ζ pinning they force, real SBDB covariance ingestion, and a frontend. See *Tier 3 begins*.
 
 ### Phase 3 (future)
 
@@ -1019,3 +1019,123 @@ could not put the threat anywhere else at all.
   it. The harness caught it only because the tolerance was tight enough to care.
   Placeholders in these tables are now deliberately slack (`9000.0`), so the core
   is always the binding authority. Same rule as every drawn body naming a source.
+
+### Tier 3 begins — 2026-07-28 session (covariance → b-plane → impact probability, and the cost that turned out to be a cadence)
+
+The last question this project could not ask: not *does this rock hit*, but
+*given what is actually known about where it is, how much of that spread lands
+on Earth*. `core/src/uncertainty.rs` is the first half — the covariance mapping
+and the probability. Keyholes are the second and are not in this batch.
+
+- **The sample cost was measured before the module was designed, and it was not
+  what it looked like.** A perturbed re-fly costs ~9.6 s, so a 12-column
+  finite-difference Jacobian is two minutes and a 1000-sample Monte Carlo is over
+  three hours. But almost all of that is the **snapshot cadence**, not the physics:
+  `Clock::propagate` calls `step_dense` once per snapshot, so the shipping 1-day
+  cadence restarts the adaptive integrator 4 443 times across the campaign. At
+  3 days a sample costs 3.2 s, at 10 days 1.1 s, at 30 days 0.50 s.
+
+- **The absolute answer moves with the cadence; the derivative barely does — and
+  the derivative is the only thing this layer consumes.** The b-plane perigee
+  shifts +3 cm at 3 d, +118 m at 10 d, +13.6 km at 30 d. But a Jacobian column
+  differences two runs flown at the *same* cadence, so the systematic error is
+  common to both and cancels: `∂(perigee)/∂x` holds to **0.024 % at 10 days** and
+  only breaks (2.65 %) at 30. Checked on three columns — a coordinate velocity
+  axis, the along-track velocity, and a position component — because along-track
+  carries both the largest sensitivity and the cadence's own timing error, and
+  would have been where a one-axis result flattered itself. It did not: all three
+  agree, and all three degrade by the *same* 2.65 % at 30 d, so the cadence error
+  is a uniform scale factor rather than anything direction-dependent. Ten days
+  ships, at 1.1 s a sample — which re-prices the 12-column Jacobian at 13 s and a
+  1000-sample Monte Carlo at ~18 minutes.
+
+- **`cadence_days` claimed "trades storage/step-count, not accuracy". That is
+  measurably false** and the doc is corrected. Nothing that shipped is wrong — the
+  shipping config uses the finest cadence on the table — but a caller coarsening
+  it for speed is paying in accuracy, not just memory.
+
+- **The cadence is a constant of the module, not a parameter.** Same shape as the
+  `REQUIRED_DV_AT_ONE_PERIOD` trap the previous session built a guard against: a
+  frontend that dialled cadence for display reasons would silently change every
+  covariance answer while everything kept working and every number stayed
+  plausible. `SAMPLE_CADENCE_DAYS`, `FD_STEP_POSITION_M` and `FD_STEP_VELOCITY_MS`
+  are pinned by a test that fails if they move without a re-measurement.
+
+- **The step sizes are per-column, because metres and m/s share no scale.**
+  Richardson study at the shipping cadence: `v_along` plateaus at 1.25e-4 m/s
+  (0.007 % per halving) and goes ragged with round-off below 3e-5; `r_x` is
+  *still truncation-dominated* at 1e4 m (1.9 % per halving), plateaus at ~3.1e2 m
+  (0.003 %), ragged below 1.6e2. What the two plateaus share is not a step size
+  but a *response* — both provoke a b-plane excursion of 10–20 km.
+
+- **THE CONSTRUCTION THIS MODULE EXISTS TO AVOID.** The obvious Jacobian —
+  propagate each perturbed state, find *its own* closest approach, reduce that —
+  is wrong and produces a full, plausible, entirely incorrect matrix. Closest
+  approach is an argmin over a sampled polyline, so the map is **quantised**: a
+  small perturbation moves the argmin by a whole sample or not at all, and the
+  differences come back noisy or identically zero while the matrix still looks
+  structurally fine. Every run is reduced at **one fixed epoch** instead
+  (`UNCERTAINTY_REDUCTION_LEAD_SECONDS`, 12 h before the nominal CA — ~330 000 km
+  out, inside the SOI, outside the well where `v_inf = √(v² − 2μ/r)` would
+  cancel). Legitimate because b-plane parameters are asymptotic properties of the
+  hyperbola, not of the sampling instant — and **measured**, not asserted: the
+  fixed-epoch `∂r_p/∂v_along` agrees with the at-CA one to **0.025 %**, which is
+  the cadence's own error and nothing more. That agreement is the load-bearing
+  assertion in the kernel-gated test.
+
+- **Impact probability is not quadrature over the disc, and the obvious version
+  fails exactly where this layer lives.** A well-determined orbit puts a 10 km
+  ellipse inside an 11 311 km capture disc; radial nodes spread across the disc
+  then sit tens of σ apart, step over the peak, and return 0.994 for an integral
+  whose answer is 1 (observed, not hypothesised — it was the first failing test).
+  Whitening by the covariance's Cholesky factor turns the Gaussian into a standard
+  normal and the disc into an ellipse; in polar coordinates each direction meets
+  that ellipse between the roots of a quadratic and the **radial integral becomes
+  analytic**, leaving one periodic 1-D integral refined by doubling. The isotropic
+  centred case then reduces to `1 − exp(−R²/2σ²)` and the tests check exactly that
+  across four orders of magnitude of `R/σ`.
+
+- **The ξ,ζ convention stays deferred, and this batch proves it can.** Under any
+  orthonormal change of b-plane basis — rotation *or* reflection — the mean and
+  covariance transform together and the capture disc, being centred at the origin,
+  is invariant; so the probability is unchanged. Pinned by a test that includes
+  the reflection a rotation-only test would miss. Keyholes are what will force the
+  convention, because a resonant circle sits at a specific ζ.
+
+- **The linearity check is deterministic, and its first metric was wrong.**
+  Twelve `±3σ` principal-axis extremes, not a thousand random draws — most draws
+  land near the middle where linearity was never in doubt, and the extremes are
+  where it bends first. But normalising each sample by *its own* flown displacement
+  reported **100 % bending** on a direction whose displacement was a few metres: a
+  real ratio, a meaningless one. The report now judges the worst absolute residual
+  against the *shell's* scale, and the same encounter reads **0.003 %** — 12 m of
+  residual against a shell reaching 351 km.
+
+- **The rock is synthetic, so the covariance is invented and says so.** There is no
+  observation arc and therefore no honest orbit-determination covariance;
+  `synthetic_along_track` borrows the *shape* (NEO uncertainty is overwhelmingly
+  along-track, which is why a b-plane prediction is a narrow ellipse rather than a
+  disc) and labels itself as invented, the same rule every drawn body follows. A
+  real covariance arrives with a real asteroid from the SBDB, in the keyhole batch.
+
+- **`sigma_distance` means the opposite of what it looks like.** The shipping
+  campaign reports **8 196 σ** from the b-plane origin and an impact probability of
+  **exactly 1** — no contradiction: the origin is Earth's *centre*, the thing that
+  counts as a hit is an 11 312 km disc around it, and a sub-kilometre ellipse
+  thousands of ellipse-widths off centre is still deep inside that disc. The doc
+  now says so; quoting the σ-distance as "how many σ from a hit" inverts the answer.
+
+- **It teaches the thing it was built to teach.** One rock, one trajectory, one
+  encounter, and the Jacobian computed once and reused — `BPlaneSensitivity` splits
+  the 13-propagation half from the free half, because "the same rock, better
+  observed" is the entire Tier-3 comparison and must not cost 14 s a time.
+  P(impact) runs **1.000 → 0.974 → 0.785 → 0.335 → 0.104** as the along-track σ
+  widens from 1e-5 to 1e-1 m/s. Nothing about the asteroid changed; only how well
+  anyone knows where it is.
+
+- **What is not here.** Keyholes and resonant returns; the ξ,ζ pinning they force;
+  real SBDB covariance ingestion (published in equinoctial or Keplerian elements,
+  at their own epoch, in mixed units — a conversion to validate by round-tripping,
+  not by inspection); a frontend. And the probability sweep above only *falls*,
+  because the shipping nominal is a designed hit: showing it *rise* as observations
+  accumulate needs a nominal miss, which is the deflected trajectory.

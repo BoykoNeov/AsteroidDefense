@@ -37,7 +37,7 @@ use std::fmt;
 use std::sync::{Arc, OnceLock};
 
 use anise::constants::frames::{EARTH_J2000, SUN_J2000};
-use nalgebra::Vector3;
+use nalgebra::{Vector2, Vector3};
 
 use crate::ephemeris::{Ephemeris, EphemerisError, KM3_S2_TO_M3_S2};
 use crate::forces::oblateness::Oblateness;
@@ -50,6 +50,10 @@ use crate::perturber_field::{
     pluto_perturber_field, sb441_perturber_field, tier1_perturber_field, EphemerisPerturber,
     EphemerisPole,
 };
+use crate::uncertainty::{
+    bplane_jacobian, BPlaneBasis, BPlaneSensitivity, BPlaneUncertainty, LinearityReport,
+    StateCovariance, UncertaintyError, SAMPLE_CADENCE_DAYS,
+};
 use crate::{
     geometry, Clock, DeflectionError, DeflectionScenario, Dop853, DvSolveTol, Epoch, Integrator,
     OrbitalElements, ScanOptions, StateVector,
@@ -59,6 +63,16 @@ use crate::{
 const KM_TO_M: f64 = 1.0e3;
 /// Seconds in a Julian year (365.25 d), for lead-time bookkeeping.
 const SECONDS_PER_YEAR: f64 = 365.25 * 86_400.0;
+
+/// How long before the nominal closest approach every Tier-3 uncertainty sample
+/// is reduced to b-plane geometry.
+///
+/// Twelve hours puts this campaign's rock ~330 000 km out at its 7.6 km/s `v_inf`:
+/// inside Earth's ~924 000 km sphere of influence, so the osculating hyperbola
+/// really is the encounter; far outside the well, so `v_inf = √(v² − 2μ/r)` is not
+/// a subtraction of near-equal squares; and inside the close-approach scan gate.
+/// See [`RealFieldScenario::uncertainty_sample`] for why the epoch is fixed at all.
+pub const UNCERTAINTY_REDUCTION_LEAD_SECONDS: f64 = 12.0 * 3600.0;
 
 /// Half-width of the encounter window the animation samples, seconds. ±1.5 days
 /// brackets the fast (18 km/s) pass with room for a modestly time-shifted
@@ -250,7 +264,19 @@ pub struct ImpactorConfig {
     /// b-plane geometry is well posed).
     pub b_offset_km: f64,
     /// Snapshot cadence of the propagated clock, days. Dense output serves
-    /// sub-cadence queries, so this trades storage/step-count, not accuracy.
+    /// sub-cadence queries, so *between* snapshots this costs nothing.
+    ///
+    /// **It is not free across them, contrary to what this said until it was
+    /// measured.** [`Clock::propagate`] restarts the adaptive integrator at every
+    /// snapshot, so the cadence sets the step-size regime as well as the storage:
+    /// `probe_tier3_cost` finds the b-plane perigee moves **+3 cm at 3 days,
+    /// +118 m at 10, and +13.6 km at 30** against the shipping 1 day. The shipping
+    /// value is the finest of those and nothing built on it is affected — but a
+    /// caller that coarsens the cadence for speed is buying that speed with
+    /// accuracy, not just with memory. Derivatives are far more forgiving than
+    /// absolute positions here (a difference of two runs at one cadence cancels the
+    /// systematic error), which is why [`SAMPLE_CADENCE_DAYS`] can afford 10 days
+    /// where this cannot.
     pub cadence_days: f64,
     /// How far past the impact epoch to propagate, days — a margin so a deflected
     /// (time-shifted) pass still lands inside the span.
@@ -563,10 +589,7 @@ impl fmt::Display for ScenarioError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ScenarioError::KernelsNotFound(detail) => {
-                write!(
-                    f,
-                    "no DE kernel pair could be resolved\n{detail}"
-                )
+                write!(f, "no DE kernel pair could be resolved\n{detail}")
             }
             ScenarioError::Ephemeris(m) => write!(f, "ephemeris load failed: {m}"),
             ScenarioError::Integration(m) => write!(f, "integration failed: {m}"),
@@ -761,8 +784,8 @@ impl RealFieldScenario {
     /// [`build`](Self::build) is the env-var convenience over this; a binding that
     /// loads the kernel itself (surfacing its own error to the UI) calls here.
     pub fn build_with(cfg: &ImpactorConfig, eph: Arc<Ephemeris>) -> Result<Self, ScenarioError> {
-        let force = compose_force(&eph, &cfg.tier2)
-            .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
+        let force =
+            compose_force(&eph, &cfg.tier2).map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
         let earth = EphemerisPerturber::new(Arc::clone(&eph), EARTH_J2000);
         let sun = EphemerisPerturber::new(Arc::clone(&eph), SUN_J2000);
 
@@ -1167,6 +1190,180 @@ impl RealFieldScenario {
         })
     }
 
+    /// Reduce one initial state to b-plane geometry at a **fixed** epoch — the
+    /// single sample the Tier-3 covariance mapping is built out of.
+    ///
+    /// Deliberately *not* "propagate, find this run's closest approach, reduce
+    /// that". Closest approach is an argmin over a sampled polyline, so that map is
+    /// quantised and its finite differences are noise; see the [`uncertainty`]
+    /// module note. Every sample is reduced at the same `t_reduce` instead, which
+    /// is legitimate because the b-plane parameters are asymptotic properties of
+    /// the osculating geocentric hyperbola rather than of the sampling instant.
+    ///
+    /// [`uncertainty`]: crate::uncertainty
+    fn uncertainty_sample(
+        &self,
+        seed: StateVector,
+        t_reduce: Epoch,
+        cadence_seconds: f64,
+        n_snapshots: u32,
+    ) -> Result<BPlaneEncounter, UncertaintyError> {
+        let fail = |e: String| UncertaintyError::SampleFailed {
+            column: None,
+            message: e,
+        };
+        let clock = self
+            .propagate_free(self.epoch0, seed, cadence_seconds, n_snapshots)
+            .map_err(|e| fail(e.to_string()))?;
+        let state = clock.state_at(t_reduce).map_err(|e| fail(e.to_string()))?;
+        let earth = self
+            .earth
+            .state_at(t_reduce)
+            .map_err(|e| fail(e.to_string()))?;
+        BPlaneEncounter::from_relative_state(
+            state.position - earth.position,
+            state.velocity - earth.velocity,
+            self.mu_earth,
+            self.earth_radius,
+        )
+        .map_err(|e| fail(e.to_string()))
+    }
+
+    /// The fixed reduction epoch and the propagation shape every sample shares.
+    ///
+    /// Reduction happens [`UNCERTAINTY_REDUCTION_LEAD_SECONDS`] before the nominal
+    /// closest approach, which for this campaign's ~7.6 km/s `v_inf` puts the rock
+    /// about 330 000 km out: comfortably inside Earth's sphere of influence (so the
+    /// osculating hyperbola is the encounter), comfortably outside the well (so
+    /// `v_inf = √(v² − 2μ/r)` is not a catastrophic cancellation), and inside the
+    /// scan gate. The propagation runs only to there plus one cadence of margin —
+    /// there is no reason to fly past the epoch the answer is read at.
+    fn uncertainty_sampling_plan(&self) -> Result<(Epoch, f64, u32), UncertaintyError> {
+        let fail = |e: String| UncertaintyError::SampleFailed {
+            column: None,
+            message: e,
+        };
+        let ds = self.deflection().map_err(|e| fail(e.to_string()))?;
+        let ca = ds
+            .nominal_encounter_epoch()
+            .map_err(|e| fail(e.to_string()))?
+            .ok_or_else(|| fail("no nominal close approach inside the scan gate".into()))?;
+        let t_reduce = ca.shifted_by_seconds(-UNCERTAINTY_REDUCTION_LEAD_SECONDS);
+
+        let cadence = SAMPLE_CADENCE_DAYS * 86_400.0;
+        let span = t_reduce.tdb_seconds_past_j2000() - self.epoch0.tdb_seconds_past_j2000();
+        if !(span.is_finite() && span > 0.0) {
+            return Err(fail(format!(
+                "reduction epoch is not after the campaign start (span {span} s)"
+            )));
+        }
+        let n_snapshots = ((span / cadence).ceil() + 1.0) as u32;
+        Ok((t_reduce, cadence, n_snapshots))
+    }
+
+    /// Map a state covariance at the campaign start onto the b-plane, and with it
+    /// the impact probability (HANDOFF §7 Tier 3).
+    ///
+    /// This is the deterministic simulation's honest answer: not "does this rock
+    /// hit" but "given what is actually known about where it is, how much of that
+    /// spread lands on Earth". The result carries the 2×2 crossing covariance, the
+    /// ellipse it implies, and [`BPlaneUncertainty::impact_probability`].
+    ///
+    /// **Cost: 13 propagations** — one nominal plus a central-difference pair per
+    /// state component — at the [`SAMPLE_CADENCE_DAYS`] cadence, about 14 s for the
+    /// shipping campaign. A measurement entry point, not something for a render
+    /// loop.
+    ///
+    /// The covariance must describe the state at [`epoch0`](Self::epoch0), in
+    /// barycentric ICRF metres and m/s, ordered `[r, v]` — the same frame and
+    /// ordering the seed is in. A covariance from anywhere else silently answers a
+    /// different question.
+    /// Reuse [`bplane_sensitivity`](Self::bplane_sensitivity) when mapping more
+    /// than one covariance — the 13 propagations are the covariance-independent
+    /// part, and paying them per covariance turns a free comparison into a costly
+    /// one.
+    pub fn bplane_uncertainty(
+        &self,
+        covariance: &StateCovariance,
+    ) -> Result<BPlaneUncertainty, UncertaintyError> {
+        Ok(self.bplane_sensitivity()?.map(covariance))
+    }
+
+    /// [`bplane_uncertainty`](Self::bplane_uncertainty), plus the `±n σ` shell that
+    /// says whether the linear map it rests on is still describing the encounter
+    /// out at the edge of the covariance.
+    ///
+    /// `Σ_b = J Σ Jᵀ` is exact only for a linear map, and the state→b-plane map is
+    /// not one. Whether the linearisation survives to 3σ is not something the
+    /// Jacobian can report about itself, and it is not a question random sampling
+    /// answers well — most draws land near the middle, where linearity was never in
+    /// doubt. The principal-axis extremes are where it bends first and there are
+    /// twelve of them.
+    ///
+    /// **Cost: 25 propagations** (~28 s) — the 13 above plus the shell.
+    pub fn bplane_uncertainty_checked(
+        &self,
+        covariance: &StateCovariance,
+        n_sigma: f64,
+    ) -> Result<(BPlaneUncertainty, LinearityReport), UncertaintyError> {
+        let sens = self.bplane_sensitivity()?;
+        let (t_reduce, cadence, n_snapshots) = self.uncertainty_sampling_plan()?;
+        let mean = sens.mean();
+
+        let offsets = covariance.sigma_shell(n_sigma);
+        let mut flown = Vec::with_capacity(offsets.len());
+        for (i, o) in offsets.iter().enumerate() {
+            let s = StateVector::new(
+                self.seed.position + Vector3::new(o[0], o[1], o[2]),
+                self.seed.velocity + Vector3::new(o[3], o[4], o[5]),
+            );
+            let enc = self
+                .uncertainty_sample(s, t_reduce, cadence, n_snapshots)
+                .map_err(|e| match e {
+                    UncertaintyError::SampleFailed { message, .. } => {
+                        UncertaintyError::SampleFailed {
+                            column: Some(i),
+                            message: format!("σ-shell sample: {message}"),
+                        }
+                    }
+                    other => other,
+                })?;
+            flown.push(sens.basis.project(&enc) - mean);
+        }
+
+        let report = LinearityReport::new(&sens.jacobian, &offsets, &flown, n_sigma);
+        Ok((sens.map(covariance), report))
+    }
+
+    /// The nominal fixed-epoch reduction, the frame it defines, and the 2×6
+    /// Jacobian about it — the covariance-independent half of every Tier-3 answer.
+    ///
+    /// **Cost: 13 propagations** (~14 s). Hold onto the result: mapping any number
+    /// of covariances through it afterwards is free
+    /// ([`BPlaneSensitivity::map`](crate::uncertainty::BPlaneSensitivity::map)),
+    /// which is what makes "how does the probability move as the orbit becomes
+    /// better known" a question worth asking interactively.
+    ///
+    /// The nominal encounter it carries is the **fixed-epoch** reduction, not the
+    /// closest-approach one [`nominal_hit`](Self::nominal_hit) gives. They agree to
+    /// the asymptotic invariance of the hyperbola, but they are not the same
+    /// number, and the mean of a distribution has to be measured by the same
+    /// instrument as its spread or the two do not belong to one another.
+    pub fn bplane_sensitivity(&self) -> Result<BPlaneSensitivity, UncertaintyError> {
+        let (t_reduce, cadence, n_snapshots) = self.uncertainty_sampling_plan()?;
+        let nominal = self.uncertainty_sample(self.seed, t_reduce, cadence, n_snapshots)?;
+        let basis = BPlaneBasis::from_encounter(&nominal);
+        let jacobian = bplane_jacobian(self.seed, |s| -> Result<Vector2<f64>, UncertaintyError> {
+            let enc = self.uncertainty_sample(s, t_reduce, cadence, n_snapshots)?;
+            Ok(basis.project(&enc))
+        })?;
+        Ok(BPlaneSensitivity {
+            nominal,
+            basis,
+            jacobian,
+        })
+    }
+
     /// Sample the encounter frame using an already-built [`DeflectionScenario`] and
     /// its precomputed [`nominal_hit`](Self::nominal_hit), so the expensive
     /// full-nominal propagation and scan happen once and each nudge pays only
@@ -1391,7 +1588,8 @@ mod tests {
             let built = RealFieldScenario::build_with(&cfg, Arc::clone(&eph))
                 .unwrap_or_else(|e| panic!("{who} must build: {e}"));
 
-            let d_a = (p.semi_major_axis_m - built.semi_major_axis_m).abs() / built.semi_major_axis_m;
+            let d_a =
+                (p.semi_major_axis_m - built.semi_major_axis_m).abs() / built.semi_major_axis_m;
             let d_t = (p.period_seconds - built.period_seconds).abs() / built.period_seconds;
             worst_period = worst_period.max(d_t);
 
@@ -1487,7 +1685,10 @@ mod tests {
         // --- The shipping config sits between the walls, and b ≠ b_offset --------
         let cfg = ImpactorConfig::default();
         let base = cfg.preview(&eph).expect("default previews");
-        assert!(base.is_hit, "the shipping config must still be a designed hit");
+        assert!(
+            base.is_hit,
+            "the shipping config must still be a designed hit"
+        );
         assert!(
             base.impact_parameter > 2.0 * cfg.b_offset_km * KM_TO_M,
             "focusing must widen the asymptote's miss well past the aim point: \
@@ -1662,7 +1863,9 @@ mod tests {
     /// `ASTEROID_PLANETARY_CONSTANTS`; skips (does not fail) when they are unset.
     #[test]
     fn propagate_free_matches_direct_step_in_the_field() {
-        if crate::kernels::resolve_for_test("propagate_free_matches_direct_step_in_the_field").is_none() {
+        if crate::kernels::resolve_for_test("propagate_free_matches_direct_step_in_the_field")
+            .is_none()
+        {
             return;
         }
 
@@ -1751,7 +1954,9 @@ mod tests {
     /// pinned in the crate's own unit tests.
     #[test]
     fn encounter_frame_track_agrees_with_reported_perigee() {
-        if crate::kernels::resolve_for_test("encounter_frame_track_agrees_with_reported_perigee").is_none() {
+        if crate::kernels::resolve_for_test("encounter_frame_track_agrees_with_reported_perigee")
+            .is_none()
+        {
             return;
         }
 
@@ -2086,7 +2291,8 @@ mod tests {
     /// optional small-body kernel is absent.
     #[test]
     fn asteroid_perturbers_leave_the_bplane_unchanged_off_and_shift_it_on() {
-        let Some(k) = crate::kernels::resolve_for_test("asteroid_perturbers_…_shift_it_on") else {
+        let Some(k) = crate::kernels::resolve_for_test("asteroid_perturbers_…_shift_it_on")
+        else {
             return;
         };
         let Some(sb) = k.small_bodies.clone() else {
@@ -2449,6 +2655,117 @@ mod tests {
             (miss_shift_km - recorded).abs() <= 0.02 * recorded.abs().max(1.0e-3),
             "J2_DEFLECTED_MISS_PERIGEE_SHIFT_KM is {recorded:+.4} km but the miss geometry \
              measures {miss_shift_km:+.4} km — update the constant (the frontend prints it)"
+        );
+    }
+    use crate::uncertainty::StateCovariance;
+
+    /// The Tier-3 pipeline, end to end against the real field.
+    ///
+    /// The kernel-free tests in [`crate::uncertainty`] validate the *mathematics* —
+    /// the difference scheme against an exactly-linear map, the probability integral
+    /// against the Rayleigh closed form. None of them says a 12-year arc reduces to
+    /// a sane Jacobian, which is a separate claim and needs the real propagator.
+    ///
+    /// The discriminating assertion is the first one: the **fixed-epoch** reduction
+    /// this module is built on must agree with the **closest-approach** reduction
+    /// everything else in the crate uses. That is the design's founding assumption,
+    /// it is the cheapest thing here to get invisibly wrong (a wrong reduction epoch
+    /// still yields a full, plausible, entirely incorrect Jacobian), and nothing
+    /// else in the suite would catch it. Measured at 0.025% by
+    /// `probe_tier3_uncertainty`; the 2% gate here is loose enough not to be flaky
+    /// and tight enough that a broken epoch — which would be off by far more than a
+    /// percent — cannot pass.
+    ///
+    /// Kernel-gated; skips (does not fail) with no kernel. ~30 s.
+    #[test]
+    fn tier3_covariance_maps_to_the_bplane_on_the_real_field() {
+        if crate::kernels::resolve_for_test("tier3_covariance_maps_to_the_bplane_*").is_none() {
+            return;
+        }
+        let sc = RealFieldScenario::build(&ImpactorConfig::default()).expect("scenario builds");
+        let ds = sc.deflection().expect("deflection");
+        let seed = ds.nominal().state_at(sc.epoch0()).expect("seed");
+        let nominal_at_ca = sc.nominal_hit(&ds).expect("nominal hit");
+
+        let sens = sc.bplane_sensitivity().expect("sensitivity");
+
+        // The founding assumption: same encounter, two different reduction rules.
+        let rel = (sens.nominal.perigee - nominal_at_ca.perigee).abs() / nominal_at_ca.perigee;
+        assert!(
+            rel < 0.02,
+            "fixed-epoch reduction disagrees with the closest-approach reduction by {:.3}%              (perigee {:.1} km vs {:.1} km) — the b-plane parameters are supposed to be              asymptotic, so a gap this size means the reduction epoch is wrong",
+            rel * 100.0,
+            sens.nominal.perigee / 1e3,
+            nominal_at_ca.perigee / 1e3
+        );
+        let rel_v = (sens.nominal.v_inf - nominal_at_ca.v_inf).abs() / nominal_at_ca.v_inf;
+        assert!(rel_v < 0.02, "v_inf disagrees by {:.3}%", rel_v * 100.0);
+
+        // The projected mean must carry the impact parameter — if it does not, the
+        // frame is not the b-plane's and every covariance pushed through it is
+        // expressed in the wrong plane.
+        let mean = sens.mean();
+        assert!(
+            (mean.norm() - sens.nominal.impact_parameter).abs()
+                < 1e-6 * sens.nominal.impact_parameter,
+            "projected mean {:.3} km vs |B| {:.3} km",
+            mean.norm() / 1e3,
+            sens.nominal.impact_parameter / 1e3
+        );
+
+        // Every column finite and non-trivial: a silently-zero column would make the
+        // covariance confidently wrong in exactly that direction.
+        for c in 0..6 {
+            let n = sens.jacobian.column(c).norm();
+            assert!(n.is_finite() && n > 0.0, "jacobian column {c} is {n}");
+        }
+        // Velocity columns dominate — a velocity error has the whole campaign to
+        // become a position error. Measured ~4e6 s of ratio; asserted loosely as
+        // "at least a thousand-fold", which a units error could not survive.
+        let pos = (0..3)
+            .map(|c| sens.jacobian.column(c).norm())
+            .fold(0.0_f64, f64::max);
+        let vel = (3..6)
+            .map(|c| sens.jacobian.column(c).norm())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            vel / pos > 1.0e3,
+            "velocity/position column ratio {:.3e}",
+            vel / pos
+        );
+
+        // An along-track-dominated covariance must map to an elongated ellipse. A
+        // near-circular one would contradict the deflection curve's own finding that
+        // along-track is the sensitive direction.
+        let cov = StateCovariance::synthetic_along_track(seed, 5.0e-5, 20.0, 1.0e3)
+            .expect("non-degenerate seed");
+        let mapped = sens.map(&cov);
+        let (major, minor) = mapped.sigma_axes();
+        assert!(major > minor && minor > 0.0);
+        assert!(
+            major / minor > 10.0,
+            "b-plane ellipse {:.1} km x {:.1} km is too round for a 20:1 along-track cigar",
+            major / 1e3,
+            minor / 1e3
+        );
+
+        // The nominal is a designed hit sitting well inside a capture disc far wider
+        // than this ellipse, so the probability is 1 — and a pipeline that reported
+        // anything else would be broken in a way the ellipse shape alone would hide.
+        let p = mapped.impact_probability().expect("well-posed");
+        assert!(
+            p > 0.999,
+            "designed hit with a sub-disc ellipse gave P = {p:.6e}"
+        );
+
+        // Widen the covariance until the spread reaches outside Earth and the
+        // probability must fall strictly below 1 — the whole point of the layer.
+        let wide = StateCovariance::synthetic_along_track(seed, 3.0e-2, 20.0, 1.0e3)
+            .expect("non-degenerate seed");
+        let p_wide = sens.map(&wide).impact_probability().expect("well-posed");
+        assert!(
+            p_wide > 0.01 && p_wide < 0.9,
+            "a poorly-known orbit on the same hitting trajectory gave P = {p_wide:.6e};              expected a partial probability, since the ellipse now reaches past Earth"
         );
     }
 }

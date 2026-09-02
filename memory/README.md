@@ -21,6 +21,8 @@ Each file is one fact with YAML frontmatter (`name`, `description`,
 - [`godot-visual-layer.md`](godot-visual-layer.md) — the retro-CRT visual shell
   (3D orrery, 2D radar, HUD, boot); its b-plane section is superseded by the
   gdext binding, kept for history.
+- [`keyholes.md`](keyholes.md) — Tier-3 keyholes: the pinned Öpik frame, the
+  closed-form resonant circles, the flown 3:4 return, and what is unrun.
 - [`gdext-binding.md`](gdext-binding.md) — the Phase-2 GDExtension binding of the
   Rust core into Godot: the real DE440 orrery, the deflection planner, the
   b-plane encounter view, and the traps found building them.

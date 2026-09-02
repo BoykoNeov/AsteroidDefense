@@ -9,9 +9,9 @@ thesis it exists to make you *feel*:
 > applied years out beats a massive shove applied days out.
 
 The money screen is a plot of **required Δv vs. lead time**: that curve *is* the
-thesis. You should be able to attempt a last-minute deflection, watch it fail,
-rewind ten years, tap the asteroid once with a small impulse, and watch Earth
-slide safely out of the way.
+thesis. You can attempt a last-minute deflection, watch it fail, rewind ten
+years, tap the asteroid once with a small impulse, and watch Earth slide safely
+out of the way.
 
 This is built for **realism**, not a cartoon. The dynamics that decide hit-vs-miss
 are modeled at ephemeris quality and validated against the same reference tools
@@ -21,45 +21,40 @@ professional planetary-defense work uses.
 
 ## Status
 
-**Early — the physics core is taking shape.** The full architecture, physics,
-validation strategy, and task sequence are locked in [`HANDOFF.md`](HANDOFF.md)
-(the authoritative spec). The de-risk spike passed (ANISE ephemeris + oracle
-toolchain build and the DE440 geocenter reconstructs correctly), and the Rust
-workspace is well underway (HANDOFF §10, tasks 1–7 in progress): epoch/state/
-orbital-elements with the element↔state map, an analytic Kepler propagator, a
-free-invariant proptest harness, and a hapsira two-body reference fixture in the
-validation ladder. The composable `ForceModel` is up with point-mass gravity and
-two integrators behind the `Integrator` trait (fixed-step RK4 and the adaptive
-**dop853** MVP encounter integrator). The **Tier-1 perturber field now assembles
-from the real JPL DE440/441 kernels** — Sun + 8 planets + Moon, positions and GM
-pulled through ANISE, geocenter (not EMB) and barycentric-frame footguns handled.
-That field is now **validated against ASSIST** (the §6 trajectory oracle): a test
-particle propagated with dop853 reproduces ASSIST's two-year track to ~4.5e-11
-relative (~20 m), with the residual tracking the ANISE−DE440 GM-source delta as
-expected — the rung-3 oracle check the whole ephemeris-test-particle architecture
-rests on. On top of that validated trajectory, the **b-plane hit test** is now in
-place: `core/geometry.rs` reduces a close approach to its impact parameter and the
-gravitationally-focused capture radius (`b_capture = R⊕·√(1 + (v_esc/v_inf)²)`),
-turning the encounter into an honest hit/miss answer. dop853 now emits **dense
-output** (its 7th-order continuous extension), and `core/clock.rs` layers a
-**fixed-cadence clock** on top: exact integrated snapshots at each cadence
-boundary, and sub-snapshot queries served from the dense output — *not* linear
-interpolation, which would visibly lie through the encounter's curvature. Next up:
-a close-approach detector root-finding on that continuous trajectory to feed the
-hit test; then the viewer and the Δv-vs-lead-time curve.
+**The physics is complete through Tier 3.** The MVP (a validated Tier-1 encounter,
+the honest hit→miss flip, the Δv-vs-lead-time curve, an egui viewer) shipped;
+Phase 2 layered on the Godot 3D frontend, the full Tier-2 force model validated
+term by term and against JPL Horizons on Apophis, the three deflection methods,
+Lambert/porkchop mission design with launch vehicles, the threat orbit as a live
+knob, and Tier 3 — orbit covariance mapped to the b-plane as an impact
+*probability*, and now **keyholes**.
 
-**Update:** the MVP (§10 tasks 1–10) is complete — close-approach detector,
-deflection scenario, and the egui viewer with the Δv-vs-lead-time headline curve
-are all in. **Phase 2 is underway:** a Godot 3D frontend (retro-CRT solar system,
-b-plane encounter view, interactive mission planner) is live, and the **gdext core
-binding** now stands up in `godot/rust/` — a GDExtension exposing `asteroid_core`
-to Godot, dependency flowing one way (godot → core). The binding's toolchain gate
-passes: the native `AsteroidCore` class loads in Godot 4.7 and round-trips the core
-version string. Wiring the real deflection physics through it (replacing the
-placeholder GDScript Kepler in `sim.gd`) is the current work.
+The keyhole work (2026-09) settled the last open physics question in the spec:
+the b-plane's Öpik `(ξ, ζ)` frame and the b-vector sign are pinned by derivation
+and by measurement, the resonant-return circles come out in closed form (proved
+identical to the flyby rotation the project already modelled), and the **3:4
+keyhole was flown with the propagator** — a 0.2166 m/s retrograde nudge twelve
+years before the 2040 encounter sends the shipping rock through the flyby and
+back to within 1 130 km of Earth's centre on 2042-12-31. The keyhole is an impact
+keyhole, measured rather than asserted, and it is a regression test.
+
+![The keyhole map of the shipping encounter](docs/keyhole_map.svg)
+
+*The b-plane of the 2040-01-01 encounter: Earth's gravitationally-focused capture
+disc, the resonant-return circles (each a place where a miss sets up a return
+`h` years later), the flown ±0.2 m/s deflections, and the uncertainty ellipse —
+sub-kilometre and along ζ, because along-track uncertainty is timing
+uncertainty. An interactive version is generated at `docs/keyhole_map.html`.*
+
+**What is next** (in order, spelled out in `HANDOFF.md` → *Where things stand*):
+keyhole targeting as a core API and a frontend readout; real orbit covariances
+from the JPL Small-Body Database; the impact probability *rising* near a keyhole;
+the Tier-3 ellipse on the Godot b-plane view; the dop853→IAS15 crossover for the
+multi-revolution returns; then Phase 3.
 
 If you're reading the code: **`HANDOFF.md` is the source of truth** for *why*
-things are the way they are. This README is the summary.
+things are the way they are, and **`DEVELOPING.md`** for how to build, test and
+regenerate everything. This README is the summary.
 
 ---
 
@@ -68,7 +63,7 @@ things are the way they are. This README is the summary.
 A **headless, deterministic Rust simulation core** is the single source of truth.
 Every view and the mission planner are *consumers* of the core's state — they
 never own state — so views stay in sync and every scenario is reproducible
-(same build → same output).
+(same build → same output). GDScript owns zero orbital mechanics.
 
 The mission planner doesn't compute trajectories itself. It pushes a Δv into the
 core's state at a chosen time and asks the core to re-propagate. *"Did this
@@ -80,45 +75,49 @@ Realism is switched on in composable tiers — each tier is just a set of *enabl
 acceleration terms* in the force model, not a code rewrite:
 
 - **Tier 0** — cosmetic Kepler context orbits (never used for hit/miss).
-- **Tier 1 (MVP)** — the asteroid integrated as a *test particle* in the real
-  JPL **DE440/441 ephemeris field** (Sun + 8 planets + Moon), in the
-  barycentric ICRF frame, with an adaptive high-order integrator (dop853).
+- **Tier 1** — the asteroid integrated as a *test particle* in the real JPL
+  **DE440/441 ephemeris field** (Sun + 8 planets + Moon), in the barycentric ICRF
+  frame, with an adaptive high-order integrator (dop853) and dense output.
   Hit/miss is decided by a proper **b-plane** geometry with a
   **gravitationally-focused capture radius** — Earth's gravity enlarges its own
-  target — not a naive geometric radius.
+  target (1.77 R⊕ at this encounter's 7.6 km/s) — not a naive geometric radius.
 - **Tier 2** — real-asteroid fidelity: 1PN general relativity, the Yarkovsky
-  thermal force, solar radiation pressure, J2 oblateness, and the 16 main-belt
-  asteroid perturbers. (This term list is deliberately ASSIST's force model.)
-- **Tier 3** — uncertainty realism: carry the orbit-determination covariance,
-  map it through the dynamics to the b-plane, and report an impact *probability*
-  and risk corridor — plus gravitational **keyholes**. This is what real
-  planetary defense actually reasons about.
+  thermal force, solar radiation pressure, Earth's J2, and the 16 main-belt
+  asteroid perturbers (deliberately ASSIST's force model), each validated in
+  isolation and the sum against Horizons on Apophis.
+- **Tier 3** — uncertainty realism: a state covariance mapped through the real
+  dynamics to the b-plane and integrated over the capture disc for an impact
+  *probability*; and **keyholes** — the Öpik frame, resonant-return circles,
+  keyhole widths, and a resonant return actually flown. This is what real
+  planetary defense reasons about.
 
 ### Deflection methods
 
-Modeled as a spectrum across lead time: **gravity tractor** (decades of lead),
-**kinetic impactor** (`Δv = β·m·v / M`, with DART's measured β ≈ 3.6), and
-**nuclear standoff** (energy → ablation → momentum — modeled as deflection
-physics only, never weapon design).
+Modeled as a spectrum across lead time: **gravity tractor** (decades of lead, a
+windowed force term with its own tow-duration solve), **kinetic impactor**
+(`Δv = β·m·v / M`, with DART's measured β ≈ 3.6, delivered through real Lambert
+transfers and launch vehicles), and **nuclear standoff** (energy → ablation →
+momentum — modeled as deflection physics only, never weapon design).
 
 ### Two honesty caveats, surfaced in the UI
 
-- **Delivery.** "Tap it once, ten years out" elides the *delivery* problem
-  (launch windows, transfer geometry). Until the Lambert/porkchop layer exists,
-  the sim shows *"if you could deliver this impulse, here's what it buys you"* —
-  not *"you can deliver it."*
-- **Determinism.** The MVP shows a single deterministic track and a binary
-  hit/miss. Real defense reasons over uncertainty — an impact *probability*
-  (that's the Tier-3 layer).
+- **Delivery.** The porkchop layer makes the impulse *deliverable*: a launch
+  window carries a `C3`, a payload for a named launcher, and an arrival velocity
+  whose projection onto the asteroid's track is what actually deflects it.
+  *Deliverable ≠ well-aimed*, and the map shows both.
+- **Determinism.** The deterministic track is one line; real defense reasons over
+  uncertainty. The Tier-3 layer turns that line into a probability, and labels
+  the shipping rock's covariance as invented (a synthetic asteroid has no
+  observation arc).
 
 ---
 
 ## Build vs. borrow
 
 The project **builds its own astrodynamics** — propagator, integrators, force
-model, Lambert solver, b-plane geometry, deflection models — because that's the
-part worth understanding deeply. It **borrows** only where a reinvented bug would
-be silent and catastrophic:
+model, Lambert solver, b-plane geometry, deflection models, uncertainty and
+keyhole theory — because that's the part worth understanding deeply. It
+**borrows** only where a reinvented bug would be silent and catastrophic:
 
 | Concern | Crate | License |
 |---|---|---|
@@ -135,46 +134,57 @@ shipped binary; only their *generated data* is committed as fixtures.
 
 Correctness is checked against an **oracle ladder** matched to the regime — free
 invariants (energy / angular momentum / LRL conservation) → analytic Kepler →
-REBOUND → **ASSIST** (the trajectory oracle, since the shipping propagator *is*
-the ASSIST configuration) → JPL Horizons on real asteroids. Each force term is
-validated *in isolation* (e.g. the GR term alone must reproduce Mercury's
-42.98″/century perihelion precession), not just the sum.
+REBOUND → **ASSIST** (the trajectory oracle: a two-year track reproduced to
+~4.5e-11 relative, ~20 m) → JPL Horizons on real asteroids. Each force term is
+validated *in isolation* (the GR term alone reproduces Mercury's 42.98″/century
+perihelion precession; J2 the closed-form nodal regression), not just the sum.
+The Tier-3 machinery is validated against exact maps and closed forms
+(a Rayleigh integral, the Valsecchi resonant-circle formula) and then against
+flown trajectories in the real field.
+
+The physics tests need the JPL kernels and **skip green without them** — run
+`python tools/fetch_kernels.py` once and `ASTEROID_REQUIRE_KERNELS=1 cargo test
+--workspace --release` so a green run means the physics ran. CI does exactly
+that.
 
 ---
 
-## Planned layout
-
-A ✅ marks what exists in the tree today; the rest is the planned target shape.
+## Layout
 
 ```
 workspace/
-├── core/        # ✅ pure simulation engine — no renderer dependency
-│   │            #    (epoch, state, orbital elements, Kepler propagator, ephemeris)
-│   ├── forces/  # ✅ composable acceleration terms (point-mass gravity) +
-│   │            #    ✅ perturber_field: ANISE DE440/441 Tier-1 field adapter
-│   ├── integrator.rs # ✅ Integrator trait: RK4 + adaptive dop853 + dense output
-│   ├── geometry.rs   # ✅ b-plane hit test + gravitationally-focused capture radius
-│   ├── clock.rs      # ✅ fixed-cadence clock; sub-snapshot queries from dense output
-│   └── ...      # 🔜 close-approach detector, lambert, deflection, ...
-├── viewer/      # ✅ scaffold only — MVP pure-Rust renderer (egui) comes at task 10
-├── godot/       # ✅ Phase 2: Godot 3D frontend + gdext binding (rust/) → core
-├── validation/  # ✅ Rust test harness — links core only, loads fixtures
-│                #    (✅ hapsira two-body + ✅ ASSIST Tier-1 trajectory oracle)
-└── pyref/       # ✅ Python scripts that generate validation fixtures (offline)
+├── core/          # asteroid_core — pure simulation engine, no renderer dependency
+│   ├── src/forces/     # composable terms: point mass, 1PN, Yarkovsky, SRP, J2, tractor
+│   ├── src/perturber_field.rs, integrator.rs, clock.rs, close_approach.rs, geometry.rs
+│   ├── src/deflection.rs, lambert.rs, mission.rs, launch_vehicle.rs, scenario.rs
+│   ├── src/uncertainty.rs  # Tier 3: covariance → b-plane → P(impact)
+│   ├── src/keyhole.rs      # Tier 3: Öpik frame, resonant circles, keyhole widths
+│   └── examples/           # probes — measurement programs, one question each
+├── validation/    # oracle-ladder tests over committed pyref fixtures
+├── pyref/         # offline fixture generators (GPL oracles, never linked)
+├── viewer/        # egui MVP viewer + the Δv-curve cache builder
+├── godot/         # Godot 4.7 frontend; godot/rust is the gdext binding → core
+├── tools/         # kernel fetcher, keyhole-map renderers (SVG, HTML)
+├── docs/          # generated keyhole map (JSON, SVG, HTML)
+└── memory/        # the assistant's project memory, mirrored for transparency
 ```
 
 ## Roadmap
 
-- **MVP** — prove the thesis in pure Rust: Tier-1 encounter, honest hit→miss
-  flip, the Δv-vs-lead-time curve, kinetic impactor. (egui viewer, no Godot.)
-- **Phase 2** — Godot 3D frontend; Tier-2 realism; real NEOs (Apophis, Bennu,
-  Didymos/Dimorphos); nuclear + gravity-tractor methods; Lambert/porkchop
-  mission design; Tier-3 uncertainty & keyholes.
-- **Phase 3** — launch vehicles & payload budgets, orbital assembly, standing
-  defense systems, multi-mission campaigns.
+- **MVP** — ✅ prove the thesis in pure Rust: Tier-1 encounter, honest hit→miss
+  flip, the Δv-vs-lead-time curve, kinetic impactor.
+- **Phase 2** — ✅ Godot 3D frontend; Tier-2 realism; real NEOs (Apophis, Bennu,
+  Didymos as Horizons scenery, Apophis as the validation capstone); nuclear +
+  gravity-tractor methods; Lambert/porkchop mission design; Tier-3 uncertainty
+  and keyholes. Remaining inside Phase 2: keyhole targeting API, SBDB
+  covariances, the Tier-3 ellipse on screen.
+- **Phase 3** — launch vehicles & payload budgets (the vehicles and mass solves
+  exist; the budgets and orbital assembly do not), standing defense systems,
+  multi-mission campaigns.
 
 See [`HANDOFF.md`](HANDOFF.md) for the complete spec, the locked decisions, the
-known hard problems, and the task-by-task plan.
+known hard problems, and the dated record of every batch; [`DEVELOPING.md`](DEVELOPING.md)
+for the commands.
 
 ---
 

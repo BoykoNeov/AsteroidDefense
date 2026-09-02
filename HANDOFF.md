@@ -8,6 +8,45 @@ This document is the starting context for continuing development in Claude Code.
 
 ---
 
+## Where things stand — 2026-09-02
+
+A dashboard, because §10's task list has been complete since the MVP and the
+truth has lived in the dated session sections at the end of this file since.
+Read this table first, then the session that owns the layer you are touching.
+
+| Layer | Status | Where |
+|---|---|---|
+| Tier 1: DE440 test-particle field, dop853 + dense output, fixed-cadence clock, close-approach detector, b-plane hit test with focused capture radius | done; ASSIST oracle to 4.5e-11 | `core/src/{perturber_field,integrator,clock,close_approach,geometry}.rs` |
+| The thesis: `required_dv` curve, kinetic / nuclear-standoff / gravity-tractor spectrum | done; curve slope −1.05 measured | `core/src/deflection.rs`, `forces/tractor.rs`, `viewer/` |
+| Tier 2: 1PN, Yarkovsky, SRP, J2, 16 sb441 perturbers, Pluto toggle | done; per-term closed forms + Apophis vs Horizons capstone | `core/src/forces/*`, `core/tests/capstone_neo_vs_horizons.rs` |
+| Mission design: Lambert (multi-rev), porkchop, launch vehicles, required impactor mass, cell verify | done | `core/src/{lambert,mission,launch_vehicle}.rs` |
+| Tier 3a: covariance → b-plane Jacobian → P(impact), linearity shell | done (covariance invented, labelled) | `core/src/uncertainty.rs` |
+| **Tier 3b: keyholes** — Öpik (ξ, ζ) frame and b-vector sign pinned, resonant circles in closed form, keyhole widths, the keyhole map, **the 3:4 keyhole flown to a return impact** | **done 2026-09-02** | `core/src/keyhole.rs`, `examples/probe_keyhole_{map,return}.rs`, `docs/keyhole_map.*` |
+| Godot frontend: DE440 orrery, real NEO scenery, planner, b-plane view (now with the keyhole map, `[H]`), launch-window map, Tier-2 force menu, tractor bench, threat-orbit knob | done; the keyhole overlay is **unrun** (no engine in the 2026-09-02 session) | `godot/`, `godot/rust/` |
+| Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
+
+### What is next, in order
+
+1. **Keyhole targeting as a core API.** `probe_keyhole_return`'s aim-then-refine
+   loop (closed-form circle point → `required_dv` → golden-section on the flown
+   return) generalised to any resonance and either ξ side, with the return's
+   b-plane reduced in *its own* Öpik frame; then a planner readout — "this plan
+   lands N km from the 3:4 keyhole" — so the thesis gains its corollary: a miss
+   can be worse than a hit if it is the wrong miss.
+2. **Real covariances from the SBDB** (equinoctial or Keplerian elements at their
+   own epoch, mixed units; validate the conversion by round-trip). This makes
+   P(impact) real for Apophis/Bennu and retires the "invented" label.
+3. **P(impact) rising near a keyhole.** The deflected trajectory as the Tier-3
+   nominal, and a chained two-encounter Jacobian — `uncertainty_sampling_plan`
+   refuses two encounters in span today, by design, until this exists.
+4. **The Tier-3 ellipse on the Godot b-plane view** (the sensitivity solve is
+   ~17 s: an on-demand worker like the porkchop grid, not a build-path cost).
+5. **dop853 → IAS15 crossover**, now that 15-year multi-revolution arcs (the
+   keyhole returns) are in the pipeline and the question has a customer.
+6. Phase 3.
+
+---
+
 ## 1. What we're building
 
 A solar-system model with 2D and 3D views, focused on **asteroid deflection and mission planning** — specifically, planning and simulating missions to deflect an Earth-bound asteroid, with different missions achieving different degrees of success.
@@ -325,7 +364,7 @@ That MVP delivers the whole lesson *and* an honest hit→miss flip. Everything b
 - Real NEOs from the JPL Small-Body Database (§9): Apophis, Bennu, Didymos/Dimorphos
 - Nuclear standoff + gravity-tractor methods — **DONE 2026-07-27**: the standoff term as an impulse sibling of the kinetic model, the **gravity tractor** as a windowed `forces/` term with its own duration solve. §5's spectrum is closed. The tractor also has a **frontend** — the `[K]` bench, six live knobs over a cheap model scored against the real field, with an on-demand full-field probe on `[E]`. The nuclear half remains core-only. And since **2026-07-28** the *rock* is dialable too: `[N]` rebuilds the campaign with the threat on a different heliocentric orbit, so the bench compares rather than merely reports — the same 200 t plan scores **0.372× on the shipping orbit and 1.096× on a long-period one**. See *The deflection spectrum, nuclear half*, *…tractor half*, *The tractor on the frontend*, and *The threat orbit became a knob*.
 - Lambert / porkchop mission design (makes the impulse *deliverable*, not assumed)
-- **Tier 3 uncertainty**: orbit covariance → b-plane → impact probability; keyholes; covariance ellipse shrinking with observations — **first half DONE 2026-07-28**: `core/src/uncertainty.rs` maps a 6×6 state covariance through a measured 2×6 b-plane Jacobian and integrates the result over the focused capture disc, with the linearisation it rests on probed by a deterministic ±3σ shell. The covariance is *invented and labelled as such* (the shipping rock is synthetic and has no observation arc). **Still open:** keyholes and resonant returns, the ξ,ζ pinning they force, real SBDB covariance ingestion, and a frontend. See *Tier 3 begins*.
+- **Tier 3 uncertainty**: orbit covariance → b-plane → impact probability; keyholes; covariance ellipse shrinking with observations — **first half DONE 2026-07-28**: `core/src/uncertainty.rs` maps a 6×6 state covariance through a measured 2×6 b-plane Jacobian and integrates the result over the focused capture disc, with the linearisation it rests on probed by a deterministic ±3σ shell. The covariance is *invented and labelled as such* (the shipping rock is synthetic and has no observation arc). ~~**Still open:** keyholes and resonant returns, the ξ,ζ pinning they force~~ — **both DONE 2026-09-02**, see *Keyholes, closed*: the frame is pinned, the circles are closed-form, and the 3:4 keyhole is flown to a return impact. Still open: real SBDB covariance ingestion, and the ellipse on the frontend. See *Tier 3 begins* and *Keyholes, closed*.
 
 ### Phase 3 (future)
 
@@ -377,7 +416,7 @@ The first review and the follow-up discussion closed every major open question (
 - **dop853 → IAS15 crossover (Tier 2).** dop853 is the MVP integrator; the lead time / orbit count at which IAS15's near-symplectic long-arc behavior actually wins is an empirical question — measure it against REBOUND when Tier-2 long arcs arrive.
 - **Impulse soft-cap: hard gate vs. honest readout.** Whether the MVP forbids an over-budget nudge outright or allows it with an honest *"this would take N DART-class impactors"* label — a UX call to settle in implementation (§5).
 - **SBDB covariance ingestion (Tier 3).** The on-disk format/units for real-asteroid orbit-determination covariances feeding `uncertainty.rs` — deferred until Tier 3.
-- **b-vector sign convention + ξ,ζ decomposition (raised by step-8 b-plane geometry).** `geometry.rs` ships the b-plane hit test and the b-vector `B` with its *magnitude* pinned (`|B| = b`) and its plane pinned (`B ⊥ Ŝ`, `B ⊥ ĥ`), but its **sign** deliberately unasserted, and the Öpik/Kizner **ξ,ζ decomposition** — which needs an external reference direction (Earth's heliocentric velocity, or an ecliptic pole) — deferred to Tier 3 (`uncertainty.rs`), since that is the layer (keyholes/covariance) that actually reasons in b-plane coordinates. Nail the sign + reference frame when keyhole geometry needs it. **Phase-2 3C-2c coexists with this rather than forcing it:** the Godot b-plane view builds its *display* axes from `Ŝ` and the ecliptic pole in the binding (not core), labels them as display axes, and prints only rotation-invariant scalars (`|B|`, perigee, capture radius, `v_inf`) — so nothing on screen depends on the unpinned convention, and settling it later is still free.
+- ~~**b-vector sign convention + ξ,ζ decomposition (raised by step-8 b-plane geometry).**~~ **CLOSED 2026-09-02** — `B` points at the incoming asymptote (derived from the hyperbola's centre, measured 489× on a flown flyby), `ζ̂` opposes Earth's motion, `(ξ, η, ζ)` right-handed; `core/src/keyhole.rs`, see *Keyholes, closed*. The original text follows for the record. `geometry.rs` ships the b-plane hit test and the b-vector `B` with its *magnitude* pinned (`|B| = b`) and its plane pinned (`B ⊥ Ŝ`, `B ⊥ ĥ`), but its **sign** deliberately unasserted, and the Öpik/Kizner **ξ,ζ decomposition** — which needs an external reference direction (Earth's heliocentric velocity, or an ecliptic pole) — deferred to Tier 3 (`uncertainty.rs`), since that is the layer (keyholes/covariance) that actually reasons in b-plane coordinates. Nail the sign + reference frame when keyhole geometry needs it. **Phase-2 3C-2c coexists with this rather than forcing it:** the Godot b-plane view builds its *display* axes from `Ŝ` and the ecliptic pole in the binding (not core), labels them as display axes, and prints only rotation-invariant scalars (`|B|`, perigee, capture radius, `v_inf`) — so nothing on screen depends on the unpinned convention, and settling it later is still free.
 - ~~**Pluto in the shipping perturber field (raised by batch-2c ASSIST validation).**~~ **CLOSED 2026-07-27 — measured at 0.6 m, shipping field stays at ten bodies.** Both halves of the blocker resolved: the missing GM was real (`pck11.pca` genuinely resolves no Pluto GM — probed, not assumed) and the DE440 header supplies one (`GM9` → 975.500 km³/s²); and the *cost* is now measured rather than extrapolated. §5's own criterion was "flip to 11 if the growing-with-lead-time cost proves to matter"; at the campaign's real ~12 yr lead Pluto moves the b-plane perigee by **0.0006 km**, two orders below the belt's sub-km floor. The batch-2c ~55 m position figure did grow, but not into anything the b-plane resolves. Pluto ships as a `Tier2Config` toggle (off by default) so the comparison stays reproducible. See *The deferred leftovers, closed*.
 
 ### Tier 2 begun — 2026-07-20 session (1PN relativity + Yarkovsky terms)
@@ -1298,3 +1337,94 @@ enough to aim at* — for the cost of one scenario build, before any of it is bu
   densifies through the flyby on its own, and the 10-day cadence remains what it
   already was — the cadence a Jacobian's columns converged at, owed a
   re-measurement across a deep flyby but not a landmine.
+
+### Keyholes, closed — 2026-09-02 session (the Öpik frame pinned, the circles in closed form, and the 3:4 keyhole flown to an impact)
+
+The reach and rotation probes had priced the keyhole batch; this session built
+it, and the closed form corrected one of the numbers those probes recorded.
+
+- **The sign is derived, not only measured.** The hyperbola's centre `C = a·e·P̂`
+  lies on the incoming asymptote, so the asymptote's closest point to Earth is
+  `C − (C·Ŝ)Ŝ = a·e·P̂ − a·Ŝ = b·(Ŝ × ĥ)` — exactly the `B` `geometry.rs` builds.
+  So `B` points from Earth's centre *at the asteroid's incoming line*, gravity
+  bends toward `−B̂`, and the rotation probe's 489× measurement is the same fact
+  seen from the other side. `b_vector_points_at_the_incoming_asymptote` pins it:
+  every inbound sample has `r·B̂ > 0` and `r·B̂ → b` on the asymptote.
+
+- **The ξ,ζ convention is settled by an identity, and the identity is a test.**
+  `core/src/keyhole.rs`: `η̂ = Ŝ`, `ζ̂` anti-parallel to Earth's velocity projected
+  on the b-plane, `ξ̂ = η̂ × ζ̂`. Under exactly those signs the rotation
+  `Ŝ_out = cos δ·Ŝ − sin δ·B̂` dotted with `V̂⊕` reproduces Valsecchi's
+  `cos θ' = [(b² − c²) cos θ + 2cζ sin θ]/(b² + c²)` term for term
+  (`closed_form_equals_the_rotation_construction`, 200 random geometries to
+  1e-12). Level sets of `a'` are then circles centred on the ζ-axis,
+  `ζ_c = c sin θ/(cos θ' − cos θ)`, `R = c|sin θ'|/|cos θ' − cos θ|`, with an
+  analytic gradient pinned against central differences and shown normal to the
+  circle. `perigee_state_for_asymptote` inverts the reduction (the state a
+  targeting step will need) and round-trips to 1e-10. **+ζ always raises `a'`**
+  — bending toward Earth's motion adds heliocentric speed — which is the
+  structural form of what the rotation probe found by flying.
+
+- **The correction.** `probe_keyhole_reach` reported the 3:4 locus at
+  `b = 60 843–153 511 km` and a target perigee of 54 385 km. The exact circle
+  (`ζ_c = −78 704 km`, `R = 74 837 km`) runs from **3 866 km to 153 540 km**: the
+  far end was right, the near end was not, because the probe bisected outward
+  from `b_capture` and a ray that crosses a circle twice, or enters it inside the
+  disc, showed it no sign change. So the resonance passes *through* the capture
+  disc — as do all 27 resonances with `h ≤ 7` — and the nearest *miss* on it is
+  the grazing point, where the keyhole is **0.18 km** wide (the far end's
+  24.92 km matches the probe's 24.9). `ResonantCircle::intersections_at_radius`
+  gives the grazing points; `crosses_capture_disc` says so.
+
+- **The map, as data and as pictures.** `probe_keyhole_map` (~50 s) writes
+  `docs/keyhole_map.json` — frame, capture disc, the Tier-3 ellipse rotated into
+  ξ,ζ (major axis **89.7° from ξ**: along-track uncertainty is timing
+  uncertainty, and the picture finally says so), 168 circles within 60 capture
+  radii, and two deflections flown in the real field: **+0.2 m/s → a' 0.8899 AU
+  closed form vs 0.8900 flown (1.26e-4); −0.2 m/s → 0.8233 vs 0.8233 (2.14e-5)**
+  — the rotation probe's check on both ζ sides for two propagations instead of a
+  190 s solve. `tools/keyhole_map_svg.py` and `keyhole_map_html.py` (standard
+  library only) render it; the SVG is in the README, the HTML is interactive.
+
+- **THE 3:4 KEYHOLE, FLOWN.** `probe_keyhole_return` (252 s) aims with the closed
+  form — the circle point at the nominal's own ξ, converted to a perigee,
+  `required_dv` retrograde → **0.216438 m/s** — flies the deflection, hands off
+  30 d past the flyby, flies 3.6 more years, and censuses Earth approaches
+  inside 0.05 AU. The aimed shot returned at **53 841 km** on 2042-12-31, about
+  five capture radii: the module doc's "~100 capture radii" bound on the
+  `r ≈ R⊕ₒᵣᵦ` approximation was conservative by 20×. The return miss is
+  V-shaped in Δv (Earth's motion over the timing slip), so eleven golden-section
+  steps found the floor: **Δv = 0.216550 m/s → 1 130 km from Earth's centre,
+  2042-12-31T14:33 TDB, 3.00 yr after the 2040-01-01 flyby.** Inside the disc;
+  inside Earth. The keyhole is an impact keyhole, measured. Its Δv window at the
+  floor, ~1.3e-5 m/s, is ~13 km of b at the ~1e6 km/(m/s) leverage of a 12-year
+  lead — the same order as the closed-form width. And the corollary the thesis
+  now carries: a 0.2166 m/s nudge that turns a certain 2040 impact into a
+  comfortable 23 R⊕ miss produces a certain 2042 impact instead. *Which* miss
+  matters. `the_three_four_keyhole_returns_the_rock_to_earth_when_flown` re-flies
+  that Δv (26 s) and asserts a return inside four capture radii at 2.9–3.1 yr.
+
+- **The frontend draws the map, unrun.** The binding's `encounter_basis()` is now
+  the core's Öpik frame (fallback to the ecliptic-pole basis, reported by
+  `bplane_frame_pinned()`), `keyhole_circles(max_years)` hands GDScript the rows,
+  `encounter.gd` draws circles and widths under the disc and `[H]` toggles them
+  (`encounter_keyholes`, keycode 72). The binding's kernel-gated test pins that
+  `ζ̂` opposes Earth's motion, that a *retrograde* plan lands on `−ζ`, and that
+  3:4 is listed through the disc at ~153 500 km. **No Godot ran in this session:
+  the GDScript is written against the tested binding and has not been seen on
+  screen.** The `_shot.gd` autoload is the way to look, per the visual-layer
+  memory.
+
+- **Engineering, because a fresh clone could not run the physics.** The session's
+  proxy blocked NAIF and nyx-space; the kernels came from the `naif-de440` PyPI
+  wheel (the full `de440.bsp`, which the resolver accepts) and the ANISE
+  repository's LFS media endpoint for `pck11.pca`. `tools/fetch_kernels.py`
+  encodes those fallbacks with magic-byte checks; `.github/workflows/ci.yml` runs
+  fmt, clippy and the kernel-free suite, then fetches, caches and runs the core
+  physics with `ASTEROID_REQUIRE_KERNELS=1`; `DEVELOPING.md` holds the commands;
+  the README's status ("Early — the physics core is taking shape") was three
+  phases stale and is rewritten. Twenty-six files were out of `rustfmt` shape
+  and were formatted in a commit of their own. **Not run here:** the three
+  Horizons `.neo` tests (the JPL API was blocked too; they fail under
+  `REQUIRE_KERNELS` on this box only). Baseline before the batch: 211 core tests
+  green with kernels (plus the three Horizons tests that cannot run here); after: 225.

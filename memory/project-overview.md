@@ -525,3 +525,14 @@ next play; new input actions in project.godot need syncing into the editor's
 in-memory ProjectSettings (same mechanism) or simulate_input rejects the action
 names. Headless test leaks 2 ObjectDB instances (events dicts) — cosmetic.
 **Still placeholder**: real physics arrives with the GDExtension core binding.
+
+**2026-09-02 — Tier 3 complete, keyholes flown; structure refreshed.** See
+[[keyholes]]. `HANDOFF.md` now opens with a *Where things stand* dashboard and
+an ordered next-steps list (targeting API → SBDB covariances → P(impact) rising
+near a keyhole → ellipse on the Godot view → IAS15 crossover → Phase 3);
+`README.md` was rewritten (its status was three phases stale) and embeds
+`docs/keyhole_map.svg`; `DEVELOPING.md` holds every command; CI exists
+(`.github/workflows/ci.yml`, kernel-free then kernels-required); kernels for a
+fresh clone come from `python tools/fetch_kernels.py` (NAIF → naif-de440 PyPI
+wheel → ANISE LFS). Working branch this session:
+`claude/project-structure-planning-6l2sin`.

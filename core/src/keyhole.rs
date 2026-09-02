@@ -1,0 +1,1169 @@
+//! Tier 3, second half: the Öpik b-plane frame **pinned**, the closed-form
+//! post-encounter orbit, resonant-return circles, and keyhole widths
+//! (HANDOFF §5 *Keyholes*, §7, and the open question this module closes).
+//!
+//! `uncertainty.rs` answers *how much of the orbit's spread lands on Earth*.
+//! This module answers the question that only makes sense inside that one:
+//! *where on the b-plane does a miss set up a return* — a **keyhole**. A flyby
+//! that misses Earth still turns the asteroid's heliocentric velocity, and if the
+//! turned orbit's period is commensurable with Earth's (`k` revolutions in `h`
+//! years) the two meet again at the same place `h` years later. The set of
+//! b-plane points that produce one such resonance is a **circle**, and the
+//! keyhole is the thin band around it that returns *onto the capture disc*.
+//!
+//! # The theory, derived from the deflection this project already models
+//!
+//! The flyby turns the Earth-relative velocity through `δ`, `tan(δ/2) = c/b`
+//! with `c = μ⊕/v∞²`, bending it *toward Earth* — from `Ŝ` toward `−B̂`. Adding
+//! Earth's heliocentric velocity back gives the outgoing heliocentric orbit:
+//!
+//! ```text
+//!   Ŝ_out = cos δ · Ŝ − sin δ · B̂            v_out = V⊕ + v∞ · Ŝ_out
+//! ```
+//!
+//! That is already everything. In the Öpik frame below, with `θ` the angle
+//! between `Ŝ` and `V⊕`, the outgoing angle `θ'` obeys **Valsecchi et al. (2003)**
+//! eq. for the post-encounter geometry,
+//!
+//! ```text
+//!   cos θ' = [ (b² − c²) cos θ + 2 c ζ sin θ ] / (b² + c²)         b² = ξ² + ζ²
+//! ```
+//!
+//! and this module proves the two are the *same statement*: substituting
+//! `cos δ = (b² − c²)/(b² + c²)`, `sin δ = 2bc/(b² + c²)` and `B̂·ζ̂ = ζ/b` into
+//! `Ŝ_out · V̂⊕` reproduces the formula term for term. The tests pin that identity
+//! numerically on random geometries, which is what licenses using the analytic
+//! form for circles and gradients while the rotation form stays the physical
+//! meaning.
+//!
+//! Given `cos θ'`, vis-viva at Earth's heliocentric position gives the outgoing
+//! semi-major axis `a'`. A level set of `a'` is a level set of `cos θ'`, which the
+//! formula above makes a **circle centred on the ζ-axis**:
+//!
+//! ```text
+//!   centre  ζ_c = c · sin θ / (cos θ' − cos θ)
+//!   radius  R   = c · |sin θ'| / |cos θ' − cos θ|
+//! ```
+//!
+//! — the *resonant circle* of a resonance `a' = (h/k)^(2/3) AU`.
+//!
+//! # The frame, and why it had to be pinned here
+//!
+//! `geometry.rs` left the b-vector's sign and the ξ,ζ decomposition deliberately
+//! unpinned, and `uncertainty.rs` proved it could afford to (the impact
+//! probability is invariant under any orthonormal change of b-plane basis). A
+//! resonant circle is not: its centre sits at a specific `ζ`, so the convention
+//! has to be settled, and it is settled **by derivation and by measurement**, not
+//! adopted:
+//!
+//! - **`B` points from Earth's centre to the incoming asymptote** — the side the
+//!   asteroid arrives on. Derived from the hyperbola's centre `C = a·e·P̂` lying on
+//!   the asymptote (`geometry.rs` now pins this with a test), and *measured* on a
+//!   flown flyby by `probe_keyhole_rotation`: `−B̂` predicts the outgoing `a` to
+//!   `1.5e-4`, `+B̂` misses by `7.4e-2` — a 489× separation.
+//! - **`η̂ = Ŝ`** — the incoming direction of motion.
+//! - **`ζ̂` is anti-parallel to the projection of Earth's heliocentric velocity
+//!   onto the b-plane.** This is exactly the sign under which Valsecchi's
+//!   `+2cζ sin θ` term comes out with a plus, which the identity test checks.
+//!   Physically, `ζ` is the *timing* coordinate: moving along `ζ` is the asteroid
+//!   arriving earlier or later against Earth's motion.
+//! - **`ξ̂ = η̂ × ζ̂`**, so `(ξ̂, η̂, ζ̂)` is right-handed. `ξ` is (to first order)
+//!   the minimum orbit intersection distance — how far the two orbits miss each
+//!   other in space, which no timing change can fix.
+//!
+//! # What the closed form is good for, stated before it is used
+//!
+//! Taking the encounter position as Earth's own costs `η ≈ 7e-5` in heliocentric
+//! radius, hence `δa'/a' ≈ 1.3e-4`: over a 7-year return that is a ~12 h slip,
+//! about a hundred capture radii of return placement. So the *absolute* `a'` says
+//! which resonances are reachable and where their circles lie to ~1e-4, and
+//! nothing finer. The **gradient** `∂a'/∂(ξ,ζ)` is trustworthy, because that
+//! error is common-mode across neighbouring points and cancels to first order —
+//! and the gradient is what a keyhole width is. Every quantitative claim about a
+//! *return encounter* still has to come from the propagator; this module is the
+//! map that says where to fly.
+//!
+//! # The keyhole width, as a definition rather than a claim
+//!
+//! A `Δa'` shifts the period by `ΔT/T = 1.5·Δa'/a'`; after the `k` revolutions of
+//! an `h`-year return the arrival slips by `Δt = h·yr·1.5·Δa'/a'`, during which
+//! Earth moves `V⊕·Δt`. Calling one capture *diameter* the tolerance gives the
+//! `Δa'` that still returns onto the disc, and dividing by `|∇a'|` gives the width
+//! of the band around the circle. Order-unity, stated so it can be argued with.
+//! The measured consequence that motivated this module survives it: near-grazing
+//! resonances have the steepest gradient and the *narrowest* keyholes; the wide
+//! ones are far out where the deflection is weak.
+
+use nalgebra::{Vector2, Vector3};
+
+use crate::geometry::BPlaneEncounter;
+
+/// One astronomical unit, metres (IAU 2012) — the unit resonances are named in.
+pub const AU_M: f64 = 1.495_978_707e11;
+
+/// One Julian year, seconds — the unit `h` counts in an `h:k` resonance.
+pub const JULIAN_YEAR_S: f64 = 365.25 * 86_400.0;
+
+/// Why an Öpik frame could not be built.
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeyholeError {
+    /// Some input was not finite.
+    NonFinite,
+    /// Earth's heliocentric velocity is (anti-)parallel to the incoming
+    /// asymptote, so it has no projection onto the b-plane and `ζ̂` is undefined.
+    /// Physically impossible for a real encounter (the asteroid would have to
+    /// approach exactly along Earth's motion), so this is a caller bug, not a case.
+    DegenerateFrame {
+        /// `|sin θ|` — how far from parallel the two directions were.
+        sin_theta: f64,
+    },
+    /// `μ☉`, `|V⊕|` or `|r⊕|` was not positive.
+    NonPositiveParameter,
+}
+
+impl std::fmt::Display for KeyholeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KeyholeError::NonFinite => write!(f, "non-finite input to the Öpik frame"),
+            KeyholeError::DegenerateFrame { sin_theta } => write!(
+                f,
+                "Earth's velocity is parallel to the incoming asymptote (sin θ = {sin_theta:.3e}): \
+                 the ζ axis is undefined"
+            ),
+            KeyholeError::NonPositiveParameter => {
+                write!(f, "μ☉, |V⊕| and |r⊕| must all be positive")
+            }
+        }
+    }
+}
+
+impl std::error::Error for KeyholeError {}
+
+/// An `h:k` mean-motion resonance with Earth: the asteroid completes `k`
+/// revolutions in the `h` years Earth takes to complete `h` — so they meet again
+/// `h` years after the encounter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Resonance {
+    /// Years until the return: Earth's revolutions.
+    pub h: u32,
+    /// The asteroid's revolutions in that time.
+    pub k: u32,
+}
+
+impl Resonance {
+    /// The resonant heliocentric semi-major axis, metres: `(h/k)^(2/3) AU`.
+    pub fn semi_major_axis_m(&self) -> f64 {
+        (self.h as f64 / self.k as f64).powf(2.0 / 3.0) * AU_M
+    }
+
+    /// The resonant orbital period, seconds: `h/k` Julian years.
+    pub fn period_seconds(&self) -> f64 {
+        self.h as f64 / self.k as f64 * JULIAN_YEAR_S
+    }
+
+    /// Every coprime `h:k` with `h` in `years` and `k ≤ max_k`, sorted by
+    /// semi-major axis. Non-coprime pairs name the same orbit as their reduced
+    /// form and are dropped rather than double-counted.
+    pub fn census(years: std::ops::RangeInclusive<u32>, max_k: u32) -> Vec<Resonance> {
+        let mut out: Vec<Resonance> = Vec::new();
+        for h in years {
+            for k in 1..=max_k {
+                if gcd(h, k) == 1 {
+                    out.push(Resonance { h, k });
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            a.semi_major_axis_m()
+                .partial_cmp(&b.semi_major_axis_m())
+                .expect("finite")
+        });
+        out
+    }
+}
+
+impl std::fmt::Display for Resonance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.h, self.k)
+    }
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
+/// The Öpik b-plane frame of one encounter, with everything needed to read the
+/// post-encounter heliocentric orbit off a b-plane point in closed form.
+///
+/// Build it with [`OpikFrame::new`] from the encounter's b-plane reduction and
+/// Earth's heliocentric state at the encounter. Coordinates are `(ξ, ζ)` metres
+/// in the b-plane; see the module doc for the sign conventions and what pins them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpikFrame {
+    /// `η̂ = Ŝ`, the incoming asymptote — the direction of motion far before the
+    /// encounter. The b-plane is perpendicular to it.
+    pub eta_hat: Vector3<f64>,
+    /// `ξ̂ = η̂ × ζ̂`: the in-plane axis perpendicular to Earth's velocity. To
+    /// first order, the minimum orbit intersection distance.
+    pub xi_hat: Vector3<f64>,
+    /// `ζ̂`: anti-parallel to the projection of Earth's heliocentric velocity on
+    /// the b-plane. The timing coordinate.
+    pub zeta_hat: Vector3<f64>,
+    /// Hyperbolic excess speed `v∞`, m/s.
+    pub v_inf: f64,
+    /// Earth's `μ⊕`, m³/s².
+    pub mu_earth: f64,
+    /// The Sun's `μ☉`, m³/s² — the outgoing orbit is heliocentric.
+    pub mu_sun: f64,
+    /// The gravitationally-focused capture radius at this `v∞`, metres — the
+    /// disc a return has to land on, which sizes the keyhole tolerance.
+    pub capture_radius: f64,
+    /// Earth's heliocentric position at the encounter, metres. The encounter
+    /// position is taken to be Earth's own (the `r ≈ R⊕ₒᵣᵦ` approximation).
+    pub r_earth: Vector3<f64>,
+    /// Earth's heliocentric velocity at the encounter, m/s.
+    pub v_earth: Vector3<f64>,
+    /// `cos θ`, `θ` the angle between `Ŝ` and `V⊕`.
+    pub cos_theta: f64,
+    /// `sin θ > 0` (the frame is only defined when it is).
+    pub sin_theta: f64,
+}
+
+/// A resonant-return circle: the locus of b-plane points whose flyby leaves the
+/// asteroid on the `h:k` resonant orbit. Centred on the ζ-axis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResonantCircle {
+    /// Which resonance.
+    pub resonance: Resonance,
+    /// The resonant semi-major axis, metres — the level set this circle is.
+    pub a_prime: f64,
+    /// The outgoing `cos θ'` that produces it.
+    pub cos_theta_out: f64,
+    /// Centre `ζ_c`, metres (`ξ_c = 0` always).
+    pub center_zeta: f64,
+    /// Radius, metres.
+    pub radius: f64,
+}
+
+impl ResonantCircle {
+    /// A point on the circle, parameterised by angle from the `+ξ` direction.
+    pub fn point(&self, angle: f64) -> Vector2<f64> {
+        Vector2::new(
+            self.radius * angle.cos(),
+            self.center_zeta + self.radius * angle.sin(),
+        )
+    }
+
+    /// The point of the circle closest to Earth's centre — on the ζ-axis, at the
+    /// smallest `|b|` this resonance can be reached at. If the circle encloses
+    /// the origin the closest point is the origin itself, and the resonance is
+    /// reachable in every direction; the returned point is then the origin.
+    pub fn nearest_point(&self) -> Vector2<f64> {
+        if self.encloses_origin() {
+            return Vector2::zeros();
+        }
+        let sign = self.center_zeta.signum();
+        Vector2::new(0.0, self.center_zeta - sign * self.radius)
+    }
+
+    /// The point of the circle farthest from Earth's centre, on the ζ-axis.
+    pub fn farthest_point(&self) -> Vector2<f64> {
+        let sign = if self.center_zeta == 0.0 {
+            1.0
+        } else {
+            self.center_zeta.signum()
+        };
+        Vector2::new(0.0, self.center_zeta + sign * self.radius)
+    }
+
+    /// Whether Earth's centre lies inside the circle.
+    pub fn encloses_origin(&self) -> bool {
+        self.center_zeta.abs() < self.radius
+    }
+
+    /// The range of impact parameters `|b|` the circle spans: `(min, max)`.
+    pub fn b_range(&self) -> (f64, f64) {
+        (
+            (self.center_zeta.abs() - self.radius).max(0.0),
+            self.center_zeta.abs() + self.radius,
+        )
+    }
+
+    /// Whether any part of the circle lies inside the capture disc — i.e. part
+    /// of the "keyhole" is an impact already and not a return.
+    ///
+    /// This is the common case, not the exception, and it is what the reach
+    /// probe's outward bisection could not see: on the shipping rock the 3:4
+    /// circle runs from `b = 3 866 km` (deep inside the 11 311 km disc) out to
+    /// `153 577 km`, so the part of the locus nearest Earth is an impact, and the
+    /// nearest *miss* on it is the grazing point
+    /// ([`intersections_at_radius`](Self::intersections_at_radius) at the capture
+    /// radius) — not the 60 843 km the probe reported, which was the first
+    /// crossing its sweep could bracket.
+    pub fn crosses_capture_disc(&self, capture_radius: f64) -> bool {
+        self.b_range().0 < capture_radius
+    }
+
+    /// Where the circle meets the ring `|b| = radius`: the two points `(+ξ, ζ)`
+    /// and `(−ξ, ζ)`, mirror images in ξ, or `None` if the ring misses the circle
+    /// (or the circle is centred on the origin, where the two are either the same
+    /// circle or disjoint). At `radius = b_capture` these are the grazing points —
+    /// the nearest-to-Earth places on the resonance that are still a miss.
+    pub fn intersections_at_radius(&self, radius: f64) -> Option<(Vector2<f64>, Vector2<f64>)> {
+        let d = self.center_zeta;
+        if d.abs() < 1e-9 * self.radius.max(1.0) {
+            return None;
+        }
+        let zeta = (radius * radius - self.radius * self.radius + d * d) / (2.0 * d);
+        let xi2 = radius * radius - zeta * zeta;
+        if xi2 < 0.0 {
+            return None;
+        }
+        let xi = xi2.sqrt();
+        Some((Vector2::new(xi, zeta), Vector2::new(-xi, zeta)))
+    }
+}
+
+/// The linearised keyhole at one point of a resonant circle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Keyhole {
+    /// Where on the circle, `(ξ, ζ)` metres.
+    pub at: Vector2<f64>,
+    /// `∇a'` there, metres of `a'` per metre of b-plane displacement.
+    pub gradient: Vector2<f64>,
+    /// The `Δa'` that still returns onto the capture disc, metres.
+    pub semi_major_axis_tolerance: f64,
+    /// The keyhole's full width across the circle, metres: `Δa'_tol / |∇a'|`.
+    pub width: f64,
+}
+
+impl OpikFrame {
+    /// Build the frame from an encounter's b-plane reduction and Earth's
+    /// heliocentric state at that encounter (metres, m/s, any inertial frame
+    /// shared with the encounter's `Ŝ` — the core's ICRF).
+    ///
+    /// `enc` may be the closest-approach reduction or the fixed-epoch one
+    /// `uncertainty.rs` uses; the asymptote is the same to the invariance of the
+    /// hyperbola. Use the *same* reduction the covariance was mapped with when
+    /// the two are to be drawn together.
+    pub fn new(
+        enc: &BPlaneEncounter,
+        r_earth_helio: Vector3<f64>,
+        v_earth_helio: Vector3<f64>,
+        mu_sun: f64,
+    ) -> Result<Self, KeyholeError> {
+        let finite = enc.s_hat.iter().all(|c| c.is_finite())
+            && r_earth_helio.iter().all(|c| c.is_finite())
+            && v_earth_helio.iter().all(|c| c.is_finite())
+            && enc.v_inf.is_finite()
+            && enc.mu.is_finite()
+            && enc.capture_radius.is_finite()
+            && mu_sun.is_finite();
+        if !finite {
+            return Err(KeyholeError::NonFinite);
+        }
+        let v_mag = v_earth_helio.norm();
+        if !(mu_sun > 0.0 && v_mag > 0.0 && r_earth_helio.norm() > 0.0 && enc.v_inf > 0.0) {
+            return Err(KeyholeError::NonPositiveParameter);
+        }
+        let eta_hat = enc.s_hat.normalize();
+        let v_hat = v_earth_helio / v_mag;
+        let cos_theta = eta_hat.dot(&v_hat);
+        // The projection of V̂⊕ onto the b-plane; ζ̂ points the other way.
+        let w = v_hat - cos_theta * eta_hat;
+        let sin_theta = w.norm();
+        if sin_theta < 1.0e-9 {
+            return Err(KeyholeError::DegenerateFrame { sin_theta });
+        }
+        let zeta_hat = -w / sin_theta;
+        let xi_hat = eta_hat.cross(&zeta_hat);
+        Ok(Self {
+            eta_hat,
+            xi_hat,
+            zeta_hat,
+            v_inf: enc.v_inf,
+            mu_earth: enc.mu,
+            mu_sun,
+            capture_radius: enc.capture_radius,
+            r_earth: r_earth_helio,
+            v_earth: v_earth_helio,
+            cos_theta,
+            sin_theta,
+        })
+    }
+
+    /// `c = μ⊕/v∞²`, metres — the impact parameter at which the flyby turns the
+    /// velocity through 90°; the scale of every circle below.
+    pub fn c(&self) -> f64 {
+        self.mu_earth / (self.v_inf * self.v_inf)
+    }
+
+    /// `θ`, radians — the angle between the incoming asymptote and Earth's
+    /// heliocentric velocity.
+    pub fn theta(&self) -> f64 {
+        self.sin_theta.atan2(self.cos_theta)
+    }
+
+    /// A b-plane 3-vector expressed in this frame: `(ξ, ζ)` metres.
+    pub fn project(&self, b_vector: &Vector3<f64>) -> Vector2<f64> {
+        Vector2::new(b_vector.dot(&self.xi_hat), b_vector.dot(&self.zeta_hat))
+    }
+
+    /// `(ξ, ζ)` back to a 3-vector in the encounter's inertial frame.
+    pub fn unproject(&self, p: Vector2<f64>) -> Vector3<f64> {
+        p.x * self.xi_hat + p.y * self.zeta_hat
+    }
+
+    /// The flyby turn angle `δ` at impact parameter `b`: `tan(δ/2) = c/b`.
+    pub fn turn_angle(&self, b: f64) -> f64 {
+        2.0 * (self.c() / b).atan()
+    }
+
+    /// The outgoing asymptote for an incoming b-vector, by the rotation the
+    /// module doc derives: `cos δ · Ŝ − sin δ · B̂`. The physical statement; the
+    /// closed forms below are proved against it.
+    pub fn outgoing_asymptote(&self, b_vector: &Vector3<f64>) -> Vector3<f64> {
+        let b = b_vector.norm();
+        let b_hat = b_vector / b;
+        let delta = self.turn_angle(b);
+        delta.cos() * self.eta_hat - delta.sin() * b_hat
+    }
+
+    /// Heliocentric semi-major axis of the orbit the asteroid is *on* as it
+    /// arrives: `V⊕ + v∞·Ŝ` at Earth's position. Compare this against the real
+    /// pre-encounter orbit and the frame is validated end to end (the reach
+    /// probe's round-trip gate, `8.7e-5` on the shipping rock).
+    pub fn incoming_semi_major_axis(&self) -> f64 {
+        self.semi_major_axis_of(&(self.v_earth + self.v_inf * self.eta_hat))
+    }
+
+    /// Post-encounter semi-major axis by the rotation construction, metres.
+    /// Negative means the flyby ejected the asteroid onto a hyperbolic orbit.
+    pub fn post_encounter_semi_major_axis_by_rotation(&self, b_vector: &Vector3<f64>) -> f64 {
+        let s_out = self.outgoing_asymptote(b_vector);
+        self.semi_major_axis_of(&(self.v_earth + self.v_inf * s_out))
+    }
+
+    /// Valsecchi's `cos θ'` at a b-plane point — the closed form.
+    pub fn cos_theta_out(&self, p: Vector2<f64>) -> f64 {
+        let c = self.c();
+        let b2 = p.norm_squared();
+        ((b2 - c * c) * self.cos_theta + 2.0 * c * p.y * self.sin_theta) / (b2 + c * c)
+    }
+
+    /// Post-encounter semi-major axis at a b-plane point, metres, in closed form.
+    /// Identical to [`post_encounter_semi_major_axis_by_rotation`] — the tests
+    /// pin it — but cheap enough to sweep and differentiable analytically.
+    ///
+    /// [`post_encounter_semi_major_axis_by_rotation`]: Self::post_encounter_semi_major_axis_by_rotation
+    pub fn post_encounter_semi_major_axis(&self, p: Vector2<f64>) -> f64 {
+        self.semi_major_axis_for_cos_theta_out(self.cos_theta_out(p))
+    }
+
+    /// The `cos θ'` that lands the asteroid on semi-major axis `a`, or `None` if
+    /// no flyby can (`|cos θ'| > 1`): the resonance is out of this encounter's
+    /// reach at any `b`.
+    pub fn cos_theta_out_for_semi_major_axis(&self, a: f64) -> Option<f64> {
+        if !(a.is_finite() && a > 0.0) {
+            return None;
+        }
+        let r = self.r_earth.norm();
+        let v2_out = self.mu_sun * (2.0 / r - 1.0 / a);
+        let v = self.v_earth.norm();
+        let u = self.v_inf;
+        let cos = (v2_out - v * v - u * u) / (2.0 * v * u);
+        (cos.is_finite() && cos.abs() <= 1.0).then_some(cos)
+    }
+
+    /// `∇a'` at a b-plane point: `(∂a'/∂ξ, ∂a'/∂ζ)`, dimensionless (metres per
+    /// metre). Analytic, by the chain rule through `cos θ'`; the tests pin it
+    /// against central differences. This is the one output the `r ≈ R⊕ₒᵣᵦ`
+    /// approximation does *not* corrupt to first order.
+    pub fn gradient_semi_major_axis(&self, p: Vector2<f64>) -> Vector2<f64> {
+        let c = self.c();
+        let b2 = p.norm_squared();
+        let n = (b2 - c * c) * self.cos_theta + 2.0 * c * p.y * self.sin_theta;
+        let d = b2 + c * c;
+        let dn_dxi = 2.0 * p.x * self.cos_theta;
+        let dn_dzeta = 2.0 * p.y * self.cos_theta + 2.0 * c * self.sin_theta;
+        let dd_dxi = 2.0 * p.x;
+        let dd_dzeta = 2.0 * p.y;
+        let dcos_dxi = (dn_dxi * d - n * dd_dxi) / (d * d);
+        let dcos_dzeta = (dn_dzeta * d - n * dd_dzeta) / (d * d);
+        // a = 1/(2/r − v²/μ) ⇒ da = a²·d(v²)/μ, and d(v²) = 2·V⊕·v∞·d(cos θ').
+        let a = self.semi_major_axis_for_cos_theta_out(n / d);
+        let da_dcos = a * a * 2.0 * self.v_earth.norm() * self.v_inf / self.mu_sun;
+        Vector2::new(da_dcos * dcos_dxi, da_dcos * dcos_dzeta)
+    }
+
+    /// The resonant circle of `resonance`, or `None` if this encounter cannot
+    /// reach it (no `cos θ'` produces that `a'`), or if the resonance *is* the
+    /// incoming orbit (`cos θ' = cos θ`), whose level set is the ξ-axis line
+    /// rather than a circle.
+    pub fn resonant_circle(&self, resonance: Resonance) -> Option<ResonantCircle> {
+        let a_prime = resonance.semi_major_axis_m();
+        let cos_out = self.cos_theta_out_for_semi_major_axis(a_prime)?;
+        let denom = cos_out - self.cos_theta;
+        if denom.abs() < 1.0e-12 {
+            return None;
+        }
+        let c = self.c();
+        let sin_out = (1.0 - cos_out * cos_out).max(0.0).sqrt();
+        Some(ResonantCircle {
+            resonance,
+            a_prime,
+            cos_theta_out: cos_out,
+            center_zeta: c * self.sin_theta / denom,
+            radius: c * sin_out / denom.abs(),
+        })
+    }
+
+    /// Every resonance in `years` with `k ≤ max_k` whose circle exists and comes
+    /// within `b_max` of Earth's centre, sorted by `a'`. The census the reach
+    /// probe ran by sweeping 72 directions, done exactly.
+    pub fn resonant_circles(
+        &self,
+        years: std::ops::RangeInclusive<u32>,
+        max_k: u32,
+        b_max: f64,
+    ) -> Vec<ResonantCircle> {
+        Resonance::census(years, max_k)
+            .into_iter()
+            .filter_map(|r| self.resonant_circle(r))
+            .filter(|c| c.b_range().0 <= b_max)
+            .collect()
+    }
+
+    /// The `Δa'` that still returns onto the capture disc for this resonance:
+    /// one capture diameter of Earth's motion over the `h`-year return, converted
+    /// through `ΔT/T = 1.5·Δa'/a'`. See the module doc — a definition.
+    pub fn semi_major_axis_tolerance(&self, circle: &ResonantCircle) -> f64 {
+        let h_years = circle.resonance.h as f64;
+        2.0 * self.capture_radius * circle.a_prime
+            / (self.v_earth.norm() * h_years * JULIAN_YEAR_S * 1.5)
+    }
+
+    /// The linearised keyhole at `at` on `circle` — width `Δa'_tol / |∇a'|`.
+    /// `at` should lie on the circle (use [`ResonantCircle::point`],
+    /// [`nearest_point`](ResonantCircle::nearest_point),
+    /// [`farthest_point`](ResonantCircle::farthest_point) or
+    /// [`intersections_at_radius`](ResonantCircle::intersections_at_radius)); the
+    /// gradient is evaluated where asked and the width is meaningful only there.
+    ///
+    /// A resonance at the very edge of reach (`cos θ' = ±1`) has a circle of
+    /// zero radius: a single point where `∇a' = 0` and the width is `+∞` — the
+    /// linearisation's tangency artifact the reach probe flagged as
+    /// `NEAR-TANGENCY`. It is returned as infinity rather than clamped, so a
+    /// caller sees the artifact for what it is.
+    pub fn keyhole_at(&self, circle: &ResonantCircle, at: Vector2<f64>) -> Keyhole {
+        let gradient = self.gradient_semi_major_axis(at);
+        let tolerance = self.semi_major_axis_tolerance(circle);
+        Keyhole {
+            at,
+            gradient,
+            semi_major_axis_tolerance: tolerance,
+            width: tolerance / gradient.norm(),
+        }
+    }
+
+    /// Vis-viva at Earth's heliocentric position for a heliocentric velocity.
+    fn semi_major_axis_of(&self, v_helio: &Vector3<f64>) -> f64 {
+        1.0 / (2.0 / self.r_earth.norm() - v_helio.norm_squared() / self.mu_sun)
+    }
+
+    fn semi_major_axis_for_cos_theta_out(&self, cos_out: f64) -> f64 {
+        let v = self.v_earth.norm();
+        let u = self.v_inf;
+        let v2_out = v * v + u * u + 2.0 * v * u * cos_out;
+        1.0 / (2.0 / self.r_earth.norm() - v2_out / self.mu_sun)
+    }
+}
+
+/// The Earth-relative state **at perigee** of the hyperbola with excess speed
+/// `v_inf`, impact parameter `b`, incoming asymptote `s_hat` and b-vector
+/// direction `b_hat` (unit, `⊥ s_hat`) — the inverse of
+/// [`BPlaneEncounter::from_relative_state`].
+///
+/// `geometry.rs` derives `Ŝ = (P̂ + √(e²−1)·Q̂)/e` and `B̂ = (√(e²−1)·P̂ − Q̂)/e`
+/// from the perifocal axes; this inverts that pair: `P̂ = (Ŝ + √(e²−1)·B̂)/e`,
+/// `Q̂ = (√(e²−1)·Ŝ − B̂)/e`. Feeding the result back through
+/// `from_relative_state` reproduces `v_inf`, `b`, `Ŝ` and `B` to round-off, which
+/// the tests pin — and which is what a targeting step will need to turn a chosen
+/// b-plane point into a state to aim a propagation at.
+pub fn perigee_state_for_asymptote(
+    v_inf: f64,
+    b: f64,
+    s_hat: Vector3<f64>,
+    b_hat: Vector3<f64>,
+    mu: f64,
+) -> (Vector3<f64>, Vector3<f64>) {
+    let c = mu / (v_inf * v_inf);
+    let r_p = -c + (c * c + b * b).sqrt();
+    let e = 1.0 + r_p * v_inf * v_inf / mu;
+    let root = (e * e - 1.0).sqrt();
+    let s = s_hat.normalize();
+    let bh = b_hat.normalize();
+    let p_hat = (s + root * bh) / e;
+    let q_hat = (root * s - bh) / e;
+    let v_p = b * v_inf / r_p; // h = b·v∞ = r_p·v_p
+    (r_p * p_hat, v_p * q_hat)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::EARTH_EQUATORIAL_RADIUS_M;
+
+    const MU_EARTH: f64 = 3.986_004_356e14;
+    const MU_SUN: f64 = 1.327_124_400_41e20;
+    const R_EARTH: f64 = EARTH_EQUATORIAL_RADIUS_M;
+
+    /// A deterministic pseudo-random stream (LCG) — enough to spread geometries
+    /// around without a dev-dependency.
+    fn lcg(seed: &mut u64) -> f64 {
+        *seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((*seed >> 11) as f64) / ((1u64 << 53) as f64)
+    }
+
+    fn unit(seed: &mut u64) -> Vector3<f64> {
+        loop {
+            let v = Vector3::new(
+                2.0 * lcg(seed) - 1.0,
+                2.0 * lcg(seed) - 1.0,
+                2.0 * lcg(seed) - 1.0,
+            );
+            let n = v.norm();
+            if n > 0.2 && n < 1.0 {
+                return v / n;
+            }
+        }
+    }
+
+    /// Earth on a circular 1 AU orbit at a random phase, plus an encounter with
+    /// random `Ŝ`, `B̂` and `v_inf` in the NEO band.
+    fn random_frame(seed: &mut u64) -> (OpikFrame, BPlaneEncounter) {
+        let phase = std::f64::consts::TAU * lcg(seed);
+        let r_e = AU_M * Vector3::new(phase.cos(), phase.sin(), 0.0);
+        let v_circ = (MU_SUN / AU_M).sqrt();
+        let v_e = v_circ * Vector3::new(-phase.sin(), phase.cos(), 0.0);
+        let s_hat = unit(seed);
+        let mut b_hat = unit(seed);
+        b_hat -= b_hat.dot(&s_hat) * s_hat;
+        let b_hat = b_hat.normalize();
+        let v_inf = 3_000.0 + 15_000.0 * lcg(seed);
+        let b = R_EARTH * (1.5 + 30.0 * lcg(seed));
+        let (r, v) = perigee_state_for_asymptote(v_inf, b, s_hat, b_hat, MU_EARTH);
+        let enc = BPlaneEncounter::from_relative_state(r, v, MU_EARTH, R_EARTH).unwrap();
+        let frame = OpikFrame::new(&enc, r_e, v_e, MU_SUN).unwrap();
+        (frame, enc)
+    }
+
+    #[test]
+    fn perigee_state_inverts_the_bplane_reduction() {
+        let mut seed = 7;
+        for _ in 0..50 {
+            let s_hat = unit(&mut seed);
+            let mut b_hat = unit(&mut seed);
+            b_hat -= b_hat.dot(&s_hat) * s_hat;
+            let b_hat = b_hat.normalize();
+            let v_inf = 2_000.0 + 20_000.0 * lcg(&mut seed);
+            let b = R_EARTH * (1.0 + 50.0 * lcg(&mut seed));
+            let (r, v) = perigee_state_for_asymptote(v_inf, b, s_hat, b_hat, MU_EARTH);
+            let enc = BPlaneEncounter::from_relative_state(r, v, MU_EARTH, R_EARTH).unwrap();
+            assert!((enc.v_inf - v_inf).abs() / v_inf < 1e-10, "v_inf");
+            assert!((enc.impact_parameter - b).abs() / b < 1e-10, "b");
+            assert!((enc.s_hat - s_hat).norm() < 1e-10, "Ŝ");
+            assert!(
+                (enc.b_vector / b - b_hat).norm() < 1e-10,
+                "B̂ {:?} vs {:?}",
+                enc.b_vector / b,
+                b_hat
+            );
+            // And it really is the perigee: r ⊥ v.
+            assert!(r.dot(&v).abs() < 1e-6 * r.norm() * v.norm());
+        }
+    }
+
+    #[test]
+    fn frame_is_orthonormal_right_handed_and_zeta_opposes_earths_motion() {
+        let mut seed = 11;
+        for _ in 0..50 {
+            let (f, enc) = random_frame(&mut seed);
+            for (a, b) in [
+                (f.xi_hat, f.eta_hat),
+                (f.eta_hat, f.zeta_hat),
+                (f.zeta_hat, f.xi_hat),
+            ] {
+                assert!((a.norm() - 1.0).abs() < 1e-12);
+                assert!(a.dot(&b).abs() < 1e-12);
+            }
+            // Right-handed (ξ, η, ζ).
+            assert!((f.xi_hat.cross(&f.eta_hat) - f.zeta_hat).norm() < 1e-12);
+            assert!((f.eta_hat - enc.s_hat).norm() < 1e-12);
+            // ζ̂ points against Earth's motion; ξ̂ is perpendicular to it.
+            assert!(f.zeta_hat.dot(&f.v_earth) < 0.0);
+            assert!(f.xi_hat.dot(&f.v_earth).abs() < 1e-9 * f.v_earth.norm());
+            assert!(f.sin_theta > 0.0);
+            assert!((f.cos_theta * f.cos_theta + f.sin_theta * f.sin_theta - 1.0).abs() < 1e-12);
+            // Project/unproject round-trips a b-plane vector.
+            let p = f.project(&enc.b_vector);
+            assert!((f.unproject(p) - enc.b_vector).norm() < 1e-6 * enc.impact_parameter);
+            assert!((p.norm() - enc.impact_parameter).abs() / enc.impact_parameter < 1e-12);
+        }
+    }
+
+    #[test]
+    fn a_parallel_velocity_is_refused_not_guessed() {
+        let s_hat = Vector3::new(0.0, 1.0, 0.0);
+        let b_hat = Vector3::new(1.0, 0.0, 0.0);
+        let (r, v) = perigee_state_for_asymptote(8_000.0, 5.0 * R_EARTH, s_hat, b_hat, MU_EARTH);
+        let enc = BPlaneEncounter::from_relative_state(r, v, MU_EARTH, R_EARTH).unwrap();
+        let v_e = 29_780.0 * s_hat; // Earth moving exactly along Ŝ
+        match OpikFrame::new(&enc, Vector3::new(AU_M, 0.0, 0.0), v_e, MU_SUN) {
+            Err(KeyholeError::DegenerateFrame { .. }) => {}
+            other => panic!("expected DegenerateFrame, got {other:?}"),
+        }
+        assert_eq!(
+            OpikFrame::new(&enc, Vector3::new(AU_M, 0.0, 0.0), Vector3::zeros(), MU_SUN),
+            Err(KeyholeError::NonPositiveParameter)
+        );
+    }
+
+    /// THE identity this module rests on: Valsecchi's closed-form `cos θ'` is the
+    /// rotation `Ŝ_out = cos δ·Ŝ − sin δ·B̂` dotted with `V̂⊕`, under exactly the
+    /// sign conventions the frame pins. A flipped `ζ̂`, a `+B̂` bend, or a wrong
+    /// `δ` all break this at the percent level.
+    #[test]
+    fn closed_form_equals_the_rotation_construction() {
+        let mut seed = 23;
+        for _ in 0..200 {
+            let (f, _) = random_frame(&mut seed);
+            // Arbitrary b-plane points, not only the encounter's own B.
+            let p = Vector2::new(
+                (2.0 * lcg(&mut seed) - 1.0) * 40.0 * R_EARTH,
+                (2.0 * lcg(&mut seed) - 1.0) * 40.0 * R_EARTH,
+            );
+            if p.norm() < 0.5 * R_EARTH {
+                continue;
+            }
+            let b_vec = f.unproject(p);
+            let by_rotation = f.post_encounter_semi_major_axis_by_rotation(&b_vec);
+            let closed = f.post_encounter_semi_major_axis(p);
+            assert!(
+                (by_rotation - closed).abs() <= 1e-9 * by_rotation.abs().max(AU_M),
+                "rotation {by_rotation:.6e} vs closed form {closed:.6e} at {p:?}"
+            );
+            // And cos θ' itself, which is the sharper check (a' can hide a sign
+            // error behind a large |a'|).
+            let s_out = f.outgoing_asymptote(&b_vec);
+            let cos_rot = s_out.dot(&f.v_earth) / f.v_earth.norm();
+            assert!(
+                (cos_rot - f.cos_theta_out(p)).abs() < 1e-12,
+                "cos θ' rotation {cos_rot} vs closed form {}",
+                f.cos_theta_out(p)
+            );
+        }
+    }
+
+    #[test]
+    fn a_wide_pass_leaves_the_orbit_alone_and_a_close_one_does_not() {
+        let mut seed = 5;
+        let (f, enc) = random_frame(&mut seed);
+        let a_in = f.incoming_semi_major_axis();
+        let b_hat = enc.b_vector / enc.impact_parameter;
+        // b = 10⁶ capture radii: the turn is ~1e-6 rad and a' ≈ a to ~1e-5.
+        let far = f.post_encounter_semi_major_axis_by_rotation(&(1.0e6 * f.capture_radius * b_hat));
+        assert!(
+            (far - a_in).abs() / a_in.abs() < 1e-4,
+            "far {far} vs {a_in}"
+        );
+        // At c the turn is 90°: a' must differ from a by a lot.
+        let close = f.post_encounter_semi_major_axis_by_rotation(&(f.c() * b_hat));
+        assert!(
+            (close - a_in).abs() / a_in.abs() > 1e-2,
+            "close {close} vs {a_in}"
+        );
+        assert!((f.turn_angle(f.c()) - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_prime_is_mirror_symmetric_in_xi() {
+        let mut seed = 31;
+        for _ in 0..50 {
+            let (f, _) = random_frame(&mut seed);
+            let xi = (lcg(&mut seed) + 0.1) * 20.0 * R_EARTH;
+            let zeta = (2.0 * lcg(&mut seed) - 1.0) * 20.0 * R_EARTH;
+            let a = f.post_encounter_semi_major_axis(Vector2::new(xi, zeta));
+            let m = f.post_encounter_semi_major_axis(Vector2::new(-xi, zeta));
+            assert!((a - m).abs() <= 1e-12 * a.abs());
+        }
+    }
+
+    /// Every point of a resonant circle really lands on the resonant `a'`, and
+    /// the level set is *only* the circle: step off it and `a'` moves.
+    #[test]
+    fn resonant_circles_are_level_sets_of_a_prime() {
+        let mut seed = 42;
+        let mut circles_checked = 0;
+        for _ in 0..100 {
+            let (f, _) = random_frame(&mut seed);
+            for circle in f.resonant_circles(1..=20, 24, 200.0 * f.capture_radius) {
+                if circle.radius < 1.0e-3 * f.capture_radius {
+                    // The reach limit: a point, not a circle, with ∇a' = 0.
+                    continue;
+                }
+                circles_checked += 1;
+                for i in 0..16 {
+                    let p = circle.point(std::f64::consts::TAU * i as f64 / 16.0);
+                    if p.norm() < 1e-3 * f.capture_radius {
+                        continue; // through the origin: a' is undefined there
+                    }
+                    let a = f.post_encounter_semi_major_axis(p);
+                    assert!(
+                        (a - circle.a_prime).abs() <= 1e-8 * circle.a_prime,
+                        "{} at {p:?}: a' {a:.9e} vs resonant {:.9e}",
+                        circle.resonance,
+                        circle.a_prime
+                    );
+                    // Off the circle, along the gradient, a' changes.
+                    let g = f.gradient_semi_major_axis(p);
+                    let step = 1.0e-2 * p.norm() * g / g.norm();
+                    let off = f.post_encounter_semi_major_axis(p + step);
+                    assert!(
+                        (off - circle.a_prime).abs() > 1e-10 * circle.a_prime,
+                        "{} at {p:?}: a' did not move off the circle (|∇a'| = {:.3e})",
+                        circle.resonance,
+                        g.norm()
+                    );
+                }
+                // Centre on the ζ-axis, by construction of `point`; check the
+                // reported b-range against the geometry.
+                let (lo, hi) = circle.b_range();
+                assert!(lo <= circle.nearest_point().norm() + 1e-6);
+                assert!((hi - circle.farthest_point().norm()).abs() < 1e-6);
+            }
+        }
+        assert!(
+            circles_checked > 100,
+            "only {circles_checked} circles found"
+        );
+    }
+
+    #[test]
+    fn the_analytic_gradient_matches_central_differences_and_is_normal_to_the_circle() {
+        let mut seed = 77;
+        for _ in 0..100 {
+            let (f, _) = random_frame(&mut seed);
+            let p = Vector2::new(
+                (2.0 * lcg(&mut seed) - 1.0) * 30.0 * R_EARTH,
+                (2.0 * lcg(&mut seed) - 1.0) * 30.0 * R_EARTH,
+            );
+            if p.norm() < 1.0 * R_EARTH {
+                continue;
+            }
+            let g = f.gradient_semi_major_axis(p);
+            let h = 1.0e-4 * p.norm();
+            let fd = Vector2::new(
+                (f.post_encounter_semi_major_axis(p + Vector2::new(h, 0.0))
+                    - f.post_encounter_semi_major_axis(p - Vector2::new(h, 0.0)))
+                    / (2.0 * h),
+                (f.post_encounter_semi_major_axis(p + Vector2::new(0.0, h))
+                    - f.post_encounter_semi_major_axis(p - Vector2::new(0.0, h)))
+                    / (2.0 * h),
+            );
+            assert!(
+                (g - fd).norm() <= 1e-5 * g.norm().max(1e-30),
+                "analytic {g:?} vs central difference {fd:?}"
+            );
+            // Normal to the level set: parallel to the radius vector from the
+            // circle centre through p. The circle through p is the one for a'(p).
+            let a = f.post_encounter_semi_major_axis(p);
+            if a <= 0.0 {
+                continue;
+            }
+            let cos_out = f.cos_theta_out(p);
+            let denom = cos_out - f.cos_theta;
+            if denom.abs() < 1e-6 {
+                continue;
+            }
+            let center = Vector2::new(0.0, f.c() * f.sin_theta / denom);
+            let radial = (p - center).normalize();
+            let cross = g.x * radial.y - g.y * radial.x;
+            assert!(
+                cross.abs() <= 1e-6 * g.norm(),
+                "gradient {g:?} not radial about {center:?} at {p:?}"
+            );
+        }
+    }
+
+    /// The measured inversion that motivated the module: on one resonance the
+    /// keyhole is narrowest at the near (steep) end and widest at the far end.
+    #[test]
+    fn keyholes_are_narrow_near_earth_and_wide_far_out() {
+        let mut seed = 99;
+        let mut compared = 0;
+        for _ in 0..100 {
+            let (f, _) = random_frame(&mut seed);
+            for circle in f.resonant_circles(1..=20, 24, 100.0 * f.capture_radius) {
+                if circle.encloses_origin() || circle.radius < 1.0e-3 * f.capture_radius {
+                    continue;
+                }
+                let near = f.keyhole_at(&circle, circle.nearest_point());
+                let far = f.keyhole_at(&circle, circle.farthest_point());
+                assert!(near.width > 0.0 && far.width > 0.0);
+                assert!(
+                    near.width <= far.width * (1.0 + 1e-9),
+                    "{}: near {:.3e} m wider than far {:.3e} m",
+                    circle.resonance,
+                    near.width,
+                    far.width
+                );
+                assert!(
+                    (near.width * near.gradient.norm() - near.semi_major_axis_tolerance).abs()
+                        <= 1e-9 * near.semi_major_axis_tolerance
+                );
+                compared += 1;
+            }
+        }
+        assert!(compared > 50);
+    }
+
+    #[test]
+    fn census_is_coprime_and_sorted() {
+        let all = Resonance::census(1..=6, 8);
+        assert!(all.iter().all(|r| gcd(r.h, r.k) == 1));
+        assert!(all
+            .windows(2)
+            .all(|w| w[0].semi_major_axis_m() <= w[1].semi_major_axis_m()));
+        assert!(all.contains(&Resonance { h: 3, k: 4 }));
+        assert!(!all.contains(&Resonance { h: 2, k: 4 }));
+        let r = Resonance { h: 3, k: 4 };
+        assert!((r.semi_major_axis_m() / AU_M - 0.825_481_812).abs() < 1e-8);
+        assert!((r.period_seconds() / JULIAN_YEAR_S - 0.75).abs() < 1e-15);
+        assert_eq!(format!("{r}"), "3:4");
+    }
+
+    /// An unreachable resonance is `None`, not a circle with a NaN in it.
+    #[test]
+    fn out_of_reach_resonances_are_none() {
+        let mut seed = 3;
+        let (f, _) = random_frame(&mut seed);
+        // 1:100 is a 0.046 AU orbit no Earth flyby can produce.
+        assert!(f.resonant_circle(Resonance { h: 1, k: 100 }).is_none());
+        assert!(f.cos_theta_out_for_semi_major_axis(-1.0).is_none());
+        assert!(f.cos_theta_out_for_semi_major_axis(f64::NAN).is_none());
+    }
+
+    /// Kernel-gated: the shipping rock's frame is validated end to end — the
+    /// un-rotated reconstruction reproduces its real pre-encounter orbit at the
+    /// `r ≈ R⊕ₒᵣᵦ` ceiling, the 3:4 resonance the reach probe picked is present
+    /// with the locus and keyhole it reported, and the rotated branch's sign is
+    /// consistent with the flown measurement (`−B̂` raises `a'` on this rock).
+    #[test]
+    fn the_shipping_rock_reaches_the_three_four_resonance_where_the_probe_said() {
+        use crate::scenario::{ImpactorConfig, RealFieldScenario};
+        use anise::constants::frames::{EARTH_J2000, SSB_J2000, SUN_J2000};
+
+        let Some(_) = crate::kernels::resolve_for_test("the shipping-rock keyhole census") else {
+            return;
+        };
+        let sc = RealFieldScenario::build(&ImpactorConfig::default()).expect("build");
+        let eph = sc.ephemeris().clone();
+        let ds = sc.deflection().expect("deflection");
+        let enc = sc.nominal_hit(&ds).expect("nominal hit");
+        let t_ca = ds
+            .nominal_encounter_epoch()
+            .expect("epoch")
+            .expect("an encounter");
+        let (r_km, v_km) = eph
+            .state_km_s(EARTH_J2000, SUN_J2000, t_ca.as_hifitime())
+            .expect("Earth heliocentric state");
+        let mu_sun = eph.sun_gm_m3_s2().expect("sun GM");
+        let f = OpikFrame::new(&enc, r_km * 1e3, v_km * 1e3, mu_sun).expect("frame");
+
+        // Round trip against the real pre-encounter heliocentric orbit.
+        let t_pre = t_ca.shifted_by_seconds(-30.0 * 86_400.0);
+        let pre = ds.nominal().state_at(t_pre).expect("pre state");
+        let (rs_km, vs_km) = eph
+            .state_km_s(SUN_J2000, SSB_J2000, t_pre.as_hifitime())
+            .expect("Sun state");
+        let r_h = pre.position - rs_km * 1e3;
+        let v_h = pre.velocity - vs_km * 1e3;
+        let a_actual = 1.0 / (2.0 / r_h.norm() - v_h.norm_squared() / mu_sun);
+        let rel = (f.incoming_semi_major_axis() - a_actual).abs() / a_actual;
+        assert!(
+            rel < 1.0e-3,
+            "round trip {rel:.3e}: a frame, sign or vis-viva bug, not the approximation"
+        );
+
+        // The 3:4 resonance. The reach probe reported its locus at b = 60 843–
+        // 153 511 km from a 72-direction sweep that bisected *outward from the
+        // capture radius* — so a ray that crossed the circle twice, or entered it
+        // inside the disc, was invisible to it. The exact circle says the far end
+        // was right and the near end was not: the locus reaches b = 3 866 km, well
+        // inside the 11 311 km disc. Part of the 3:4 resonance is an impact, and
+        // the nearest miss on it is the grazing point.
+        let circle = f
+            .resonant_circle(Resonance { h: 3, k: 4 })
+            .expect("3:4 in reach");
+        let (lo, hi) = circle.b_range();
+        println!(
+            "3:4 circle: ζ_c {:.0} km, R {:.0} km, b {:.0}..{:.0} km, capture {:.0} km",
+            circle.center_zeta / 1e3,
+            circle.radius / 1e3,
+            lo / 1e3,
+            hi / 1e3,
+            f.capture_radius / 1e3
+        );
+        assert!(
+            (3.0e6..=5.0e6).contains(&lo) && (150.0e6..=158.0e6).contains(&hi),
+            "3:4 locus b = {:.0}..{:.0} km",
+            lo / 1e3,
+            hi / 1e3
+        );
+        assert!(circle.crosses_capture_disc(f.capture_radius));
+        assert!(!circle.encloses_origin());
+        let (graze, graze_mirror) = circle
+            .intersections_at_radius(f.capture_radius)
+            .expect("the circle crosses the disc edge");
+        assert!((graze.norm() - f.capture_radius).abs() < 1e-3);
+        assert!((graze_mirror.x + graze.x).abs() < 1e-6 && graze_mirror.y == graze.y);
+        let at_graze = f.keyhole_at(&circle, graze);
+        let far = f.keyhole_at(&circle, circle.farthest_point());
+        println!(
+            "3:4 keyhole width: {:.2} km at grazing, {:.2} km at the far end",
+            at_graze.width / 1e3,
+            far.width / 1e3
+        );
+        // The far end matches the probe's 24.9 km; the grazing point is steeper
+        // than anything the probe reached and correspondingly narrower.
+        assert!(
+            at_graze.width < 12.0e3 && (18.0e3..=30.0e3).contains(&far.width),
+            "3:4 keyhole {:.1} km at grazing, {:.1} km far (probe far end: 24.9)",
+            at_graze.width / 1e3,
+            far.width / 1e3
+        );
+
+        // The sign, structurally. Bending toward Earth is bending toward −ζ̂,
+        // i.e. toward Earth's own motion, which adds heliocentric speed: so +ζ
+        // *raises* a' and −ζ lowers it, for any encounter. The 3:4 resonance is
+        // below the incoming 0.854 AU, so its circle must sit on the −ζ side —
+        // which is what probe_keyhole_rotation found the hard way: its along-track
+        // nudge landed on the raising side (0.854 → 0.889 AU), and reaching 3:4
+        // needs the opposite sense of deflection, not a larger one.
+        let a_in = f.incoming_semi_major_axis();
+        let up = f.post_encounter_semi_major_axis(Vector2::new(0.0, 21.0 * R_EARTH));
+        let down = f.post_encounter_semi_major_axis(Vector2::new(0.0, -21.0 * R_EARTH));
+        assert!(
+            up > a_in && down < a_in,
+            "+ζ must raise a': {up} / {a_in} / {down}"
+        );
+        assert!(circle.a_prime < a_in);
+        assert!(
+            circle.center_zeta < 0.0,
+            "3:4 must lie on the lowering side"
+        );
+        println!(
+            "nominal b-point in the Öpik frame: ξ {:.0} km, ζ {:.0} km",
+            f.project(&enc.b_vector).x / 1e3,
+            f.project(&enc.b_vector).y / 1e3
+        );
+    }
+    /// Kernel-gated, ~15 s. **The 3:4 keyhole, flown.** `probe_keyhole_return`
+    /// aimed the shipping rock at the 3:4 circle with the closed form (retrograde
+    /// along-track Δv 0.216438 m/s at the campaign start, return 53 841 km) and
+    /// refined the Δv against the propagator to the return's floor:
+    /// **0.216550 m/s → 1 130 km from Earth's centre on 2042-12-31**, three years
+    /// after the 2040-01-01 flyby, inside the capture disc and inside Earth. This
+    /// re-flies that one Δv — no solve, one deflected 12-year arc plus 3.6 years
+    /// onward — and asserts the return is where the probe measured it, so the
+    /// flown keyhole is a regression test rather than a session note.
+    ///
+    /// The tolerance is a few capture radii, deliberately loose: the return miss
+    /// is a V-shaped function of Δv with a ~1e-5 m/s wide floor, and an integrator
+    /// or cadence change that moves the floor by that much still lands a return
+    /// within thousands of kilometres, which is the claim. What would fail this
+    /// is a frame or sign regression, which moves the return by ~1e6 km.
+    #[test]
+    fn the_three_four_keyhole_returns_the_rock_to_earth_when_flown() {
+        use crate::close_approach::{closest_approach, find_close_approaches, ScanOptions};
+        use crate::perturber_field::EphemerisPerturber;
+        use crate::scenario::{ImpactorConfig, RealFieldScenario};
+        use anise::constants::frames::EARTH_J2000;
+
+        let Some(_) = crate::kernels::resolve_for_test("the flown 3:4 keyhole") else {
+            return;
+        };
+        const KEYHOLE_DV_RETROGRADE_M_S: f64 = 0.216_550;
+        let sc = RealFieldScenario::build(&ImpactorConfig::default()).expect("build");
+        let earth = EphemerisPerturber::new(sc.ephemeris().clone(), EARTH_J2000);
+        let ds = sc.deflection().expect("deflection");
+        let nominal = sc.nominal_hit(&ds).expect("nominal hit");
+        let epoch0 = sc.epoch0();
+        let seed = ds.nominal().state_at(epoch0).expect("seed");
+        let retro = -crate::deflection::along_track_unit(seed).expect("along-track");
+        let (clock, _) = ds
+            .deflected_trajectory(epoch0, KEYHOLE_DV_RETROGRADE_M_S * retro)
+            .expect("deflected trajectory");
+        let scan = ScanOptions {
+            max_sample_dt: 6.0 * 3600.0,
+            time_tol_seconds: 1.0e-3,
+            max_distance: Some(5.0e8),
+        };
+        let ca1 = closest_approach(&clock, &earth, scan)
+            .expect("scan")
+            .expect("encounter 1 inside the gate");
+        let enc1 = ca1
+            .b_plane(nominal.mu, nominal.earth_radius)
+            .expect("reduce");
+        assert!(!enc1.is_hit(), "encounter 1 must be a miss");
+        assert!(
+            (150.0e6..=157.0e6).contains(&enc1.impact_parameter),
+            "encounter-1 b {:.0} km is off the 3:4 far end",
+            enc1.impact_parameter / 1e3
+        );
+        let t_hand = ca1.epoch.shifted_by_seconds(30.0 * 86_400.0);
+        let hand = clock.state_at(t_hand).expect("hand-off state");
+        let onward = sc
+            .propagate_free(t_hand, hand, 86_400.0, (3.6 * 365.25) as u32)
+            .expect("fly on");
+        let returns = find_close_approaches(
+            &onward,
+            &earth,
+            ScanOptions {
+                max_sample_dt: 6.0 * 3600.0,
+                time_tol_seconds: 1.0e-3,
+                max_distance: Some(0.05 * AU_M),
+            },
+        )
+        .expect("return census");
+        let best = returns
+            .iter()
+            .min_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap())
+            .expect("a return inside 0.05 AU");
+        let years_after = (best.epoch.tdb_seconds_past_j2000()
+            - ca1.epoch.tdb_seconds_past_j2000())
+            / JULIAN_YEAR_S;
+        println!(
+            "3:4 return: {:.0} km at {} ({:.3} yr after encounter 1)",
+            best.distance / 1e3,
+            best.epoch.as_hifitime(),
+            years_after
+        );
+        assert!(
+            (2.9..=3.1).contains(&years_after),
+            "the return must come {years_after:.3} ≈ 3 yr later"
+        );
+        assert!(
+            best.distance < 4.0 * nominal.capture_radius,
+            "return miss {:.0} km — the flown keyhole has moved",
+            best.distance / 1e3
+        );
+    }
+}

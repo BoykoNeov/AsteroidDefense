@@ -16,6 +16,9 @@
 //! detector (§10.9) root-finds the range-rate on that same continuous trajectory to
 //! locate geocentric closest approach and feed the Earth-relative state into the
 //! b-plane geometry — closing the encounter pipeline into a hit/miss answer.
+//! Tier 3 lives in [`uncertainty`] (covariance → b-plane → impact probability)
+//! and [`keyhole`] (the pinned Öpik ξ,ζ frame, resonant-return circles and
+//! keyhole widths).
 
 pub mod clock;
 pub mod close_approach;
@@ -28,6 +31,7 @@ pub mod geometry;
 pub mod horizons;
 pub mod integrator;
 pub mod kernels;
+pub mod keyhole;
 pub mod lambert;
 pub mod launch_vehicle;
 pub mod mission;
@@ -60,6 +64,10 @@ pub use geometry::{
 };
 pub use horizons::{Neo, NeoError};
 pub use integrator::{propagate_fixed, DenseSegment, Dop853, Integrator, IntegratorError, Rk4};
+pub use keyhole::{
+    perigee_state_for_asymptote, Keyhole, KeyholeError, OpikFrame, Resonance, ResonantCircle, AU_M,
+    JULIAN_YEAR_S,
+};
 pub use lambert::{lambert_universal, LambertError, LambertSolution};
 pub use launch_vehicle::{LaunchVehicle, LAUNCH_VEHICLES};
 pub use mission::{

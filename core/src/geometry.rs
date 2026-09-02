@@ -51,7 +51,15 @@
 //! direction (Earth's heliocentric velocity, or an ecliptic pole) and is what
 //! keyhole/covariance work reasons in — is deferred to Tier 3 (`uncertainty.rs`).
 //! `B` is provided here as a 3-vector with pinned invariants (`|B| = b`, `B ⊥ Ŝ`,
-//! `B ⊥ ĥ`); its *sign convention* is left to nail down when keyholes need it.
+//! `B ⊥ ĥ`) — and, since the keyhole work (`keyhole.rs`), a pinned **sign**:
+//! `B` points from Earth's centre to the incoming asymptote, the side the
+//! asteroid arrives on. Derivation: the hyperbola's centre `C = a·e·P̂` lies on
+//! the asymptote, so the asymptote's closest point to the focus is
+//! `C − (C·Ŝ)Ŝ = a·e·P̂ − a·Ŝ = b·(Ŝ × ĥ)`, which is exactly the `B` built below.
+//! Measured too: bending the asymptote *toward* `−B̂` predicts a flown flyby's
+//! outgoing orbit to `1.5e-4` while `+B̂` misses by `7.4e-2`
+//! (`probe_keyhole_rotation`). The ξ,ζ decomposition itself lives in
+//! [`crate::keyhole::OpikFrame`].
 
 use nalgebra::Vector3;
 
@@ -139,7 +147,9 @@ pub struct BPlaneEncounter {
     pub s_hat: Vector3<f64>,
     /// The b-vector `B` (metres): magnitude equals [`impact_parameter`], lies in
     /// the b-plane (`B·Ŝ = 0`) and in the orbital plane (`B·ĥ = 0`), per
-    /// `B = b·(Ŝ × ĥ)`. Sign convention unpinned pending keyhole work (§10.8 doc).
+    /// `B = b·(Ŝ × ĥ)`. **Sign pinned:** `B` points from Earth's centre toward the
+    /// incoming asymptote — the asteroid arrives on the `+B̂` side and gravity bends
+    /// it toward `−B̂` (see the module doc and `b_vector_points_at_the_incoming_asymptote`).
     ///
     /// [`impact_parameter`]: BPlaneEncounter::impact_parameter
     pub b_vector: Vector3<f64>,
@@ -488,6 +498,44 @@ mod tests {
         let h_hat = r_rel.cross(&v_rel).normalize();
         assert!(enc.b_vector.dot(&enc.s_hat).abs() / enc.impact_parameter < 1e-12);
         assert!(enc.b_vector.dot(&h_hat).abs() / enc.impact_parameter < 1e-12);
+    }
+
+    /// The sign of `B`, pinned by the keyhole work: `B` points from Earth's centre
+    /// to the incoming asymptote, so every point of the inbound branch sits on
+    /// the `+B̂` side, and far out on the asymptote `r·B̂ → b` exactly. A `B` built
+    /// with the opposite sign would put `r·B̂` at `−b` there, so this is a sign
+    /// test with no tolerance games in it.
+    #[test]
+    fn b_vector_points_at_the_incoming_asymptote() {
+        let v_inf = 8_000.0;
+        let r_p = 3.0 * R_EARTH;
+        let (rp_r, rp_v) = state_at_perigee(v_inf, r_p);
+        let enc = BPlaneEncounter::from_relative_state(rp_r, rp_v, MU_EARTH, R_EARTH).unwrap();
+        let b_hat = enc.b_vector / enc.impact_parameter;
+
+        // At perigee itself the rock is on the +B̂ side.
+        assert!(rp_r.dot(&b_hat) > 0.0, "perigee sits on the −B̂ side");
+
+        // Walk the inbound branch out toward the asymptote (ν → −ν∞): the
+        // transverse offset r·B̂ must stay positive and converge on b.
+        let e = enc.eccentricity;
+        let p = r_p * (1.0 + e);
+        let nu_inf = (-1.0 / e).acos();
+        let mut last_gap = f64::INFINITY;
+        for frac in [0.5, 0.9, 0.99, 0.999, 0.9999] {
+            let nu = -nu_inf * frac;
+            let r = p / (1.0 + e * nu.cos());
+            let pos = Vector3::new(r * nu.cos(), r * nu.sin(), 0.0);
+            let along_b = pos.dot(&b_hat);
+            assert!(along_b > 0.0, "inbound sample at ν = {nu} on the −B̂ side");
+            let gap = (along_b - enc.impact_parameter).abs() / enc.impact_parameter;
+            assert!(gap <= last_gap * 1.0001, "r·B̂ is not converging on b");
+            last_gap = gap;
+        }
+        assert!(
+            last_gap < 1e-3,
+            "far out r·B̂ = b(1 ± {last_gap:.2e}), not b"
+        );
     }
 
     #[test]

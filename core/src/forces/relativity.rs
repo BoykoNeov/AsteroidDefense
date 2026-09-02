@@ -195,10 +195,17 @@ mod tests {
             "radial component: a.x = {}, expected {expected_x}",
             a.x
         );
-        assert!(a.y.abs() < 1e-25 && a.z.abs() < 1e-25, "should be purely radial: {a:?}");
+        assert!(
+            a.y.abs() < 1e-25 && a.z.abs() < 1e-25,
+            "should be purely radial: {a:?}"
+        );
         // The correction is a tiny inward pull (4μ/r ≫ v² here, so the bracket is
         // positive and a points along +x̂ = outward)… sanity: it is small.
-        assert!(a.norm() < 1e-6, "1PN correction should be a small acceleration: {}", a.norm());
+        assert!(
+            a.norm() < 1e-6,
+            "1PN correction should be a small acceleration: {}",
+            a.norm()
+        );
     }
 
     /// A configuration with `r·v ≠ 0` exercises the `4(r·v)v` cross-term and its
@@ -221,8 +228,16 @@ mod tests {
         let pref = mu / (c2 * r_norm * r_norm * r_norm);
         let ex = pref * ((4.0 * mu / r_norm - v2) * rx + 4.0 * r_dot_v * vx);
         let ey = pref * (4.0 * r_dot_v * vy);
-        assert!((a.x - ex).abs() < 1e-22 + 1e-12 * ex.abs(), "a.x={} expected {ex}", a.x);
-        assert!((a.y - ey).abs() < 1e-22 + 1e-12 * ey.abs(), "a.y={} expected {ey}", a.y);
+        assert!(
+            (a.x - ex).abs() < 1e-22 + 1e-12 * ex.abs(),
+            "a.x={} expected {ex}",
+            a.x
+        );
+        assert!(
+            (a.y - ey).abs() < 1e-22 + 1e-12 * ey.abs(),
+            "a.y={} expected {ey}",
+            a.y
+        );
         assert!(a.z.abs() < 1e-25, "planar motion stays planar: {a:?}");
         // The cross-term is non-zero here — guards against it being dropped.
         assert!(ey.abs() > 0.0);

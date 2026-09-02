@@ -257,8 +257,10 @@ impl HoverGeometry {
         if !ok {
             return None;
         }
-        Some(GRAVITATIONAL_CONSTANT * self.spacecraft_mass_kg
-            / (self.hover_distance_m * self.hover_distance_m))
+        Some(
+            GRAVITATIONAL_CONSTANT * self.spacecraft_mass_kg
+                / (self.hover_distance_m * self.hover_distance_m),
+        )
     }
 
     /// The angle the thrusters must be tilted outward from the tow axis to keep
@@ -545,7 +547,8 @@ mod tests {
         // G·M·m/d² = 1.12·(ρ/2)·(r/d)³·(m/2e4)·(d/100) N.
         let mutual = GRAVITATIONAL_CONSTANT * asteroid_mass * hover.spacecraft_mass_kg
             / (hover.hover_distance_m * hover.hover_distance_m);
-        let paper_mutual = 1.12 * (r / hover.hover_distance_m).powi(3) * (hover.hover_distance_m / 100.0);
+        let paper_mutual =
+            1.12 * (r / hover.hover_distance_m).powi(3) * (hover.hover_distance_m / 100.0);
         assert!(
             (mutual - paper_mutual).abs() / paper_mutual < 0.01,
             "mutual attraction {mutual:.4} N vs the paper's parametrized {paper_mutual:.4} N"
@@ -597,7 +600,10 @@ mod tests {
 
         // Inside the band: clear of the surface, tows, cannot hold station.
         let doomed = at(1.02);
-        assert!(doomed.is_clear_of_surface(), "1.02 radii is outside the body");
+        assert!(
+            doomed.is_clear_of_surface(),
+            "1.02 radii is outside the body"
+        );
         assert!(
             doomed.tow_acceleration().is_some_and(|a| a > 0.0),
             "gravity does not care where the nozzles point — the tow is real here"
@@ -623,12 +629,18 @@ mod tests {
 
         // A plume that cannot be flown at any distance is rejected rather than
         // returning a floor a caller would treat as reachable.
-        assert!(HoverGeometry::min_hover_radii_for_station_keeping(std::f64::consts::FRAC_PI_2).is_none());
+        assert!(
+            HoverGeometry::min_hover_radii_for_station_keeping(std::f64::consts::FRAC_PI_2)
+                .is_none()
+        );
         assert!(HoverGeometry::min_hover_radii_for_station_keeping(f64::NAN).is_none());
         assert!(HoverGeometry::min_hover_radii_for_station_keeping(-0.1).is_none());
         // A zero-width plume needs no cant beyond the surface tangent, so its floor
         // is exactly the surface.
-        assert_eq!(HoverGeometry::min_hover_radii_for_station_keeping(0.0), Some(1.0));
+        assert_eq!(
+            HoverGeometry::min_hover_radii_for_station_keeping(0.0),
+            Some(1.0)
+        );
     }
 
     /// **The bug this term is most likely to grow.** Canting the thrusters is a
@@ -682,7 +694,10 @@ mod tests {
         let hover = HoverGeometry::lu_love_2005();
         let light = hover.station_keeping_thrust_n(1.0e7).unwrap();
         let heavy = hover.station_keeping_thrust_n(1.0e10).unwrap();
-        assert!(heavy > 100.0 * light, "thrust must scale with asteroid mass");
+        assert!(
+            heavy > 100.0 * light,
+            "thrust must scale with asteroid mass"
+        );
         // The tow method cannot even accept a mass — this is enforced by the
         // signature, so all that is left to check is that it is a pure function
         // of the spacecraft configuration.
@@ -802,7 +817,10 @@ mod tests {
             GravityTractor::sun_at_origin(2.6e-11, TowDirection::Prograde, window(100.0, 200.0));
         let on_sun = StateVector::from_components(0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
         let outside = Epoch::from_tdb_seconds_past_j2000(50.0);
-        assert_eq!(term.acceleration(outside, &on_sun).unwrap(), Vector3::zeros());
+        assert_eq!(
+            term.acceleration(outside, &on_sun).unwrap(),
+            Vector3::zeros()
+        );
     }
 
     // ---------------------------------------------------------------- window
@@ -845,9 +863,15 @@ mod tests {
         let e = |t: f64| Epoch::from_tdb_seconds_past_j2000(t);
         assert!(TowWindow::new(e(200.0), e(100.0)).is_none(), "reversed");
         assert!(TowWindow::new(e(100.0), e(100.0)).is_none(), "empty");
-        assert!(TowWindow::from_duration(e(0.0), 0.0).is_none(), "zero duration");
+        assert!(
+            TowWindow::from_duration(e(0.0), 0.0).is_none(),
+            "zero duration"
+        );
         assert!(TowWindow::from_duration(e(0.0), -5.0).is_none(), "negative");
-        assert!(TowWindow::from_duration(e(0.0), f64::NAN).is_none(), "NaN duration");
+        assert!(
+            TowWindow::from_duration(e(0.0), f64::NAN).is_none(),
+            "NaN duration"
+        );
         assert_eq!(
             TowWindow::from_duration(e(10.0), 40.0).unwrap(),
             TowWindow::new(e(10.0), e(50.0)).unwrap()
@@ -982,7 +1006,11 @@ mod tests {
         )
             .into()])));
         if let Some((a_tow, dir)) = tug {
-            model = model.with(Box::new(GravityTractor::sun_at_origin(a_tow, dir, always())));
+            model = model.with(Box::new(GravityTractor::sun_at_origin(
+                a_tow,
+                dir,
+                always(),
+            )));
         }
 
         let stepper = Dop853::new().with_tolerances(1e-13, 1e-6);
@@ -1042,7 +1070,10 @@ mod tests {
     fn retrograde_station_keeping_drifts_inward() {
         let measured =
             measure_secular_da_dt(Some((1e-9, TowDirection::Retrograde)), 1.0 * AU, 0.15, 40);
-        assert!(measured < 0.0, "retrograde tug must lower a, got {measured}");
+        assert!(
+            measured < 0.0,
+            "retrograde tug must lower a, got {measured}"
+        );
     }
 
     /// The guard that gives the secular tests meaning: the identical integration
@@ -1059,4 +1090,3 @@ mod tests {
         );
     }
 }
-

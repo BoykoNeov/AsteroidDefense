@@ -54,9 +54,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Leads in orbital periods: from a fraction of an orbit out to many orbits.
     // Log-spaced so the multi-revolution tail (where the 1/lead law lives) is
     // well sampled without a huge point count.
-    let leads_periods = [
-        0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0,
-    ];
+    let leads_periods = [0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0];
     // The campaign-wide safe-perigee target, named once in the core so this sweep
     // and the launch-window map's required-mass solve cannot quote requirements
     // against two different bars.
@@ -108,7 +106,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         fmt_slope(slope_all),
         fmt_slope(slope_tail),
     );
-    println!("\n  sweep wall-clock: {sweep_secs:.2} s for {} points ({:.2} s/point)", points.len(), sweep_secs / points.len() as f64);
+    println!(
+        "\n  sweep wall-clock: {sweep_secs:.2} s for {} points ({:.2} s/point)",
+        points.len(),
+        sweep_secs / points.len() as f64
+    );
 
     match slope_tail {
         Some(s) if s < -0.6 => println!("\n  GATE: PASS — multi-orbit slope steepens toward −1; the headline curve is real."),

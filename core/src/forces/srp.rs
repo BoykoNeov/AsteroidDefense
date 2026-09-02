@@ -107,7 +107,11 @@ impl SolarRadiationPressure {
     /// Build from physical inputs: the radiation-pressure coefficient `C_r`
     /// (1 = absorber … 2 = reflector) and the area-to-mass ratio `A/m` (m²/kg).
     /// Computes `a₁ = (Φ/c)·C_r·(A/m)` at `r₀ = 1 AU` — the cannonball model.
-    pub fn from_physical(cr: f64, area_to_mass_m2_per_kg: f64, central: impl CentralBodyState + 'static) -> Self {
+    pub fn from_physical(
+        cr: f64,
+        area_to_mass_m2_per_kg: f64,
+        central: impl CentralBodyState + 'static,
+    ) -> Self {
         let a1 = RADIATION_PRESSURE_1AU_PA * cr * area_to_mass_m2_per_kg;
         Self::standard(a1, central)
     }
@@ -185,7 +189,10 @@ mod tests {
         // (no transverse component — that would be the Yarkovsky mistake).
         assert!(a.dot(&r_hat) > 0.0, "SRP must push outward (a·r̂>0): {a:?}");
         let transverse = a - a.dot(&r_hat) * r_hat;
-        assert!(transverse.norm() < 1e-18 * a.norm(), "SRP must be purely radial: {a:?}");
+        assert!(
+            transverse.norm() < 1e-18 * a.norm(),
+            "SRP must be purely radial: {a:?}"
+        );
         assert!(
             (a.norm() - expected_mag).abs() < 1e-9 * expected_mag,
             "magnitude {} expected {expected_mag}",
@@ -203,8 +210,14 @@ mod tests {
         let far = StateVector::from_components(2.0 * AU, 0.0, 0.0, 0.0, 0.0, 0.0);
         let a_near = term.acceleration(epoch0(), &near).unwrap().norm();
         let a_far = term.acceleration(epoch0(), &far).unwrap().norm();
-        assert!((a_near - a1).abs() < 1e-12 * a1, "at r₀ the magnitude is a₁");
-        assert!((a_far - a1 / 4.0).abs() < 1e-12 * a1, "at 2 r₀ the magnitude is a₁/4");
+        assert!(
+            (a_near - a1).abs() < 1e-12 * a1,
+            "at r₀ the magnitude is a₁"
+        );
+        assert!(
+            (a_far - a1 / 4.0).abs() < 1e-12 * a1,
+            "at 2 r₀ the magnitude is a₁/4"
+        );
     }
 
     /// `from_physical` reproduces the cannonball formula `a₁ = (Φ/c)·C_r·(A/m)`.
@@ -217,7 +230,11 @@ mod tests {
         let density = 2000.0;
         let area_to_mass = 3.0 / (4.0 * radius * density);
         let cr = 1.3;
-        let term = SolarRadiationPressure::from_physical(cr, area_to_mass, FixedCentralBody::at_rest_origin());
+        let term = SolarRadiationPressure::from_physical(
+            cr,
+            area_to_mass,
+            FixedCentralBody::at_rest_origin(),
+        );
         let expected_a1 = RADIATION_PRESSURE_1AU_PA * cr * area_to_mass;
         assert!(
             (term.characteristic_acceleration() - expected_a1).abs() < 1e-18,
@@ -226,7 +243,10 @@ mod tests {
         );
         // β = a₁·AU²/μ_sun should be ~1e-9 — physically tiny, as the note promises.
         let beta = expected_a1 * AU * AU / MU_SUN;
-        assert!(beta > 1e-10 && beta < 1e-8, "sub-km β should be ~1e-9, got {beta}");
+        assert!(
+            beta > 1e-10 && beta < 1e-8,
+            "sub-km β should be ~1e-9, got {beta}"
+        );
     }
 
     /// A body coincident with the Sun has no defined outward direction — fail loud.
@@ -246,7 +266,13 @@ mod tests {
     /// integration of `total_seconds`, plus the closing gap `|r(T) − r(0)|`. Uses
     /// the **geometric** position directly (never osculating elements, which would
     /// report a spurious a≠r on a μ_eff orbit evaluated with μ_sun).
-    fn integrate_circular(a1: f64, r0: f64, with_srp: bool, total_seconds: f64, samples: usize) -> (Vec<f64>, f64) {
+    fn integrate_circular(
+        a1: f64,
+        r0: f64,
+        with_srp: bool,
+        total_seconds: f64,
+        samples: usize,
+    ) -> (Vec<f64>, f64) {
         // Effective-μ the circular condition is built for: μ_eff = μ_sun − A_srp,
         // A_srp = a1·r0². With SRP off the initial speed is sub-circular for μ_sun.
         let a_srp = a1 * r0 * r0;
@@ -293,15 +319,24 @@ mod tests {
 
         let t_eff = std::f64::consts::TAU * (r0 * r0 * r0 / mu_eff).sqrt();
         let t_newton = std::f64::consts::TAU * (r0 * r0 * r0 / MU_SUN).sqrt();
-        assert!(t_eff > t_newton, "outward SRP must lengthen the period: {t_eff} vs {t_newton}");
+        assert!(
+            t_eff > t_newton,
+            "outward SRP must lengthen the period: {t_eff} vs {t_newton}"
+        );
 
         let (radii, closing_gap) = integrate_circular(a1, r0, true, t_eff, 400);
         // Radius stays r0 — the orbit is a genuine circle under μ_eff.
         for r in &radii {
-            assert!((r - r0).abs() < 1e-6 * r0, "radius wandered off r₀: {r} vs {r0}");
+            assert!(
+                (r - r0).abs() < 1e-6 * r0,
+                "radius wandered off r₀: {r} vs {r0}"
+            );
         }
         // Closes to itself after one μ_eff period.
-        assert!(closing_gap < 1e-6 * r0, "orbit did not close after T_eff: gap {closing_gap} m");
+        assert!(
+            closing_gap < 1e-6 * r0,
+            "orbit did not close after T_eff: gap {closing_gap} m"
+        );
     }
 
     /// The control that gives the effective-μ test teeth: the **same** initial
@@ -321,8 +356,14 @@ mod tests {
         // Sub-circular speed for μ_sun → the body falls inward; radius must dip
         // well below r0 somewhere on the arc.
         let min_r = radii.iter().cloned().fold(f64::INFINITY, f64::min);
-        assert!(min_r < 0.99 * r0, "SRP-off orbit should fall inward, min radius {min_r} vs {r0}");
+        assert!(
+            min_r < 0.99 * r0,
+            "SRP-off orbit should fall inward, min radius {min_r} vs {r0}"
+        );
         // And it must not close at the μ_eff period.
-        assert!(closing_gap > 1e-3 * r0, "SRP-off orbit closed at T_eff — SRP was not load-bearing");
+        assert!(
+            closing_gap > 1e-3 * r0,
+            "SRP-off orbit closed at T_eff — SRP was not load-bearing"
+        );
     }
 }

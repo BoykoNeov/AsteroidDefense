@@ -1888,7 +1888,10 @@ mod tests {
         );
 
         let at_solved = sc
-            .towed_encounter(t0, &tow(a_tow, TowWindow::from_duration(t0, solved).unwrap()))
+            .towed_encounter(
+                t0,
+                &tow(a_tow, TowWindow::from_duration(t0, solved).unwrap()),
+            )
             .unwrap()
             .unwrap()
             .perigee;
@@ -1899,7 +1902,10 @@ mod tests {
 
         let short = 0.8 * solved;
         let at_short = sc
-            .towed_encounter(t0, &tow(a_tow, TowWindow::from_duration(t0, short).unwrap()))
+            .towed_encounter(
+                t0,
+                &tow(a_tow, TowWindow::from_duration(t0, short).unwrap()),
+            )
             .unwrap()
             .unwrap()
             .perigee;

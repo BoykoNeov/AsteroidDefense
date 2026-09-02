@@ -100,8 +100,8 @@ use asteroid_core::ephemeris::Ephemeris;
 use asteroid_core::forces::relativity::Relativity1PN;
 use asteroid_core::forces::yarkovsky::YarkovskyA2;
 use asteroid_core::{
-    sb441_perturber_field, tier1_perturber_field, Clock, CompositeForce, Dop853, EphemerisPerturber,
-    Epoch, StateVector,
+    sb441_perturber_field, tier1_perturber_field, Clock, CompositeForce, Dop853,
+    EphemerisPerturber, Epoch, StateVector,
 };
 
 /// One AU in metres.
@@ -148,8 +148,7 @@ fn apophis_own_integration_converges_to_horizons_as_tier2_terms_switch_on() {
     let eph = Arc::new(eph);
     let mu_sun = eph.gm_km3_s2(SUN_J2000).expect("sun gm") * 1e9;
 
-    let bodies =
-        asteroid_core::horizons::load_all_for_test("Tier-2 capstone (needs apophis.neo)");
+    let bodies = asteroid_core::horizons::load_all_for_test("Tier-2 capstone (needs apophis.neo)");
     if bodies.is_empty() {
         // No tables at all — `load_all_for_test` has already panicked if the
         // require-flag is set, so reaching here means the suite is legitimately
@@ -201,7 +200,9 @@ fn apophis_own_integration_converges_to_horizons_as_tier2_terms_switch_on() {
         tier1()
             .with(Box::new(Relativity1PN::new(mu_sun, sun_term())))
             .with(Box::new(YarkovskyA2::standard(APOPHIS_A2_SI, sun_term())))
-            .with(Box::new(sb441_perturber_field(&eph).expect("build sb441 field")))
+            .with(Box::new(
+                sb441_perturber_field(&eph).expect("build sb441 field"),
+            ))
     });
 
     // Tight integrator so integration error (~0.1 m over the arc) stays far below

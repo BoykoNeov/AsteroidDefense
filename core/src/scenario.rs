@@ -55,8 +55,8 @@ use crate::uncertainty::{
     StateCovariance, UncertaintyError, SAMPLE_CADENCE_DAYS,
 };
 use crate::{
-    find_close_approaches, geometry, Clock, DeflectionError, DeflectionScenario, Dop853, DvSolveTol,
-    Epoch, Integrator, OrbitalElements, ScanOptions, StateVector,
+    find_close_approaches, geometry, Clock, DeflectionError, DeflectionScenario, Dop853,
+    DvSolveTol, Epoch, Integrator, OrbitalElements, ScanOptions, StateVector,
 };
 
 /// Metres per kilometre — the km→m scale the DE440 states cross into SI on.
@@ -2251,7 +2251,8 @@ mod tests {
     /// symmetric, and entirely plausible.
     #[test]
     fn the_tier3_reduction_epoch_anchors_to_the_first_encounter_and_refuses_a_second() {
-        if crate::kernels::resolve_for_test("tier3_reduction_epoch_anchors_to_the_first").is_none() {
+        if crate::kernels::resolve_for_test("tier3_reduction_epoch_anchors_to_the_first").is_none()
+        {
             return;
         }
 

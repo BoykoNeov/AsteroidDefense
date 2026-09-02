@@ -256,8 +256,7 @@ pub fn lambert_universal(
             std::f64::consts::SQRT_2 / 40.0 * y0.powf(1.5)
                 + a_coef / 8.0 * (y0.sqrt() + a_coef * (0.5 / y0).sqrt())
         } else {
-            (y / c).powf(1.5)
-                * (1.0 / (2.0 * z) * (c - 1.5 * s / c) + 0.75 * s * s / c)
+            (y / c).powf(1.5) * (1.0 / (2.0 * z) * (c - 1.5 * s / c) + 0.75 * s * s / c)
                 + a_coef / 8.0 * (3.0 * s / c * y.sqrt() + a_coef * (c / y).sqrt())
         };
         // F(z) = √μ·(computed_tof − tof); its root is the same z. Scale the
@@ -726,7 +725,10 @@ mod tests {
 
             // And the arrival velocity the solver reports is the one the conic has.
             let v2_err = (arrived.velocity - sol.v2).norm() / sol.v2.norm();
-            assert!(v2_err < 1e-8, "{branch:?} arrival velocity error {v2_err:.2e}");
+            assert!(
+                v2_err < 1e-8,
+                "{branch:?} arrival velocity error {v2_err:.2e}"
+            );
         }
     }
 
@@ -741,7 +743,10 @@ mod tests {
         let hi = lambert_universal_multirev(r1, r2, tof, MU_SUN, true, 1, MultiRevBranch::HighZ)
             .expect("HighZ solves");
         let separation = (lo.v1 - hi.v1).norm() / lo.v1.norm();
-        println!("branch separation in departure velocity: {:.3}%", separation * 100.0);
+        println!(
+            "branch separation in departure velocity: {:.3}%",
+            separation * 100.0
+        );
         assert!(
             separation > 1e-3,
             "the two branches should be distinct conics, got a relative separation of {separation:.2e}"
@@ -848,7 +853,10 @@ mod tests {
         let direct = lambert_universal(r1, r2, tof, MU_SUN, true).unwrap();
         for branch in [MultiRevBranch::LowZ, MultiRevBranch::HighZ] {
             let via = lambert_universal_multirev(r1, r2, tof, MU_SUN, true, 0, branch).unwrap();
-            assert_eq!(via, direct, "N=0 must be bit-identical to the single-rev solve");
+            assert_eq!(
+                via, direct,
+                "N=0 must be bit-identical to the single-rev solve"
+            );
         }
     }
 
@@ -885,13 +893,20 @@ mod tests {
     fn each_extra_revolution_raises_the_minimum_time_of_flight() {
         let (r1, r2, _) = multirev_case();
         let short = 0.05 * 365.25 * 86400.0;
-        let minimum_for = |n: u32| {
-            match lambert_universal_multirev(r1, r2, short, MU_SUN, true, n, MultiRevBranch::LowZ) {
-                Err(LambertError::NoSolutionForRevolutions {
-                    minimum_tof_seconds, ..
-                }) => minimum_tof_seconds,
-                other => panic!("expected a gap for N={n}, got {other:?}"),
-            }
+        let minimum_for = |n: u32| match lambert_universal_multirev(
+            r1,
+            r2,
+            short,
+            MU_SUN,
+            true,
+            n,
+            MultiRevBranch::LowZ,
+        ) {
+            Err(LambertError::NoSolutionForRevolutions {
+                minimum_tof_seconds,
+                ..
+            }) => minimum_tof_seconds,
+            other => panic!("expected a gap for N={n}, got {other:?}"),
         };
         let (m1, m2, m3) = (minimum_for(1), minimum_for(2), minimum_for(3));
         println!(
@@ -924,9 +939,15 @@ mod tests {
 
         let mut best: Option<(MultiRevBranch, f64)> = None;
         for branch in [MultiRevBranch::LowZ, MultiRevBranch::HighZ] {
-            if let Ok(sol) =
-                lambert_universal_multirev(seed.position, arrival.position, tof, MU_SUN, true, 1, branch)
-            {
+            if let Ok(sol) = lambert_universal_multirev(
+                seed.position,
+                arrival.position,
+                tof,
+                MU_SUN,
+                true,
+                1,
+                branch,
+            ) {
                 let err = (sol.v1 - seed.velocity).norm() / seed.velocity.norm();
                 if best.is_none_or(|(_, b)| err < b) {
                     best = Some((branch, err));
@@ -949,9 +970,21 @@ mod tests {
     #[test]
     fn solution_conserves_energy_and_angular_momentum() {
         let cases = [
-            (Vector3::new(1.0 * AU, 0.0, 0.0), Vector3::new(0.2 * AU, 1.1 * AU, 0.1 * AU), 0.22),
-            (Vector3::new(1.2 * AU, 0.3 * AU, 0.0), Vector3::new(-0.4 * AU, 1.3 * AU, 0.2 * AU), 0.4),
-            (Vector3::new(0.7 * AU, -0.5 * AU, 0.1 * AU), Vector3::new(-1.1 * AU, 0.6 * AU, -0.2 * AU), 0.6),
+            (
+                Vector3::new(1.0 * AU, 0.0, 0.0),
+                Vector3::new(0.2 * AU, 1.1 * AU, 0.1 * AU),
+                0.22,
+            ),
+            (
+                Vector3::new(1.2 * AU, 0.3 * AU, 0.0),
+                Vector3::new(-0.4 * AU, 1.3 * AU, 0.2 * AU),
+                0.4,
+            ),
+            (
+                Vector3::new(0.7 * AU, -0.5 * AU, 0.1 * AU),
+                Vector3::new(-1.1 * AU, 0.6 * AU, -0.2 * AU),
+                0.6,
+            ),
         ];
         for &(r1, r2, frac_year) in &cases {
             let tof = frac_year * 365.25 * 86400.0;

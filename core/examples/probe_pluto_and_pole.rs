@@ -47,7 +47,10 @@ fn main() {
     // --- 1. Pluto ------------------------------------------------------------
     println!("--- Pluto barycenter (NAIF 9) ---");
     match eph.position_km(PLUTO_BARYCENTER_J2000, SSB_J2000, epoch) {
-        Ok(r) => println!("position  : |r| = {:.4} AU  (SSB, 2030-01-01 TDB)", r.norm() / AU_KM),
+        Ok(r) => println!(
+            "position  : |r| = {:.4} AU  (SSB, 2030-01-01 TDB)",
+            r.norm() / AU_KM
+        ),
         Err(e) => println!("position  : NOT AVAILABLE — {e}"),
     }
     let hardcoded_km3_s2 = GM9_AU3_DAY2 * AU_KM.powi(3) / (DAY_S * DAY_S);
@@ -55,9 +58,14 @@ fn main() {
     match eph.gm_km3_s2(PLUTO_BARYCENTER_J2000) {
         Ok(mu) => {
             let rel = (mu - hardcoded_km3_s2).abs() / hardcoded_km3_s2;
-            println!("pck11  GM : {mu:.6} km³/s²  (relative difference {:.3}%)", rel * 100.0);
+            println!(
+                "pck11  GM : {mu:.6} km³/s²  (relative difference {:.3}%)",
+                rel * 100.0
+            );
         }
-        Err(e) => println!("pck11  GM : NOT RESOLVED — {e}\n            (this is why GM9 is hardcoded)"),
+        Err(e) => {
+            println!("pck11  GM : NOT RESOLVED — {e}\n            (this is why GM9 is hardcoded)")
+        }
     }
 
     // --- 2. Earth's spin axis in ICRF ---------------------------------------

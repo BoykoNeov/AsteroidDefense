@@ -202,7 +202,10 @@ impl App {
             Ok(s) => match serde_json::from_str::<CurveFile>(&s) {
                 Ok(c) => {
                     let n = c.points.len();
-                    (Some(c), format!("loaded {n} points from {DEFAULT_CURVE_JSON}"))
+                    (
+                        Some(c),
+                        format!("loaded {n} points from {DEFAULT_CURVE_JSON}"),
+                    )
                 }
                 Err(e) => (None, format!("{DEFAULT_CURVE_JSON} is unreadable: {e}")),
             },
@@ -383,7 +386,11 @@ impl App {
 
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            let label = if self.playing { "⏸ pause" } else { "▶ play" };
+            let label = if self.playing {
+                "⏸ pause"
+            } else {
+                "▶ play"
+            };
             if ui
                 .add_enabled(self.frame.is_some(), egui::Button::new(label))
                 .clicked()
@@ -401,7 +408,10 @@ impl App {
         // The current encounter outcome, straight from the frame's b-plane numbers.
         if let Some(f) = &self.frame {
             ui.add_space(6.0);
-            ui.label(format!("capture radius: {:.0} km", f.capture_radius / 1000.0));
+            ui.label(format!(
+                "capture radius: {:.0} km",
+                f.capture_radius / 1000.0
+            ));
             match f.deflected_perigee {
                 Some(p) if p <= f.capture_radius => {
                     ui.colored_label(

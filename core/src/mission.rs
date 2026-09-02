@@ -733,10 +733,7 @@ mod tests {
         // If the asteroid's velocity at arrival *is* the Lambert arrival velocity,
         // the impactor arrives with zero relative velocity — a clean identity that
         // pins v_rel = v2 − v_ast and the C3 = |v1 − v⊕|² wiring/units.
-        let earth = StateVector::new(
-            Vector3::new(AU, 0.0, 0.0),
-            Vector3::new(0.0, 29_780.0, 0.0),
-        );
+        let earth = StateVector::new(Vector3::new(AU, 0.0, 0.0), Vector3::new(0.0, 29_780.0, 0.0));
         // Pick an asteroid position and a time of flight, solve Lambert to learn
         // the arrival velocity, then *define* the asteroid's velocity to match it.
         let r2 = Vector3::new(-0.2 * AU, 1.3 * AU, 0.05 * AU);
@@ -763,10 +760,7 @@ mod tests {
         // Construct an arrival whose relative velocity opposes the asteroid's
         // motion: the along-track projection must be negative (a retrograde,
         // orbit-shrinking push), and |proj| ≤ |v_rel|.
-        let earth = StateVector::new(
-            Vector3::new(AU, 0.0, 0.0),
-            Vector3::new(0.0, 29_780.0, 0.0),
-        );
+        let earth = StateVector::new(Vector3::new(AU, 0.0, 0.0), Vector3::new(0.0, 29_780.0, 0.0));
         let r2 = Vector3::new(0.1 * AU, 1.25 * AU, 0.0);
         let tof = 0.3 * 365.25 * 86400.0;
         let sol = crate::lambert::lambert_universal(earth.position, r2, tof, MU_SUN, true).unwrap();
@@ -776,7 +770,10 @@ mod tests {
         let m = transfer_metrics(earth, asteroid, tof, MU_SUN, true)
             .unwrap()
             .unwrap();
-        assert!(m.along_track_proj_ms < 0.0, "expected retrograde projection");
+        assert!(
+            m.along_track_proj_ms < 0.0,
+            "expected retrograde projection"
+        );
         assert!(m.along_track_proj_ms.abs() <= m.arrival_v_rel_ms + 1e-6);
     }
 
@@ -788,7 +785,10 @@ mod tests {
         // that guard, not this function, is what turns "arrival ≤ launch" into a
         // NoTransfer cell.
         let earth = StateVector::new(Vector3::new(AU, 0.0, 0.0), Vector3::new(0.0, 29_780.0, 0.0));
-        let ast = StateVector::new(Vector3::new(0.0, AU, 0.0), Vector3::new(-29_780.0, 0.0, 0.0));
+        let ast = StateVector::new(
+            Vector3::new(0.0, AU, 0.0),
+            Vector3::new(-29_780.0, 0.0, 0.0),
+        );
         assert!(transfer_metrics(earth, ast, 0.0, MU_SUN, true).is_err());
     }
 
@@ -930,7 +930,8 @@ mod tests {
         // mass ACTUALLY delivers it — the mis-bracket catch the advisor flagged.
         let target = 1.5e7;
         let m_star = match required_impactor_mass(
-            &sc, e0, &metrics, beta, m_ast, target, /*seed*/ 1.0e3, /*cap*/ 1.0e9, TEST_TOL,
+            &sc, e0, &metrics, beta, m_ast, target, /*seed*/ 1.0e3, /*cap*/ 1.0e9,
+            TEST_TOL,
         )
         .unwrap()
         {
@@ -952,7 +953,10 @@ mod tests {
             MassSolveOutcome::Feasible { impactor_mass_kg } => impactor_mass_kg,
             other => panic!("expected Feasible, got {other:?}"),
         };
-        assert!(m_far > m_star, "a bigger miss needs more mass ({m_far} vs {m_star})");
+        assert!(
+            m_far > m_star,
+            "a bigger miss needs more mass ({m_far} vs {m_star})"
+        );
 
         // The cap guard: a mass cap far below what's needed returns InfeasibleAtCap
         // (the degenerate-direction case, and any under-powered window), never a
@@ -1018,10 +1022,7 @@ mod tests {
         let year = 365.25 * 86400.0;
 
         // Earth-like departure, a target further out and well round the Sun.
-        let earth = StateVector::new(
-            Vector3::new(au, 0.0, 0.0),
-            Vector3::new(0.0, 29_780.0, 0.0),
-        );
+        let earth = StateVector::new(Vector3::new(au, 0.0, 0.0), Vector3::new(0.0, 29_780.0, 0.0));
         let ast = StateVector::new(
             Vector3::new(-0.3 * au, 1.25 * au, 0.05 * au),
             Vector3::new(-22_000.0, -6_000.0, 500.0),
@@ -1062,17 +1063,16 @@ mod tests {
     fn a_short_span_is_unaffected_by_allowing_revolutions() {
         let au = 1.495_978_707e11;
         let mu_sun = 1.327_124_400_18e20;
-        let earth = StateVector::new(
-            Vector3::new(au, 0.0, 0.0),
-            Vector3::new(0.0, 29_780.0, 0.0),
-        );
+        let earth = StateVector::new(Vector3::new(au, 0.0, 0.0), Vector3::new(0.0, 29_780.0, 0.0));
         let ast = StateVector::new(
             Vector3::new(0.2 * au, 1.1 * au, 0.1 * au),
             Vector3::new(-20_000.0, 8_000.0, 300.0),
         );
         let tof = 0.22 * 365.25 * 86400.0;
 
-        let direct = transfer_metrics(earth, ast, tof, mu_sun, true).unwrap().unwrap();
+        let direct = transfer_metrics(earth, ast, tof, mu_sun, true)
+            .unwrap()
+            .unwrap();
         for max_rev in [0, 1, 3] {
             let best = best_transfer_metrics(earth, ast, tof, mu_sun, true, max_rev)
                 .unwrap()

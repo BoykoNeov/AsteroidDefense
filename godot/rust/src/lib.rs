@@ -25,15 +25,15 @@ use asteroid_core::launch_vehicle::LaunchVehicle;
 use asteroid_core::mission::MassSolveOutcome;
 use asteroid_core::scenario::{ImpactorConfig, ScenarioError, SAFE_PERIGEE_TARGET_M};
 use asteroid_core::{Epoch, OrbitalElements};
+use mission_core::tractor_min_hover_radii;
 use mission_core::{
     display_comet, heaviest_deliverable_kg, launch_vehicle, launch_vehicle_count, load_neo_bodies,
     measure_tier2_shifts, mount_small_bodies, probe_tow_plan, required_cell_mass, seed_orrery_body,
     solve_required_dv_anchor, tractor_readout as score_tractor_plan, verify_porkchop_cell,
     BuiltScenario, CellVerdict, MissionCore, OrreryBody, PorkchopView, ThreatOrbitKnobs,
-    Tier2Shifts, TractorPlan, REQUIRED_DV_LAW_MIN_PERIODS,
-    SB441_BODIES, THREAT_RADIUS_M, TRACTOR_HOVER_RADII,
+    Tier2Shifts, TractorPlan, REQUIRED_DV_LAW_MIN_PERIODS, SB441_BODIES, THREAT_RADIUS_M,
+    TRACTOR_HOVER_RADII,
 };
-use mission_core::tractor_min_hover_radii;
 
 /// The launcher at a GDScript-supplied index, or `None` for a negative or
 /// out-of-range one. A free function so every `#[func]` that takes a `vehicle`
@@ -477,43 +477,43 @@ impl Mission {
             // the message ever reaches the HUD, and a plain String is unambiguously
             // safe to send.
             let result = BuiltScenario::build(Arc::clone(&eph), &cfg, mounted)
-                    // The Tier-2 shift preview is DELIBERATELY not measured here: it is ~64 s
-                    // of propagation that would sit *before* `install`, delaying the threat
-                    // solution and the planner — the core gameplay — by that much. It is
-                    // instead computed on demand when the operator opens the force-model menu
-                    // (`begin_tier2_preview`), off the same scenario, so the threat lands as
-                    // fast as it did before the menu existed.
-                    .map_err(|e| e.to_string())
-                    .and_then(|built| {
-                        // The orrery's scenery flies here, on this thread, in the field
-                        // that was just built — ~4 s of integration that would otherwise
-                        // land on the main thread, since `add_synthetic_body` is
-                        // inline-and-expensive by design.
-                        let comet = seed_orrery_body(
-                            &eph,
-                            built.scenario_ref(),
-                            display_comet::NAME,
-                            display_comet::KIND,
-                            display_comet::elements(),
-                            built.epoch0(),
-                            display_comet::CADENCE_SECONDS,
-                            display_comet::N_SNAPSHOTS,
-                        )
-                        .map_err(|e| e.to_string())?;
+                // The Tier-2 shift preview is DELIBERATELY not measured here: it is ~64 s
+                // of propagation that would sit *before* `install`, delaying the threat
+                // solution and the planner — the core gameplay — by that much. It is
+                // instead computed on demand when the operator opens the force-model menu
+                // (`begin_tier2_preview`), off the same scenario, so the threat lands as
+                // fast as it did before the menu existed.
+                .map_err(|e| e.to_string())
+                .and_then(|built| {
+                    // The orrery's scenery flies here, on this thread, in the field
+                    // that was just built — ~4 s of integration that would otherwise
+                    // land on the main thread, since `add_synthetic_body` is
+                    // inline-and-expensive by design.
+                    let comet = seed_orrery_body(
+                        &eph,
+                        built.scenario_ref(),
+                        display_comet::NAME,
+                        display_comet::KIND,
+                        display_comet::elements(),
+                        built.epoch0(),
+                        display_comet::CADENCE_SECONDS,
+                        display_comet::N_SNAPSHOTS,
+                    )
+                    .map_err(|e| e.to_string())?;
 
-                        // The real asteroids join the same catalog — but they cost no
-                        // integration at all. A `.neo` table already holds JPL's
-                        // trajectory, so this is a file read (milliseconds) beside the
-                        // comet's ~4 s of flying. It rides the worker because this is
-                        // where the catalog is assembled, not because it is expensive.
-                        //
-                        // Absent tables are the ordinary state of a fresh clone and
-                        // produce an empty vector, exactly as an unmounted small-body
-                        // kernel produces an empty asteroid list.
-                        let mut bodies = vec![comet];
-                        bodies.extend(load_neo_bodies());
-                        Ok((built, bodies))
-                    });
+                    // The real asteroids join the same catalog — but they cost no
+                    // integration at all. A `.neo` table already holds JPL's
+                    // trajectory, so this is a file read (milliseconds) beside the
+                    // comet's ~4 s of flying. It rides the worker because this is
+                    // where the catalog is assembled, not because it is expensive.
+                    //
+                    // Absent tables are the ordinary state of a fresh clone and
+                    // produce an empty vector, exactly as an unmounted small-body
+                    // kernel produces an empty asteroid list.
+                    let mut bodies = vec![comet];
+                    bodies.extend(load_neo_bodies());
+                    Ok((built, bodies))
+                });
             // A closed channel means the game quit mid-build. Dropping the result is
             // the right response; `send`'s Err must not become a panic on a detached
             // thread.
@@ -1581,10 +1581,7 @@ impl Mission {
         d.set("holds_station", r.holds_station);
         d.set("tow_accel_m_s2", r.tow_acceleration_m_s2.unwrap_or(0.0));
         d.set("thrust_n", r.station_keeping_thrust_n.unwrap_or(0.0));
-        d.set(
-            "cant_deg",
-            r.cant_angle_rad.map_or(0.0, f64::to_degrees),
-        );
+        d.set("cant_deg", r.cant_angle_rad.map_or(0.0, f64::to_degrees));
         d.set("rock_mass_kg", r.rock_mass_kg);
         d.set("delivered_dv_m_s", r.delivered_dv_m_s);
         d.set("equivalent_dv_m_s", r.equivalent_dv_m_s);
@@ -1638,8 +1635,8 @@ impl Mission {
         // perfectly finite tow and no physical meaning, and 12 s of integration
         // would dignify it with a perigee.
         if !plan.is_flyable() {
-            self.error = "the tractor would be inside the asteroid; raise the hover distance"
-                .into();
+            self.error =
+                "the tractor would be inside the asteroid; raise the hover distance".into();
             return false;
         }
         // The stronger geometric refusal. A tow with no station-keeping solution
@@ -1655,8 +1652,7 @@ impl Mission {
         // to 0) and is not an error worth 12 s of integration or a raw
         // "invalid tow duration 0 s" from deep in the window constructor.
         if plan.effective_duration_seconds() <= 0.0 {
-            self.error = "a tow of zero duration deflects nothing; raise the tow duration"
-                .into();
+            self.error = "a tow of zero duration deflects nothing; raise the tow duration".into();
             return false;
         }
         if lead_seconds <= 0.0 {

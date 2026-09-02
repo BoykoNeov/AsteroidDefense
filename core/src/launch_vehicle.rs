@@ -747,6 +747,9 @@ mod tests {
         let vulcan = VULCAN_CENTAUR.payload_kg(c3);
         let atlas = ATLAS_V_551.payload_kg(c3);
         assert!(fh > vulcan, "FH {fh} should exceed Vulcan {vulcan}");
-        assert!(vulcan > atlas, "Vulcan {vulcan} should exceed Atlas {atlas}");
+        assert!(
+            vulcan > atlas,
+            "Vulcan {vulcan} should exceed Atlas {atlas}"
+        );
     }
 }

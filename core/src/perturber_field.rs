@@ -311,9 +311,7 @@ pub fn tier1_perturber_field(
 /// "an incomplete field is a wrong field" doctrine [`tier1_perturber_field`] holds
 /// for GMs, applied here to positions, since `sb441` is the optional 646 MB kernel
 /// (see [`crate::kernels::KernelPair::small_bodies`]) whose absence is a real case.
-pub fn sb441_perturber_field(
-    eph: &Arc<Ephemeris>,
-) -> Result<PointMassGravity, EphemerisError> {
+pub fn sb441_perturber_field(eph: &Arc<Ephemeris>) -> Result<PointMassGravity, EphemerisError> {
     // A reference epoch well inside every relevant kernel's coverage (de440s
     // 1849–2150, sb441 1550–2650) — J2000 — at which to prove the positions
     // resolve before the field is ever handed to the integrator.
@@ -353,9 +351,7 @@ pub fn sb441_perturber_field(
 /// for a main-belt test particle, growing with lead time. Whether that matters at
 /// the decade lead times the b-plane cares about is a *measured* question, not an
 /// asserted one — see the scenario-level fixed-seed comparison.
-pub fn pluto_perturber_field(
-    eph: &Arc<Ephemeris>,
-) -> Result<PointMassGravity, EphemerisError> {
+pub fn pluto_perturber_field(eph: &Arc<Ephemeris>) -> Result<PointMassGravity, EphemerisError> {
     // Probe inside every relevant kernel's coverage (de440s is 1849–2150).
     let probe = AniseEpoch::from_gregorian(2000, 1, 1, 0, 0, 0, 0, TimeScale::TDB);
     eph.position_km(PLUTO_BARYCENTER_J2000, SSB_J2000, probe)
@@ -406,7 +402,11 @@ impl EphemerisPole {
 impl crate::forces::oblateness::BodyPole for EphemerisPole {
     fn pole_at(&self, epoch: Epoch) -> Result<Vector3<f64>, ForceError> {
         self.ephemeris
-            .pole_unit_icrf(self.body_iau_frame, self.inertial_frame, epoch.as_hifitime())
+            .pole_unit_icrf(
+                self.body_iau_frame,
+                self.inertial_frame,
+                epoch.as_hifitime(),
+            )
             .map_err(|e| ForceError::Ephemeris(e.to_string()))
     }
 }
@@ -534,7 +534,10 @@ mod tests {
         let mut prev_id = 0;
         let mut ceres_km3_s2 = 0.0;
         for &(id, name, gm) in &SB441_PERTURBER_GM_AU3_DAY2 {
-            assert!(id > prev_id, "ids must be strictly ascending: {name} ({id})");
+            assert!(
+                id > prev_id,
+                "ids must be strictly ascending: {name} ({id})"
+            );
             assert!(
                 (2_000_001..=2_999_999).contains(&id),
                 "{name} id {id} is not on the 2000000+number convention"

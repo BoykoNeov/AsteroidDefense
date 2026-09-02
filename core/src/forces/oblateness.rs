@@ -319,8 +319,8 @@ mod tests {
     fn equatorial_inward_polar_outward_and_the_magic_latitude() {
         let term = earth_j2_at_origin();
         let r: f64 = 7.0e6;
-        let base = 1.5 * EARTH_J2_DE440 * MU_EARTH * EARTH_EQUATORIAL_RADIUS_M_DE440.powi(2)
-            / r.powi(4);
+        let base =
+            1.5 * EARTH_J2_DE440 * MU_EARTH * EARTH_EQUATORIAL_RADIUS_M_DE440.powi(2) / r.powi(4);
 
         // Equator: purely radial, inward, magnitude `base`.
         let eq = StateVector::from_components(r, 0.0, 0.0, 0.0, 0.0, 0.0);
@@ -329,7 +329,10 @@ mod tests {
             a_eq.dot(&Vector3::x()) < 0.0,
             "J2 must pull inward over the equator: {a_eq:?}"
         );
-        assert!(a_eq.y.abs() < 1e-30 && a_eq.z.abs() < 1e-30, "equatorial J2 is radial: {a_eq:?}");
+        assert!(
+            a_eq.y.abs() < 1e-30 && a_eq.z.abs() < 1e-30,
+            "equatorial J2 is radial: {a_eq:?}"
+        );
         assert!(
             (a_eq.norm() - base).abs() < 1e-9 * base,
             "equatorial magnitude {} expected {base}",
@@ -411,7 +414,10 @@ mod tests {
 
         // Under a +z pole the point is on the equator (inward); under a +x pole it
         // is over the pole (outward, twice as big).
-        assert!(a_z.x < 0.0 && a_x.x > 0.0, "pole choice must flip the sign: {a_z:?} vs {a_x:?}");
+        assert!(
+            a_z.x < 0.0 && a_x.x > 0.0,
+            "pole choice must flip the sign: {a_z:?} vs {a_x:?}"
+        );
         assert!(
             (a_x.norm() / a_z.norm() - 2.0).abs() < 1e-9,
             "polar/equatorial magnitude ratio {} expected 2",
@@ -563,13 +569,13 @@ mod tests {
         let measured = slope(&t, &unwrap(&nodes));
 
         let n = (MU_EARTH / r0.powi(3)).sqrt();
-        let expected = -1.5
-            * n
-            * EARTH_J2_DE440
-            * (EARTH_EQUATORIAL_RADIUS_M_DE440 / r0).powi(2)
-            * inc.cos();
+        let expected =
+            -1.5 * n * EARTH_J2_DE440 * (EARTH_EQUATORIAL_RADIUS_M_DE440 / r0).powi(2) * inc.cos();
 
-        assert!(measured < 0.0, "a prograde orbit must regress, got {measured:.6e} rad/s");
+        assert!(
+            measured < 0.0,
+            "a prograde orbit must regress, got {measured:.6e} rad/s"
+        );
         let rel = (measured - expected).abs() / expected.abs();
         assert!(
             rel < 0.02,
@@ -611,11 +617,8 @@ mod tests {
         let measured = slope(&t, &unwrap(&nodes));
 
         let n = (MU_EARTH / r0.powi(3)).sqrt();
-        let expected = -1.5
-            * n
-            * EARTH_J2_DE440
-            * (EARTH_EQUATORIAL_RADIUS_M_DE440 / r0).powi(2)
-            * inc.cos();
+        let expected =
+            -1.5 * n * EARTH_J2_DE440 * (EARTH_EQUATORIAL_RADIUS_M_DE440 / r0).powi(2) * inc.cos();
 
         assert!(
             measured > 0.0 && expected > 0.0,

@@ -96,7 +96,9 @@ impl std::fmt::Display for CloseApproachError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CloseApproachError::Clock(e) => write!(f, "close-approach clock query failed: {e}"),
-            CloseApproachError::Earth(e) => write!(f, "close-approach Earth-state lookup failed: {e}"),
+            CloseApproachError::Earth(e) => {
+                write!(f, "close-approach Earth-state lookup failed: {e}")
+            }
             CloseApproachError::InvalidOptions(m) => write!(f, "invalid scan options: {m}"),
         }
     }
@@ -428,7 +430,10 @@ mod tests {
         // normalized) and the closing x-component has cancelled to ~0.
         let cos = ca.relative.position.dot(&ca.relative.velocity)
             / (ca.relative.position.norm() * ca.relative.velocity.norm());
-        assert!(cos.abs() < 1e-6, "r·v not perpendicular at CA (cos {cos:.3e})");
+        assert!(
+            cos.abs() < 1e-6,
+            "r·v not perpendicular at CA (cos {cos:.3e})"
+        );
         assert!(ca.relative.position.x.abs() < 1e-2 * b);
     }
 
@@ -474,7 +479,10 @@ mod tests {
 
         // Relative motion equals the rest frame → same CA epoch and miss.
         let epoch_err = (ca.epoch.tdb_seconds_past_j2000() - (t0 + dt_ca)).abs();
-        assert!(epoch_err < 1e-2, "moving-Earth CA epoch off by {epoch_err:.3e} s");
+        assert!(
+            epoch_err < 1e-2,
+            "moving-Earth CA epoch off by {epoch_err:.3e} s"
+        );
         assert!(
             (ca.distance - b).abs() / b < 1e-6,
             "moving-Earth miss {} vs rest-frame {b}",
@@ -503,7 +511,10 @@ mod tests {
 
         let earth = earth_at_origin();
         let cas = find_close_approaches(&clock, &earth, ScanOptions::default()).unwrap();
-        assert!(cas.is_empty(), "receding motion should have no CA, got {cas:?}");
+        assert!(
+            cas.is_empty(),
+            "receding motion should have no CA, got {cas:?}"
+        );
     }
 
     /// The `max_distance` filter drops a minimum whose miss exceeds the threshold,
@@ -523,7 +534,9 @@ mod tests {
             max_distance: Some(0.5 * b),
             ..ScanOptions::default()
         };
-        assert!(find_close_approaches(&clock, &earth, opts).unwrap().is_empty());
+        assert!(find_close_approaches(&clock, &earth, opts)
+            .unwrap()
+            .is_empty());
         assert!(closest_approach(&clock, &earth, opts).unwrap().is_none());
 
         // Threshold above the miss: it survives.
@@ -531,7 +544,9 @@ mod tests {
             max_distance: Some(2.0 * b),
             ..ScanOptions::default()
         };
-        assert!(closest_approach(&clock, &earth, opts_wide).unwrap().is_some());
+        assert!(closest_approach(&clock, &earth, opts_wide)
+            .unwrap()
+            .is_some());
     }
 
     /// The end-to-end loop (§10.9 → §10.8): propagate a hyperbolic Earth flyby

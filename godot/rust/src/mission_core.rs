@@ -1688,12 +1688,11 @@ impl MissionCore {
         let ds = sc.deflection()?;
         let tow_start = sc.impact_epoch().shifted_by_seconds(-tow_lead_seconds);
         let eph = sc.ephemeris();
-        Ok(ds.required_tow_duration(
-            tow_start,
-            target_perigee_m,
-            TowSolveTol::default(),
-            |w| Self::tow_term(eph, hover, dir, w),
-        )?)
+        Ok(
+            ds.required_tow_duration(tow_start, target_perigee_m, TowSolveTol::default(), |w| {
+                Self::tow_term(eph, hover, dir, w)
+            })?,
+        )
     }
 
     /// Heliocentric semi-major axis of the threat, m (0 if no scenario).
@@ -2122,9 +2121,9 @@ pub fn required_dv_estimate_from(anchor_dv_m_s: f64, lead_periods: f64) -> Optio
 /// one-period one — the exact substitution this function exists to prevent.
 pub fn solve_required_dv_anchor(sc: &RealFieldScenario) -> Result<f64, ScenarioError> {
     let points = sc.sweep(&[REQUIRED_DV_LAW_MIN_PERIODS], SAFE_PERIGEE_TARGET_M)?;
-    let p = points.first().ok_or_else(|| {
-        ScenarioError::Integration("the anchor sweep returned no points".into())
-    })?;
+    let p = points
+        .first()
+        .ok_or_else(|| ScenarioError::Integration("the anchor sweep returned no points".into()))?;
     if (p.lead_periods - REQUIRED_DV_LAW_MIN_PERIODS).abs() > 1.0e-6 {
         return Err(ScenarioError::Integration(format!(
             "one period ({:.3} yr) does not fit inside the campaign, so the sweep \
@@ -2226,7 +2225,11 @@ pub struct TractorPlan {
 impl TractorPlan {
     /// The hover geometry these knobs describe.
     pub fn hover(&self) -> HoverGeometry {
-        tractor_hover_over(self.spacecraft_mass_kg, self.hover_radii, self.rock_radius_m)
+        tractor_hover_over(
+            self.spacecraft_mass_kg,
+            self.hover_radii,
+            self.rock_radius_m,
+        )
     }
 
     /// Which way it tugs.
@@ -2326,9 +2329,8 @@ pub fn towed_perigee_on(
     let window = TowWindow::from_duration(tow_start, duration_seconds).ok_or_else(|| {
         ScenarioError::NominalNotAHit(format!("invalid tow duration {duration_seconds} s"))
     })?;
-    let tow = MissionCore::tow_term(sc.ephemeris(), hover, dir, window).ok_or_else(|| {
-        ScenarioError::NominalNotAHit("degenerate tractor hover geometry".into())
-    })?;
+    let tow = MissionCore::tow_term(sc.ephemeris(), hover, dir, window)
+        .ok_or_else(|| ScenarioError::NominalNotAHit("degenerate tractor hover geometry".into()))?;
     Ok(ds
         .towed_encounter(tow_start, &tow)?
         .map_or(f64::INFINITY, |e| e.perigee))
@@ -5017,7 +5019,6 @@ mod tests {
         );
     }
 
-
     /// The tractor panel's rock-radius knob must stay **inside the tractor**.
     ///
     /// `threat_body_matches_the_srp_default` states the rule this guards: the
@@ -5104,7 +5105,10 @@ mod tests {
         // limit and diverge only as the tow stretches.
         let brief = 1.0e-4 * lead;
         let rel = (tow_equivalent_dv(a, brief, lead) - a * brief).abs() / (a * brief);
-        assert!(rel < 1.0e-3, "a brief tow should be worth its delivered Δv; rel {rel:.2e}");
+        assert!(
+            rel < 1.0e-3,
+            "a brief tow should be worth its delivered Δv; rel {rel:.2e}"
+        );
 
         // Monotone in duration and never above the delivered bound.
         let mut prev = 0.0;
@@ -5112,7 +5116,10 @@ mod tests {
             let t = lead * f64::from(i) / 20.0;
             let eq = tow_equivalent_dv(a, t, lead);
             assert!(eq > prev, "equivalent Δv must rise with tow duration");
-            assert!(eq <= a * t, "the equivalent must never exceed the delivered Δv");
+            assert!(
+                eq <= a * t,
+                "the equivalent must never exceed the delivered Δv"
+            );
             prev = eq;
         }
 
@@ -5185,7 +5192,10 @@ mod tests {
             azimuth_deg: ThreatOrbitKnobs::shipping().azimuth_deg + 1.0,
             ..ThreatOrbitKnobs::shipping()
         };
-        assert!(!moved.is_shipping(), "one degree of azimuth is a different orbit");
+        assert!(
+            !moved.is_shipping(),
+            "one degree of azimuth is a different orbit"
+        );
     }
 
     /// **No anchor means no margin — not a margin of zero, and not last orbit's.**
@@ -5552,7 +5562,8 @@ mod tests {
         // Towing for the whole lead is still not enough, so the solver must say so
         // by name rather than hand back the cap. This is the real-field exercise of
         // `TowDurationCapped`; the kernel-free suite pins its shape.
-        let outcome = mc.required_tow_duration(lead, SAFE_PERIGEE_TARGET_M, hover, TowDirection::Prograde);
+        let outcome =
+            mc.required_tow_duration(lead, SAFE_PERIGEE_TARGET_M, hover, TowDirection::Prograde);
         match outcome {
             Err(ScenarioError::Deflection(DeflectionError::TowDurationCapped {
                 max_duration_s,
@@ -5600,9 +5611,9 @@ mod tests {
                      nominal {nominal:.4e} m, towed {perigee_reached_m:.4e} m"
                 );
             }
-            other => panic!(
-                "a 20 t tractor should not be able to deflect this rock; got {other:?}"
-            ),
+            other => {
+                panic!("a 20 t tractor should not be able to deflect this rock; got {other:?}")
+            }
         }
 
         // The shortfall, bounded on **both** sides. A lower bound alone would pass
@@ -5625,7 +5636,12 @@ mod tests {
         let mass_estimate = hover.spacecraft_mass_kg * shortfall;
         let generous = tractor_hover(2.0 * mass_estimate);
         let solved = mc
-            .required_tow_duration(lead, SAFE_PERIGEE_TARGET_M, generous, TowDirection::Prograde)
+            .required_tow_duration(
+                lead,
+                SAFE_PERIGEE_TARGET_M,
+                generous,
+                TowDirection::Prograde,
+            )
             .expect("twice the extrapolated mass should close inside the lead");
         println!(
             "extrapolated closing mass ~{:.0} t; at 2x that ({:.0} t) the solve wants \

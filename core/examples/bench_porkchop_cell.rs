@@ -24,10 +24,7 @@ fn main() {
     // A spread of geometries and times of flight, so the timing averages over
     // cells that solve, cells that gap, and cells where the multi-rev band is
     // empty — the mix a real grid contains.
-    let earth = StateVector::new(
-        Vector3::new(AU, 0.0, 0.0),
-        Vector3::new(0.0, 29_780.0, 0.0),
-    );
+    let earth = StateVector::new(Vector3::new(AU, 0.0, 0.0), Vector3::new(0.0, 29_780.0, 0.0));
 
     for (label, n) in [("100x100", 100usize), ("200x200", 200usize)] {
         for max_rev in [0u32, 1, 2] {

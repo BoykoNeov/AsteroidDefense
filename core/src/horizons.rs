@@ -240,9 +240,8 @@ impl Neo {
             a.position * h00 + a.velocity * (h10 * h) + b.position * h01 + b.velocity * (h11 * h);
         // d/dt = (d/ds)/h, so the h on the tangent terms cancels and the position
         // terms pick one up.
-        let velocity = (a.position * d00 + b.position * d01) / h
-            + a.velocity * d10
-            + b.velocity * d11;
+        let velocity =
+            (a.position * d00 + b.position * d01) / h + a.velocity * d10 + b.velocity * d11;
 
         Some(StateVector::new(position, velocity))
     }

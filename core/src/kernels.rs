@@ -265,10 +265,7 @@ fn small_bodies_in(dir: &Path) -> Option<PathBuf> {
 }
 
 fn first_present(dir: &Path, names: &[&str]) -> Option<PathBuf> {
-    names
-        .iter()
-        .map(|n| dir.join(n))
-        .find(|p| p.is_file())
+    names.iter().map(|n| dir.join(n)).find(|p| p.is_file())
 }
 
 /// Every place looked and both ways to fix it. A bare "kernels not found" would
@@ -336,10 +333,8 @@ mod tests {
         if std::env::var(ENV_SMALL_BODIES).is_ok() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "asteroid_kernels_optional_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("asteroid_kernels_optional_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         // Empty files are enough: the scan tests `is_file`, it does not parse.

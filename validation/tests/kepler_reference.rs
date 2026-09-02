@@ -98,27 +98,32 @@ fn kepler_propagator_matches_hapsira() {
     let mut worst_seed = 0.0_f64;
     for orbit in &fixture.orbits {
         let e = &orbit.elements;
-        let elems = OrbitalElements::new(
-            e.a_m, e.ecc, e.inc_rad, e.raan_rad, e.argp_rad, e.nu_rad,
-        );
+        let elems = OrbitalElements::new(e.a_m, e.ecc, e.inc_rad, e.raan_rad, e.argp_rad, e.nu_rad);
         let prop = KeplerPropagator::new(elems, mu, epoch0)
             .unwrap_or_else(|err| panic!("propagator for {:?}: {err}", orbit.label));
 
         for s in &orbit.samples {
             let state = prop
                 .state_at(epoch0.shifted_by_seconds(s.dt_s))
-                .unwrap_or_else(|err| {
-                    panic!("state_at {:?} dt={}: {err}", orbit.label, s.dt_s)
-                });
+                .unwrap_or_else(|err| panic!("state_at {:?} dt={}: {err}", orbit.label, s.dt_s));
 
             let pos_err = rel_err(state.position, s.position_m);
             let vel_err = rel_err(state.velocity, s.velocity_m_s);
-            let tol = if s.dt_s == 0.0 { SEED_TOL } else { PROPAGATED_TOL };
+            let tol = if s.dt_s == 0.0 {
+                SEED_TOL
+            } else {
+                PROPAGATED_TOL
+            };
 
             assert!(
                 pos_err < tol && vel_err < tol,
                 "{}: at {}P (dt={:.3e}s) pos_err {:.3e}, vel_err {:.3e} exceed tol {:.0e}",
-                orbit.label, s.period_fraction, s.dt_s, pos_err, vel_err, tol
+                orbit.label,
+                s.period_fraction,
+                s.dt_s,
+                pos_err,
+                vel_err,
+                tol
             );
             if s.dt_s == 0.0 {
                 worst_seed = worst_seed.max(pos_err).max(vel_err);
@@ -152,6 +157,8 @@ fn sun_gm_matches_fixture() {
         rel < MU_TOL,
         "fixture μ {:.12e} != ANISE Sun GM {:.12e} (rel {:.3e}) — the fixture was \
          generated for a different μ; regenerate it or re-probe with probe_sun_gm",
-        fixture.mu_m3_s2, anise_mu, rel
+        fixture.mu_m3_s2,
+        anise_mu,
+        rel
     );
 }

@@ -213,7 +213,11 @@ fn tier1_field_matches_assist() {
 
     // Comparison field = the fixture's 11 bodies (membership driven by the
     // fixture itself), positions + GM from ANISE, Pluto's μ from the oracle.
-    assert_eq!(fixture.bodies.len(), 11, "expected the 11-body ASSIST comparison set");
+    assert_eq!(
+        fixture.bodies.len(),
+        11,
+        "expected the 11-body ASSIST comparison set"
+    );
     let field = build_comparison_field(&eph, &fixture);
 
     // rtol/atol 1e-12: the integrator floor must sit well below the GM floor, or
@@ -256,7 +260,11 @@ fn tier1_field_matches_assist() {
              a residual >> the measured GM floor points to a structural bug \
              (frame, sign, a rotation, or a force term not actually off), not a \
              tolerance to loosen",
-            s.days, pos_err, vel_err, POS_REL_TOL, VEL_REL_TOL
+            s.days,
+            pos_err,
+            vel_err,
+            POS_REL_TOL,
+            VEL_REL_TOL
         );
         worst_pos = worst_pos.max(pos_err);
         worst_vel = worst_vel.max(vel_err);
@@ -285,9 +293,7 @@ fn anise_gm_matches_de440() {
             continue;
         };
         let rel = (anise_km3_s2 - de440_km3_s2).abs() / de440_km3_s2;
-        println!(
-            "{body:<8} ANISE {anise_km3_s2:.9e}  DE440 {de440_km3_s2:.9e}  rel {rel:.3e}"
-        );
+        println!("{body:<8} ANISE {anise_km3_s2:.9e}  DE440 {de440_km3_s2:.9e}  rel {rel:.3e}");
         if rel > worst {
             worst = rel;
             worst_body = body.clone();
@@ -335,11 +341,18 @@ fn pluto_omission_effect_over_arc() {
     let mut worst_m = 0.0_f64;
     let mut worst_rel = 0.0_f64;
     for s in &fixture.samples {
-        let s10 = integrator.step(&ten, epoch0, &state0, s.dt_s).expect("10-body step");
-        let s11 = integrator.step(&eleven, epoch0, &state0, s.dt_s).expect("11-body step");
+        let s10 = integrator
+            .step(&ten, epoch0, &state0, s.dt_s)
+            .expect("10-body step");
+        let s11 = integrator
+            .step(&eleven, epoch0, &state0, s.dt_s)
+            .expect("11-body step");
         let diff = (s10.position - s11.position).norm();
         let rel = diff / s11.position.norm();
-        println!("t={:>5.0} d  |Δr(10 vs 11)| {:.3e} m  (rel {:.3e})", s.days, diff, rel);
+        println!(
+            "t={:>5.0} d  |Δr(10 vs 11)| {:.3e} m  (rel {:.3e})",
+            s.days, diff, rel
+        );
         worst_m = worst_m.max(diff);
         worst_rel = worst_rel.max(rel);
     }

@@ -160,11 +160,16 @@ mod tests {
         // tilted away from the pure-transverse ŷ.
         let rx = 0.7 * AU;
         let s = StateVector::from_components(rx, 0.0, 0.0, 5_000.0, 30_000.0, 0.0);
-        let a = YarkovskyA2::sun_at_origin(a2).acceleration(epoch0(), &s).unwrap();
+        let a = YarkovskyA2::sun_at_origin(a2)
+            .acceleration(epoch0(), &s)
+            .unwrap();
 
         // ĥ = r×v = (rx,0,0)×(vx,vy,0) = (0,0,rx·vy), vy>0 → +ẑ; t̂ = ẑ×x̂ = ŷ.
         let expected_mag = a2 * (AU / rx).powi(2);
-        assert!(a.x.abs() < 1e-24, "must be perpendicular to r (a.x≈0): {a:?}");
+        assert!(
+            a.x.abs() < 1e-24,
+            "must be perpendicular to r (a.x≈0): {a:?}"
+        );
         assert!(a.z.abs() < 1e-24, "planar motion stays planar: {a:?}");
         assert!(
             (a.y - expected_mag).abs() < 1e-6 * expected_mag,
@@ -244,9 +249,15 @@ mod tests {
         let a = 1.0 * AU;
         let measured = measure_secular_da_dt(a2, a, 0.0, true, 40);
         let oracle = secular_da_dt_closed_form(a2, AU, a, 0.0, MU_SUN);
-        assert!(measured > 0.0, "A2>0 must drift outward, got {measured} m/s");
+        assert!(
+            measured > 0.0,
+            "A2>0 must drift outward, got {measured} m/s"
+        );
         let rel = (measured - oracle).abs() / oracle;
-        assert!(rel < 0.01, "measured {measured} m/s vs oracle {oracle} (rel {rel:.4})");
+        assert!(
+            rel < 0.01,
+            "measured {measured} m/s vs oracle {oracle} (rel {rel:.4})"
+        );
     }
 
     #[test]
@@ -259,9 +270,15 @@ mod tests {
         let e = 0.2;
         let measured = measure_secular_da_dt(a2, a, e, true, 40);
         let oracle = secular_da_dt_time_averaged(a2, AU, 2.0, a, e, MU_SUN);
-        assert!(measured > 0.0, "A2>0 must drift outward, got {measured} m/s");
+        assert!(
+            measured > 0.0,
+            "A2>0 must drift outward, got {measured} m/s"
+        );
         let rel = (measured - oracle).abs() / oracle;
-        assert!(rel < 0.01, "measured {measured} m/s vs oracle {oracle} (rel {rel:.4})");
+        assert!(
+            rel < 0.01,
+            "measured {measured} m/s vs oracle {oracle} (rel {rel:.4})"
+        );
     }
 
     #[test]

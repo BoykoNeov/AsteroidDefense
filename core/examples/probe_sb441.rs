@@ -60,7 +60,10 @@ fn main() {
     println!("small bod : {}\n", sb.display());
 
     let epoch = AniseEpoch::from_gregorian(2020, 1, 1, 0, 0, 0, 0, TimeScale::TDB);
-    println!("{:<22} {:>16} {:>20} {:>8}", "body", "|r_SSB| (km)", "μ (km³/s²)", "status");
+    println!(
+        "{:<22} {:>16} {:>20} {:>8}",
+        "body", "|r_SSB| (km)", "μ (km³/s²)", "status"
+    );
     println!("{}", "-".repeat(70));
 
     let mut pos_ok = 0;
@@ -88,12 +91,18 @@ fn main() {
             format!("{name} ({id})"),
             pos_s,
             gm_s,
-            if pos.is_ok() && gm.is_ok() { "OK" } else { "PARTIAL" }
+            if pos.is_ok() && gm.is_ok() {
+                "OK"
+            } else {
+                "PARTIAL"
+            }
         );
     }
 
     println!("\nposition resolved: {pos_ok}/16   GM resolved: {gm_ok}/16");
     if gm_ok == 0 {
-        println!("=> GMs are NOT in the shipped kernels; a hardcoded DE441 mass table is required.");
+        println!(
+            "=> GMs are NOT in the shipped kernels; a hardcoded DE441 mass table is required."
+        );
     }
 }

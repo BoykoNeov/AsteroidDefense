@@ -1,0 +1,265 @@
+<title>Keyhole Map</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&display=swap">
+<style>
+  :root {
+    --ground: #07100c;
+    --panel: #0b1712;
+    --grid: #16241c;
+    --faint: #2c3b33;
+    --muted: #7d907f;
+    --ink: #d3ded5;
+    --phosphor: #5ce09b;
+    --amber: #f2b950;
+    --disc: #e8f0ea;
+    --c2: #9fe8ff; --c3: #6fcbef; --c5: #4aa8d4; --c7: #3286b3; --c12: #25678f; --c20: #1c4d6d;
+    --mono: 'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace;
+    --sans: 'IBM Plex Sans', system-ui, sans-serif;
+  }
+  body { background: var(--ground); color: var(--ink); font-family: var(--sans); margin: 0; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 20px 20px 40px; }
+  header h1 { font-family: var(--mono); font-weight: 600; font-size: 20px; margin: 0 0 4px; text-wrap: balance; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; max-width: 70ch; line-height: 1.5; }
+  header .facts { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+  header .facts b { color: var(--ink); font-weight: 600; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin: 18px 0 10px; font-family: var(--mono); font-size: 12px; }
+  .controls .group { display: flex; gap: 4px; align-items: center; }
+  .controls label { color: var(--muted); }
+  button.span { background: var(--panel); color: var(--ink); border: 1px solid var(--faint); border-radius: 3px; padding: 4px 9px; font: inherit; cursor: pointer; }
+  button.span[aria-pressed="true"] { border-color: var(--phosphor); color: var(--phosphor); }
+  button.span:focus-visible, input:focus-visible { outline: 2px solid var(--phosphor); outline-offset: 2px; }
+  .controls input[type=checkbox] { accent-color: var(--phosphor); }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 18px; align-items: start; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  .plot { position: relative; background: var(--panel); border: 1px solid var(--faint); }
+  .plot svg { display: block; width: 100%; height: auto; font-family: var(--mono); }
+  .tip { position: absolute; pointer-events: none; background: #0f1e17; border: 1px solid var(--faint); color: var(--ink); font-family: var(--mono); font-size: 11px; padding: 6px 8px; border-radius: 3px; white-space: pre; display: none; z-index: 2; box-shadow: 0 4px 16px rgba(0,0,0,.5); }
+  .side { display: flex; flex-direction: column; gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--faint); padding: 12px 14px; }
+  .card h2 { font-family: var(--mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .kv dt { color: var(--muted); margin: 0; } .kv dd { margin: 0; }
+  .card p { font-size: 12.5px; line-height: 1.5; color: var(--ink); margin: 8px 0 0; }
+  .card p.note { color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  th { text-align: left; color: var(--muted); font-weight: 400; padding: 2px 6px 6px 0; border-bottom: 1px solid var(--faint); }
+  td { padding: 3px 6px 3px 0; border-bottom: 1px solid #101c15; cursor: pointer; }
+  tr.hot td, tr:hover td { background: #122219; }
+  td.num, th.num { text-align: right; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 6px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 8px; }
+  .legend span b { color: var(--ink); font-weight: 400; }
+  .ellipse { display: grid; grid-template-columns: 120px 1fr; gap: 12px; align-items: center; }
+  .ellipse svg { width: 120px; height: 120px; display: block; background: var(--ground); border: 1px solid var(--faint); }
+  footer { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 18px; max-width: 90ch; }
+  @media (prefers-reduced-motion: no-preference) { circle.res { transition: stroke-opacity .12s, stroke-width .12s; } }
+</style>
+<div class="wrap">
+  <header>
+    <h1 id="title">Keyhole map</h1>
+    <p>Looking down the incoming asymptote at Earth. Every circle is a place on this plane where a flyby would leave the asteroid on an orbit that brings it back to the same spot <em>h</em> years later. The thin band around a circle that returns onto the capture disc is a keyhole. Coordinates are the Öpik frame the core now pins: ξ across Earth's motion, ζ along it.</p>
+    <div class="facts" id="facts"></div>
+  </header>
+
+  <div class="controls">
+    <div class="group" role="group" aria-label="Plot span">
+      <label>span</label>
+      <button class="span" data-span="14">±14 R<sub>cap</sub></button>
+      <button class="span" data-span="5">±5</button>
+      <button class="span" data-span="2.6">±2.6</button>
+      <button class="span" data-span="1.3">±1.3</button>
+    </div>
+    <label><input type="checkbox" id="allCircles"> all returns to 20 yr (else ≤ 7 yr)</label>
+    <label><input type="checkbox" id="graze" checked> grazing points</label>
+  </div>
+
+  <div class="layout">
+    <div class="plot">
+      <svg id="map" viewBox="0 0 800 800" role="img" aria-label="b-plane keyhole map"></svg>
+      <div class="tip" id="tip"></div>
+    </div>
+    <aside class="side">
+      <div class="card">
+        <h2>Encounter</h2>
+        <dl class="kv" id="enc"></dl>
+        <div class="legend">
+          <span><b style="color:var(--phosphor)">×</b> nominal b-point, the impact</span>
+          <span><b style="color:var(--amber)">◇</b> flown ±0.2 m/s at 12 yr</span>
+          <span><b style="color:var(--disc)">◌</b> capture disc</span>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Uncertainty at the nominal</h2>
+        <div class="ellipse">
+          <svg id="ell" viewBox="0 0 120 120" aria-label="uncertainty ellipse"></svg>
+          <dl class="kv" id="ellkv"></dl>
+        </div>
+        <p class="note">An invented along-track covariance, labelled as such: the shipping rock is synthetic and has no observation arc. The ellipse lies along ζ because along-track uncertainty is timing uncertainty.</p>
+      </div>
+      <div class="card">
+        <h2>Resonant circles</h2>
+        <div style="overflow-x:auto">
+        <table id="tbl">
+          <thead><tr><th>h:k</th><th class="num">a′ AU</th><th class="num">b min km</th><th class="num">b max</th><th class="num">keyhole km</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        </div>
+        <p class="note">keyhole = width at the grazing point → at the far end. Narrow near Earth, wide far out.</p>
+      </div>
+    </aside>
+  </div>
+  <footer id="foot"></footer>
+</div>
+<script>
+const D = __KEYHOLE_JSON__;
+(function () {
+  const enc = D.encounter, cap = enc.capture_radius_km, re = enc.earth_radius_km;
+  const cs = getComputedStyle(document.documentElement);
+  const C = k => cs.getPropertyValue('--' + k).trim();
+  const colourFor = h => h <= 2 ? C('c2') : h <= 3 ? C('c3') : h <= 5 ? C('c5') : h <= 7 ? C('c7') : h <= 12 ? C('c12') : C('c20');
+  const fmt = (x, d = 0) => x.toLocaleString('en-US', { maximumFractionDigits: d, minimumFractionDigits: d });
+
+  document.getElementById('title').textContent = 'Keyhole map · ' + D.encounter_epoch_tdb.slice(0, 10) + ' encounter';
+  document.getElementById('facts').innerHTML =
+    `<span>v∞ <b>${enc.v_inf_km_s.toFixed(2)} km/s</b></span><span>θ(Ŝ, V⊕) <b>${D.frame.theta_deg.toFixed(1)}°</b></span>` +
+    `<span>c = μ⊕/v∞² <b>${fmt(D.frame.c_km)} km</b></span><span>capture <b>${fmt(cap)} km = ${(cap / re).toFixed(2)} R⊕</b></span>` +
+    `<span>incoming a <b>${enc.incoming_a_au.toFixed(4)} AU</b></span><span>round trip <b>${enc.round_trip_rel.toExponential(1)}</b></span>`;
+
+  const encKv = document.getElementById('enc');
+  const kv = (el, rows) => { el.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join(''); };
+  kv(encKv, [
+    ['nominal', `ξ ${fmt(D.nominal.point_km[0])} ζ ${fmt(D.nominal.point_km[1])} km · |B| ${fmt(D.nominal.b_km)} · hit`],
+    ...D.deflected.map(d => [d.label, `Δv ${d.dv_m_s > 0 ? '+' : ''}${d.dv_m_s.toFixed(1)} m/s → b ${fmt(d.b_km)} km, a′ ${d.a_closed_form_au.toFixed(4)} AU` +
+      (d.a_flown_au ? ` (flown ${d.a_flown_au.toFixed(4)})` : '')]),
+  ]);
+
+  // Ellipse inset
+  const E = D.ellipse, [sa, sb] = E.sigma_axes_km;
+  const ell = document.getElementById('ell');
+  const half = 3.2 * sa, ppk = 60 / half;
+  ell.innerHTML = `<line x1="0" y1="60" x2="120" y2="60" stroke="${C('grid')}"/><line x1="60" y1="0" x2="60" y2="120" stroke="${C('grid')}"/>` +
+    [3, 1].map(n => `<ellipse cx="60" cy="60" rx="${n * sa * ppk}" ry="${Math.max(n * sb * ppk, .8)}" transform="rotate(${-E.major_axis_deg_from_xi} 60 60)" fill="${C('phosphor')}" fill-opacity="${0.08 * n}" stroke="${C('phosphor')}" stroke-opacity="${n === 1 ? .9 : .35}"/>`).join('') +
+    `<text x="4" y="114" fill="${C('muted')}" font-size="8" font-family="${cs.getPropertyValue('--mono')}">±${fmt(half)} km</text>`;
+  kv(document.getElementById('ellkv'), [
+    ['σ', `${sa.toFixed(1)} × ${sb.toFixed(2)} km`],
+    ['major axis', `${E.major_axis_deg_from_xi.toFixed(0)}° from ξ`],
+    ['P(impact)', E.impact_probability.toFixed(3)],
+  ]);
+
+  // Table
+  const tb = document.querySelector('#tbl tbody');
+  const rowFor = new Map();
+  const circles = D.circles.slice().sort((a, b) => a.a_prime_au - b.a_prime_au);
+  function fillTable(all) {
+    tb.innerHTML = '';
+    rowFor.clear();
+    for (const c of circles) {
+      if (!all && c.h > 7) continue;
+      const w0 = c.grazing ? c.grazing.width_km : c.nearest.width_km;
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td><span class="swatch" style="background:${colourFor(c.h)}"></span>${c.h}:${c.k}</td><td class="num">${c.a_prime_au.toFixed(4)}</td>` +
+        `<td class="num">${fmt(c.b_min_km)}</td><td class="num">${fmt(c.b_max_km)}</td><td class="num">${w0.toFixed(2)} → ${c.farthest.width_km.toFixed(2)}</td>`;
+      tr.addEventListener('mouseenter', () => hot(c, true));
+      tr.addEventListener('mouseleave', () => hot(c, false));
+      tb.appendChild(tr);
+      rowFor.set(c, tr);
+    }
+  }
+
+  // Map
+  const svg = document.getElementById('map'), tip = document.getElementById('tip');
+  const NS = 'http://www.w3.org/2000/svg';
+  const S = 800, cx = S / 2, cy = S / 2;
+  let spanCap = 14, showAll = false, showGraze = true;
+  const circleEl = new Map();
+  const el = (n, a, txt) => { const e = document.createElementNS(NS, n); for (const k in a) e.setAttribute(k, a[k]); if (txt != null) e.textContent = txt; return e; };
+
+  function niceRings(halfKm) {
+    let step = Math.pow(10, Math.floor(Math.log10(halfKm)));
+    if (halfKm / step < 2) step /= 5; else if (halfKm / step < 5) step /= 2;
+    const out = []; for (let r = step; r < halfKm * 1.05; r += step) out.push(r); return out;
+  }
+
+  function draw() {
+    const halfKm = spanCap * cap, k = (S / 2) / halfKm;
+    const px = (xi, z) => [cx + xi * k, cy - z * k];
+    svg.innerHTML = '';
+    circleEl.clear();
+    svg.appendChild(el('rect', { width: S, height: S, fill: C('panel') }));
+    svg.appendChild(el('line', { x1: 0, y1: cy, x2: S, y2: cy, stroke: C('grid') }));
+    svg.appendChild(el('line', { x1: cx, y1: 0, x2: cx, y2: S, stroke: C('grid') }));
+    for (const r of niceRings(halfKm)) {
+      if (r * k < cap * k + 8) continue;
+      svg.appendChild(el('circle', { cx, cy, r: r * k, fill: 'none', stroke: C('grid') }));
+      svg.appendChild(el('text', { x: cx + r * k * .7071 + 4, y: cy - r * k * .7071 - 4, fill: C('muted'), 'font-size': 11 }, fmt(r) + ' km'));
+    }
+    const shown = circles.filter(c => showAll || c.h <= 7).sort((a, b) => b.radius_km - a.radius_km);
+    for (const c of shown) {
+      const [x, y] = px(0, c.center_zeta_km);
+      const e = el('circle', { class: 'res', cx: x, cy: y, r: c.radius_km * k, fill: 'none', stroke: colourFor(c.h),
+        'stroke-width': c.h <= 7 ? 1.6 : .8, 'stroke-opacity': c.h <= 7 ? .95 : .45, 'pointer-events': 'stroke' });
+      e.addEventListener('mouseenter', ev => { hot(c, true); showTip(c, ev); });
+      e.addEventListener('mousemove', ev => showTip(c, ev));
+      e.addEventListener('mouseleave', () => { hot(c, false); tip.style.display = 'none'; });
+      svg.appendChild(e);
+      circleEl.set(c, e);
+    }
+    // labels for the h ≤ 7 family, at the far ζ crossing (else the near one)
+    const placed = [];
+    shown.filter(c => c.h <= 7).sort((a, b) => a.farthest.point_km[1] - b.farthest.point_km[1]).forEach((c, i) => {
+      const far = c.farthest.point_km, at = Math.abs(far[1]) < halfKm * .95 ? far : c.nearest.point_km;
+      let [x, y] = px(at[0], at[1]);
+      if (Math.abs(at[1]) > halfKm) return;
+      const side = i % 2 === 0 ? 1 : -1; x += side * 8;
+      while (placed.some(([px0, py0]) => Math.abs(y - py0) < 12 && Math.abs(x - px0) < 44)) y += 12;
+      placed.push([x, y]);
+      svg.appendChild(el('text', { x, y: y + 4, fill: colourFor(c.h), 'font-size': 11, 'text-anchor': side > 0 ? 'start' : 'end',
+        'font-weight': (c.h === 3 && c.k === 4) ? 700 : 400 }, `${c.h}:${c.k}`));
+    });
+    // capture disc + Earth
+    svg.appendChild(el('circle', { cx, cy, r: cap * k, fill: C('disc'), 'fill-opacity': .06, stroke: C('disc'), 'stroke-dasharray': '4 3' }));
+    svg.appendChild(el('circle', { cx, cy, r: Math.max(re * k, 1.5), fill: '#121c16', stroke: C('disc'), 'stroke-width': 1.2 }));
+    if (cap * k > 30) svg.appendChild(el('text', { x: cx + cap * k * .7071 + 5, y: cy + cap * k * .7071 + 13, fill: C('muted'), 'font-size': 11 }, `capture ${(cap / re).toFixed(2)} R⊕`));
+    if (showGraze && spanCap <= 5) for (const c of shown) {
+      if (!c.grazing) continue;
+      const [x, y] = px(...c.grazing.point_km);
+      for (const xx of [x, 2 * cx - x]) svg.appendChild(el('circle', { cx: xx, cy: y, r: 2.6, fill: colourFor(c.h), stroke: C('panel') }));
+    }
+    // nominal ×
+    const [nx, ny] = px(...D.nominal.point_km);
+    for (const s of [[-1, -1, 1, 1], [-1, 1, 1, -1]]) svg.appendChild(el('line', { x1: nx + 6 * s[0], y1: ny + 6 * s[1], x2: nx + 6 * s[2], y2: ny + 6 * s[3], stroke: C('phosphor'), 'stroke-width': 1.8 }));
+    if (spanCap <= 5) svg.appendChild(el('text', { x: nx + 10, y: ny - 7, fill: C('phosphor'), 'font-size': 11 }, 'nominal · impact'));
+    for (const d of D.deflected) {
+      const [x, y] = px(...d.point_km);
+      if (x < 0 || x > S || y < 0 || y > S) continue;
+      svg.appendChild(el('polygon', { points: `${x},${y - 7} ${x + 7},${y} ${x},${y + 7} ${x - 7},${y}`, fill: C('panel'), stroke: C('amber'), 'stroke-width': 1.6 }));
+      svg.appendChild(el('text', { x: x + 11, y: y + 4, fill: C('amber'), 'font-size': 11 }, `${d.label} ${d.dv_m_s > 0 ? '+' : ''}${d.dv_m_s.toFixed(1)} m/s · a′ ${d.a_closed_form_au.toFixed(4)} AU`));
+    }
+    svg.appendChild(el('text', { x: S - 10, y: S - 10, fill: C('muted'), 'font-size': 11, 'text-anchor': 'end' }, `ξ → · ζ ↑ · ±${fmt(halfKm)} km`));
+  }
+
+  function hot(c, on) {
+    const e = circleEl.get(c); if (e) { e.setAttribute('stroke-opacity', on ? 1 : (c.h <= 7 ? .95 : .45)); e.setAttribute('stroke-width', on ? 3 : (c.h <= 7 ? 1.6 : .8)); }
+    const tr = rowFor.get(c); if (tr) tr.classList.toggle('hot', on);
+  }
+  function showTip(c, ev) {
+    const r = svg.parentElement.getBoundingClientRect();
+    const w0 = c.grazing ? c.grazing.width_km : c.nearest.width_km;
+    tip.textContent = `${c.h}:${c.k} — ${c.k} revolutions in ${c.h} yr\na′ ${c.a_prime_au.toFixed(5)} AU\ncentre ζ ${fmt(c.center_zeta_km)} km · radius ${fmt(c.radius_km)} km\nb ${fmt(c.b_min_km)} → ${fmt(c.b_max_km)} km${c.crosses_capture_disc ? ' · through the disc' : ''}\nkeyhole ${w0.toFixed(2)} km (${c.grazing ? 'grazing' : 'nearest'}) → ${c.farthest.width_km.toFixed(2)} km (far)`;
+    tip.style.display = 'block';
+    let x = ev.clientX - r.left + 14, y = ev.clientY - r.top + 14;
+    if (x + 300 > r.width) x -= 320; if (y + 90 > r.height) y -= 100;
+    tip.style.left = x + 'px'; tip.style.top = y + 'px';
+  }
+
+  document.querySelectorAll('button.span').forEach(b => b.addEventListener('click', () => {
+    spanCap = parseFloat(b.dataset.span);
+    document.querySelectorAll('button.span').forEach(x => x.setAttribute('aria-pressed', x === b));
+    draw();
+  }));
+  document.getElementById('allCircles').addEventListener('change', e => { showAll = e.target.checked; fillTable(showAll); draw(); });
+  document.getElementById('graze').addEventListener('change', e => { showGraze = e.target.checked; draw(); });
+  document.querySelector('button.span[data-span="2.6"]').setAttribute('aria-pressed', 'true'); spanCap = 2.6;
+  fillTable(false); draw();
+  document.getElementById('foot').textContent = `${D.circles.length} resonant circles within 60 capture radii, returns 2–20 yr, k ≤ 24. The closed-form placement carries the r ≈ R⊕orb approximation (~1e-4 in a′, about a hundred capture radii at the return); the widths are gradients and survive it. Any claim about a return encounter comes from the propagator — see probe_keyhole_return. Generated from docs/keyhole_map.json by core/examples/probe_keyhole_map.rs.`;
+})();
+</script>

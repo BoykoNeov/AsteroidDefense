@@ -1,0 +1,384 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1260" height="760" viewBox="0 0 1260 760" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">
+<rect width="1260" height="760" fill="#07100c"/>
+<text x="24" y="34" fill="#c9d6cc" font-size="18" font-weight="600">Keyhole map — b-plane of the 2040-01-01 encounter</text>
+<text x="24" y="54" fill="#6f8276" font-size="11">Öpik frame (ξ, ζ), pinned in core/src/keyhole.rs · v∞ 7.63 km/s · θ 116.9° · c 6842 km · capture 11312 km · round trip 7.5e-05</text>
+<clipPath id="clip24_72"><rect x="24" y="72" width="640" height="640"/></clipPath>
+<rect x="24" y="72" width="640" height="640" fill="#07100c" stroke="#3a4a41" stroke-width="1"/>
+<g clip-path="url(#clip24_72)">
+<line x1="24" y1="392.0" x2="664" y2="392.0" stroke="#16241c" stroke-width="1"/>
+<line x1="344.0" y1="72" x2="344.0" y2="712" stroke="#16241c" stroke-width="1"/>
+<circle cx="344.0" cy="392.0" r="40.4" fill="none" stroke="#16241c" stroke-width="1"/>
+<text x="376.6" y="359.4" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">20000 km</text>
+<circle cx="344.0" cy="392.0" r="80.8" fill="none" stroke="#16241c" stroke-width="1"/>
+<text x="405.2" y="330.8" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">40000 km</text>
+<circle cx="344.0" cy="392.0" r="121.2" fill="none" stroke="#16241c" stroke-width="1"/>
+<text x="433.7" y="302.3" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">60000 km</text>
+<circle cx="344.0" cy="392.0" r="161.6" fill="none" stroke="#16241c" stroke-width="1"/>
+<text x="462.3" y="273.7" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">80000 km</text>
+<circle cx="344.0" cy="392.0" r="202.1" fill="none" stroke="#16241c" stroke-width="1"/>
+<text x="490.9" y="245.1" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">100000 km</text>
+<circle cx="344.0" cy="392.0" r="242.5" fill="none" stroke="#16241c" stroke-width="1"/>
+<text x="519.5" y="216.5" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">120000 km</text>
+<circle cx="344.0" cy="392.0" r="282.9" fill="none" stroke="#16241c" stroke-width="1"/>
+<text x="548.0" y="188.0" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">140000 km</text>
+<circle cx="344.0" cy="392.0" r="323.3" fill="none" stroke="#16241c" stroke-width="1"/>
+<text x="576.6" y="159.4" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">160000 km</text>
+<circle cx="344.0" cy="-18255.1" r="18654.1" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="-2169.1" r="2568.1" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="2288.0" r="1888.9" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="1381.2" r="982.0" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="-211.7" r="610.6" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="957.1" r="557.9" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="781.0" r="381.6" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="66.9" r="331.7" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="711.4" r="312.0" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="107.5" r="291.1" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="650.9" r="251.4" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="161.8" r="236.7" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="623.6" r="224.0" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="196.5" r="201.9" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="209.5" r="188.8" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="238.3" r="159.9" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="551.0" r="151.2" fill="none" stroke="#6fcbef" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="262.7" r="135.5" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="271.4" r="126.7" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="278.5" r="119.5" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="515.0" r="114.9" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="509.3" r="109.2" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="289.7" r="108.2" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="501.5" r="101.3" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="298.1" r="99.8" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="301.5" r="96.3" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="304.5" r="93.3" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="490.1" r="89.7" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="309.6" r="88.1" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="315.6" r="82.0" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="482.1" r="81.7" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="320.1" r="77.4" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="323.7" r="73.7" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="471.8" r="71.1" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="326.7" r="70.7" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="329.1" r="68.2" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="331.1" r="66.1" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="465.4" r="64.6" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="334.3" r="62.8" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="463.1" r="62.2" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="336.7" r="60.3" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="338.7" r="58.3" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="457.9" r="56.8" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="340.2" r="56.7" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="341.5" r="55.4" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="342.5" r="54.3" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="343.4" r="53.4" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="454.5" r="53.3" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="344.2" r="52.6" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="344.9" r="51.9" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="345.5" r="51.3" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="452.1" r="50.8" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="449.0" r="47.5" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="447.0" r="45.4" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="445.6" r="43.9" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="438.1" r="35.9" fill="none" stroke="#9fe8ff" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="360.6" r="35.1" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="360.9" r="34.8" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="361.2" r="34.5" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="361.5" r="34.2" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="361.9" r="33.8" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="362.3" r="33.3" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="362.7" r="32.8" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="363.2" r="32.3" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="363.8" r="31.7" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="364.4" r="31.0" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="365.1" r="30.2" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="365.5" r="29.7" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="432.5" r="29.6" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="366.0" r="29.2" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="431.7" r="28.8" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="366.4" r="28.7" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="366.9" r="28.1" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="430.8" r="27.7" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="367.5" r="27.5" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="368.1" r="26.8" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="368.5" r="26.2" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="429.4" r="26.2" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="368.8" r="26.0" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="369.0" r="25.7" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="369.5" r="25.1" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="370.0" r="24.5" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="370.3" r="24.1" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="427.6" r="24.0" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="370.6" r="23.8" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="371.2" r="23.1" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="371.7" r="22.5" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="426.3" r="22.4" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="371.9" r="22.2" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="372.3" r="21.8" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="372.6" r="21.4" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="372.8" r="21.1" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="373.4" r="20.4" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="424.6" r="20.4" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="373.9" r="19.7" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="374.1" r="19.6" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="374.3" r="19.3" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="374.5" r="19.1" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="374.7" r="18.7" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="423.2" r="18.6" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="375.0" r="18.3" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="375.2" r="18.1" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="375.5" r="17.7" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="375.6" r="17.5" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="422.4" r="17.5" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="375.7" r="17.4" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="376.3" r="16.7" fill="none" stroke="#6fcbef" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="421.5" r="16.3" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="376.7" r="16.0" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="376.8" r="15.9" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="376.9" r="15.7" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="421.0" r="15.6" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="377.1" r="15.5" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="377.2" r="15.3" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="377.4" r="15.1" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="377.7" r="14.7" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="377.8" r="14.5" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="378.0" r="14.1" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="378.3" r="13.7" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="378.4" r="13.6" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="378.5" r="13.4" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="419.4" r="13.2" fill="none" stroke="#6fcbef" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="378.7" r="13.2" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="378.9" r="12.8" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="379.0" r="12.6" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="379.2" r="12.4" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="379.2" r="12.3" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="379.4" r="12.0" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="379.5" r="11.9" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="379.6" r="11.7" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="379.6" r="11.6" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="380.1" r="10.8" fill="none" stroke="#9fe8ff" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="417.8" r="10.6" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="380.6" r="9.9" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="380.7" r="9.8" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="417.3" r="9.8" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="380.7" r="9.7" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="380.8" r="9.6" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="380.9" r="9.3" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="381.0" r="9.2" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="381.1" r="9.0" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="381.2" r="8.8" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="381.3" r="8.5" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="381.5" r="8.2" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="416.6" r="8.2" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="381.5" r="8.1" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="381.6" r="7.9" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="381.8" r="7.5" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="381.9" r="7.2" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="382.0" r="7.0" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="415.9" r="6.7" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="382.1" r="6.7" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="382.2" r="6.4" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="382.3" r="6.3" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="382.4" r="6.0" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="382.4" r="5.9" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="382.5" r="5.8" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="382.7" r="5.1" fill="none" stroke="#6fcbef" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="382.9" r="4.3" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="383.0" r="4.2" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="383.0" r="3.9" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="383.1" r="3.5" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="383.2" r="3.2" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="414.8" r="3.1" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="383.3" r="2.7" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="344.0" cy="383.4" r="2.0" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="383.4" r="1.5" fill="none" stroke="#25678f" stroke-width="0.8" stroke-opacity="0.45"/>
+<circle cx="344.0" cy="383.5" r="0.1" fill="none" stroke="#1c4d6d" stroke-width="0.8" stroke-opacity="0.45"/>
+<text x="352.0" y="403.2" fill="#3286b3" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="start">7:9</text>
+<text x="336.0" y="414.8" fill="#6fcbef" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end" font-weight="700">3:4</text>
+<text x="336.0" y="547.0" fill="#4aa8d4" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">5:7</text>
+<text x="352.0" y="518.8" fill="#3286b3" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="start">7:10</text>
+<text x="352.0" y="477.9" fill="#9fe8ff" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="start">2:3</text>
+<text x="336.0" y="455.5" fill="#3286b3" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">7:11</text>
+<text x="336.0" y="493.0" fill="#4aa8d4" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">5:8</text>
+<text x="352.0" y="436.5" fill="#6fcbef" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="start">3:5</text>
+<text x="336.0" y="505.8" fill="#3286b3" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">7:12</text>
+<text x="336.0" y="532.0" fill="#4aa8d4" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">4:7</text>
+<text x="336.0" y="384.6" fill="#3286b3" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">7:2</text>
+<text x="336.0" y="568.6" fill="#6fcbef" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">3:1</text>
+<text x="352.0" y="587.2" fill="#4aa8d4" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="start">5:2</text>
+<text x="352.0" y="607.9" fill="#3286b3" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="start">7:3</text>
+<text x="336.0" y="373.3" fill="#9fe8ff" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">2:1</text>
+<text x="352.0" y="622.5" fill="#3286b3" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="start">7:4</text>
+<text x="352.0" y="466.9" fill="#4aa8d4" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="start">5:3</text>
+<text x="336.0" y="638.6" fill="#6fcbef" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">3:2</text>
+<text x="336.0" y="360.0" fill="#3286b3" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">7:5</text>
+<text x="352.0" y="654.0" fill="#4aa8d4" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="start">4:3</text>
+<text x="352.0" y="671.2" fill="#4aa8d4" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="start">5:4</text>
+<text x="352.0" y="348.4" fill="#3286b3" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="start">6:5</text>
+<text x="352.0" y="686.4" fill="#3286b3" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="start">7:6</text>
+<text x="336.0" y="225.5" fill="#3286b3" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">7:8</text>
+<text x="336.0" y="185.6" fill="#3286b3" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">6:7</text>
+<text x="336.0" y="704.0" fill="#4aa8d4" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">5:6</text>
+<text x="336.0" y="715.0" fill="#4aa8d4" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">4:5</text>
+<circle cx="344.0" cy="392.0" r="22.9" fill="#e8f0ea" fill-opacity="0.06" stroke="#e8f0ea" stroke-width="1" stroke-dasharray="4 3"/>
+<circle cx="344.0" cy="392.0" r="12.9" fill="#121c16" stroke="#e8f0ea" stroke-width="1.2"/>
+<line x1="352.5284335248357" y1="391.64985386693746" x2="362.5284335248357" y2="401.64985386693746" stroke="#5ce09b" stroke-width="1.6"/>
+<line x1="352.5284335248357" y1="401.64985386693746" x2="362.5284335248357" y2="391.64985386693746" stroke="#5ce09b" stroke-width="1.6"/>
+<polygon points="357.67486626396794,109.19605831057197 363.67486626396794,115.19605831057197 357.67486626396794,121.19605831057197 351.67486626396794,115.19605831057197" fill="#07100c" stroke="#f2b950" stroke-width="1.5"/>
+<text x="367.7" y="119.2" fill="#f2b950" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">prograde +0.2 m/s · a′ 0.8899 AU</text>
+<polygon points="356.4586200867204,672.5098474445165 362.4586200867204,678.5098474445165 356.4586200867204,684.5098474445165 350.4586200867204,678.5098474445165" fill="#07100c" stroke="#f2b950" stroke-width="1.5"/>
+<text x="366.5" y="682.5" fill="#f2b950" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">retrograde -0.2 m/s · a′ 0.8233 AU</text>
+</g>
+<text x="32" y="88" fill="#c9d6cc" font-size="12" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" font-weight="600">full map · resonant-return circles, h ≤ 7 yr labelled</text>
+<text x="656" y="704" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">ξ → · ζ ↑ · ±158370 km</text>
+<clipPath id="clip690_72"><rect x="690" y="72" width="320" height="320"/></clipPath>
+<rect x="690" y="72" width="320" height="320" fill="#07100c" stroke="#3a4a41" stroke-width="1"/>
+<g clip-path="url(#clip690_72)">
+<line x1="690" y1="232.0" x2="1010" y2="232.0" stroke="#16241c" stroke-width="1"/>
+<line x1="850.0" y1="72" x2="850.0" y2="392" stroke="#16241c" stroke-width="1"/>
+<circle cx="850.0" cy="232.0" r="81.6" fill="none" stroke="#16241c" stroke-width="1"/>
+<text x="911.7" y="170.3" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">15000 km</text>
+<circle cx="850.0" cy="232.0" r="108.8" fill="none" stroke="#16241c" stroke-width="1"/>
+<text x="930.9" y="151.1" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">20000 km</text>
+<circle cx="850.0" cy="232.0" r="136.0" fill="none" stroke="#16241c" stroke-width="1"/>
+<text x="950.2" y="131.8" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">25000 km</text>
+<circle cx="850.0" cy="232.0" r="163.2" fill="none" stroke="#16241c" stroke-width="1"/>
+<text x="969.4" y="112.6" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">30000 km</text>
+<circle cx="850.0" cy="-1393.5" r="1643.8" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="1753.6" r="1502.1" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="-181.7" r="430.6" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="660.2" r="407.1" fill="none" stroke="#6fcbef" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="-43.3" r="291.2" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="10.1" r="237.1" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="447.0" r="191.6" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="409.5" r="153.0" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="356.1" r="96.5" fill="none" stroke="#9fe8ff" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="167.7" r="72.0" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="171.4" r="67.6" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="327.7" r="64.5" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="176.1" r="62.1" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="182.0" r="54.9" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="319.8" r="54.8" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="185.5" r="50.3" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="189.6" r="44.9" fill="none" stroke="#6fcbef" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="194.4" r="38.1" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="305.7" r="35.4" fill="none" stroke="#6fcbef" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="196.2" r="35.4" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="200.0" r="29.0" fill="none" stroke="#9fe8ff" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="203.3" r="22.9" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="298.2" r="22.1" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="204.5" r="20.3" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="207.0" r="13.7" fill="none" stroke="#6fcbef" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="293.5" r="8.4" fill="none" stroke="#4aa8d4" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="208.5" r="7.1" fill="none" stroke="#3286b3" stroke-width="1.6" stroke-opacity="0.95"/>
+<circle cx="850.0" cy="232.0" r="61.5" fill="#e8f0ea" fill-opacity="0.06" stroke="#e8f0ea" stroke-width="1" stroke-dasharray="4 3"/>
+<circle cx="850.0" cy="232.0" r="34.7" fill="#121c16" stroke="#e8f0ea" stroke-width="1.2"/>
+<text x="898.5" y="287.5" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">capture 1.77 R⊕</text>
+<circle cx="858.4" cy="293.0" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="841.6" cy="293.0" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="870.6" cy="290.0" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="829.4" cy="290.0" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="879.5" cy="286.0" r="2.2" fill="#6fcbef" stroke="#07100c" stroke-width="1"/>
+<circle cx="820.5" cy="286.0" r="2.2" fill="#6fcbef" stroke="#07100c" stroke-width="1"/>
+<circle cx="888.1" cy="280.4" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="811.9" cy="280.4" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="891.0" cy="277.9" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="809.0" cy="277.9" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="897.0" cy="271.7" r="2.2" fill="#9fe8ff" stroke="#07100c" stroke-width="1"/>
+<circle cx="803.0" cy="271.7" r="2.2" fill="#9fe8ff" stroke="#07100c" stroke-width="1"/>
+<circle cx="901.6" cy="265.5" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="798.4" cy="265.5" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="903.2" cy="262.9" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="796.8" cy="262.9" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="906.3" cy="256.9" r="2.2" fill="#6fcbef" stroke="#07100c" stroke-width="1"/>
+<circle cx="793.7" cy="256.9" r="2.2" fill="#6fcbef" stroke="#07100c" stroke-width="1"/>
+<circle cx="908.0" cy="252.6" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="792.0" cy="252.6" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="909.1" cy="249.3" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="790.9" cy="249.3" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="910.2" cy="244.7" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="789.8" cy="244.7" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="910.8" cy="241.5" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="789.2" cy="241.5" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="911.1" cy="239.2" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="788.9" cy="239.2" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="907.7" cy="210.7" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="792.3" cy="210.7" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="906.7" cy="208.2" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="793.3" cy="208.2" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="905.1" cy="204.6" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="794.9" cy="204.6" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="902.1" cy="199.2" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="797.9" cy="199.2" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="899.4" cy="195.3" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="800.6" cy="195.3" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="894.9" cy="189.9" r="2.2" fill="#6fcbef" stroke="#07100c" stroke-width="1"/>
+<circle cx="805.1" cy="189.9" r="2.2" fill="#6fcbef" stroke="#07100c" stroke-width="1"/>
+<circle cx="886.1" cy="182.1" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="813.9" cy="182.1" r="2.2" fill="#4aa8d4" stroke="#07100c" stroke-width="1"/>
+<circle cx="880.8" cy="178.7" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<circle cx="819.2" cy="178.7" r="2.2" fill="#3286b3" stroke="#07100c" stroke-width="1"/>
+<line x1="881.4227056437885" y1="239.51883733406243" x2="891.4227056437885" y2="249.51883733406243" stroke="#5ce09b" stroke-width="1.6"/>
+<line x1="881.4227056437885" y1="249.51883733406243" x2="891.4227056437885" y2="239.51883733406243" stroke="#5ce09b" stroke-width="1.6"/>
+<text x="895.4" y="238.5" fill="#5ce09b" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">nominal · impact</text>
+</g>
+<text x="698" y="88" fill="#c9d6cc" font-size="12" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" font-weight="600">the disc · where the circles enter</text>
+<text x="1002" y="384" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" text-anchor="end">ξ → · ζ ↑ · ±29411.6 km</text>
+<rect x="690" y="416" width="320" height="320" fill="#07100c" stroke="#3a4a41"/>
+<line x1="690" y1="576.0" x2="1010" y2="576.0" stroke="#16241c"/>
+<line x1="850.0" y1="416" x2="850.0" y2="736" stroke="#16241c"/>
+<ellipse cx="850.0" cy="576.0" rx="150.0" ry="0.8" transform="rotate(-89.74 850.0 576.0)" fill="#5ce09b" fill-opacity="0.24" stroke="#5ce09b" stroke-opacity="0.35" stroke-width="1"/>
+<ellipse cx="850.0" cy="576.0" rx="50.0" ry="0.8" transform="rotate(-89.74 850.0 576.0)" fill="#5ce09b" fill-opacity="0.08" stroke="#5ce09b" stroke-opacity="0.9" stroke-width="1"/>
+<text x="698" y="432" fill="#c9d6cc" font-size="12" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace" font-weight="600">uncertainty at the nominal</text>
+<text x="698" y="689" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">σ 168.7 × 0.82 km (1σ, 3σ)</text>
+<text x="698" y="702" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">major axis 90° from ξ — along ζ, timing</text>
+<text x="698" y="715" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">P(impact) 1.000</text>
+<text x="698" y="728" fill="#6f8276" font-size="10" font-family="'IBM Plex Mono', 'DejaVu Sans Mono', Menlo, monospace">invented covariance, labelled as such</text>
+<text x="1036" y="84" fill="#5ce09b" font-size="12">×</text>
+<text x="1052" y="84" fill="#c9d6cc" font-size="10">nominal b-point (the impact)</text>
+<text x="1036" y="100" fill="#f2b950" font-size="12">◇</text>
+<text x="1052" y="100" fill="#c9d6cc" font-size="10">flown −/+0.2 m/s at 12 yr</text>
+<text x="1036" y="116" fill="#e8f0ea" font-size="12">◌</text>
+<text x="1052" y="116" fill="#c9d6cc" font-size="10">capture disc, dashed</text>
+<text x="1036" y="138" fill="#c9d6cc" font-size="10">circles by return time</text>
+<rect x="1036" y="144" width="14" height="8" fill="#9fe8ff"/>
+<text x="1056" y="152" fill="#6f8276" font-size="10">2 yr</text>
+<rect x="1036" y="158" width="14" height="8" fill="#6fcbef"/>
+<text x="1056" y="166" fill="#6f8276" font-size="10">3 yr</text>
+<rect x="1036" y="172" width="14" height="8" fill="#4aa8d4"/>
+<text x="1056" y="180" fill="#6f8276" font-size="10">4–5 yr</text>
+<rect x="1036" y="186" width="14" height="8" fill="#3286b3"/>
+<text x="1056" y="194" fill="#6f8276" font-size="10">6–7 yr</text>
+<rect x="1036" y="200" width="14" height="8" fill="#25678f"/>
+<text x="1056" y="208" fill="#6f8276" font-size="10">8–12 yr</text>
+<rect x="1036" y="214" width="14" height="8" fill="#1c4d6d"/>
+<text x="1056" y="222" fill="#6f8276" font-size="10">13–20 yr</text>
+<text x="1036" y="246" fill="#c9d6cc" font-size="10">keyholes, h ≤ 7</text>
+<text x="1036" y="264" fill="#6f8276" font-size="9">h:k   a′ AU   graze→far km</text>
+<text x="1036" y="276" fill="#4aa8d4" font-size="9">4:7   0.6886    1.15 →   1.40</text>
+<text x="1036" y="288" fill="#3286b3" font-size="9">7:12  0.6981    0.27 →   0.47</text>
+<text x="1036" y="300" fill="#6fcbef" font-size="9">3:5   0.7114    0.42 →   1.09</text>
+<text x="1036" y="312" fill="#4aa8d4" font-size="9">5:8   0.7310    0.19 →   0.80</text>
+<text x="1036" y="324" fill="#3286b3" font-size="9">7:11  0.7398    0.12 →   0.65</text>
+<text x="1036" y="336" fill="#9fe8ff" font-size="9">2:3   0.7631    0.37 →   3.54</text>
+<text x="1036" y="348" fill="#3286b3" font-size="9">7:10  0.7884    0.09 →   1.95</text>
+<text x="1036" y="360" fill="#4aa8d4" font-size="9">5:7   0.7991    0.12 →   3.93</text>
+<text x="1036" y="372" fill="#6fcbef" font-size="9">3:4   0.8255    0.18 →  24.92</text>
+<text x="1036" y="384" fill="#3286b3" font-size="9">7:9   0.8457    0.07 → 131.31</text>
+<text x="1036" y="396" fill="#4aa8d4" font-size="9">4:5   0.8618    0.12 → 257.37</text>
+<text x="1036" y="408" fill="#4aa8d4" font-size="9">5:6   0.8855    0.09 →  13.01</text>
+<text x="1036" y="420" fill="#3286b3" font-size="9">6:7   0.9023    0.08 →   4.72</text>
+<text x="1036" y="432" fill="#3286b3" font-size="9">7:8   0.9148    0.06 →   2.60</text>
+<text x="1036" y="444" fill="#3286b3" font-size="9">7:6   1.1082    0.05 →   0.19</text>
+<text x="1036" y="456" fill="#3286b3" font-size="9">6:5   1.1292    0.06 →   0.20</text>
+<text x="1036" y="468" fill="#4aa8d4" font-size="9">5:4   1.1604    0.07 →   0.20</text>
+<text x="1036" y="480" fill="#4aa8d4" font-size="9">4:3   1.2114    0.08 →   0.20</text>
+<text x="1036" y="492" fill="#3286b3" font-size="9">7:5   1.2515    0.05 →   0.10</text>
+<text x="1036" y="504" fill="#6fcbef" font-size="9">3:2   1.3104    0.10 →   0.18</text>
+<text x="1036" y="516" fill="#4aa8d4" font-size="9">5:3   1.4057    0.06 →   0.08</text>
+<text x="1036" y="528" fill="#3286b3" font-size="9">7:4   1.4522    0.04 →   0.05</text>
+<text x="1036" y="540" fill="#9fe8ff" font-size="9">2:1   1.5874    0.04 →   0.15</text>
+<text x="1036" y="552" fill="#3286b3" font-size="9">7:3   1.7592    0.01 →   0.03</text>
+<text x="1036" y="564" fill="#4aa8d4" font-size="9">5:2   1.8420    0.02 →   0.05</text>
+<text x="1036" y="576" fill="#6fcbef" font-size="9">3:1   2.0801    0.04 →   0.07</text>
+<text x="1036" y="588" fill="#3286b3" font-size="9">7:2   2.3052    0.03 →   0.04</text>
+<text x="24" y="746" fill="#6f8276" font-size="10">168 resonant circles within 60 capture radii, 2–20 yr returns. Closed-form placement is good to ~1e-4 in a′ (~100 capture radii at the return); the widths are gradients and are trustworthy; every return claim needs the propagator.</text>
+</svg>

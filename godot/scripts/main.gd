@@ -183,6 +183,8 @@ func _input(event: InputEvent) -> void:
 			Sim.request_porkchop()
 	elif enc.visible and event.is_action_pressed("encounter_ca_jump"):
 		_jump_to_closest_approach()
+	elif enc.visible and event.is_action_pressed("encounter_keyholes"):
+		enc.toggle_keyholes()
 	# The porkchop's cursor keys are checked BEFORE the planner's, and both are
 	# guarded on their own view being up. LEFT/RIGHT are shared with the planner's
 	# lead adjust, so whichever guard matches first in this chain wins — when the

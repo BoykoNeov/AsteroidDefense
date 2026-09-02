@@ -2198,8 +2198,10 @@ impl Mission {
     /// origin is [`nominal_impact_parameter_m`](Self::nominal_impact_parameter_m),
     /// and it lies inside the capture disc: the hit.
     ///
-    /// The core leaves the b-vector's *sign* unpinned (a Tier-3 keyhole question),
-    /// so which side of the disc this lands on is cosmetic. Its **distance** is not.
+    /// Since the keyhole batch the sign and the axes are pinned (`B` points at the
+    /// incoming asymptote; `ζ` opposes Earth's motion), so which side of the disc
+    /// this lands on is now physics, not cosmetics — see
+    /// [`bplane_frame_pinned`](Self::bplane_frame_pinned).
     #[func]
     fn nominal_b_point_km(&self) -> Vector3 {
         Self::to_v3(self.core.as_ref().and_then(|c| c.nominal_b_point_km()))
@@ -2213,6 +2215,50 @@ impl Mission {
     #[func]
     fn deflected_b_point_km(&self) -> Vector3 {
         Self::to_v3(self.core.as_ref().and_then(|c| c.deflected_b_point_km()))
+    }
+
+    /// Whether the encounter view's axes are the core's pinned Öpik `(ξ, ζ)`
+    /// frame (`ξ` across Earth's motion, `ζ` against it). `false` before a build
+    /// or on the display-basis fallback — label the frame accordingly.
+    #[func]
+    fn bplane_frame_pinned(&self) -> bool {
+        self.core
+            .as_ref()
+            .map(|c| c.bplane_frame_pinned())
+            .unwrap_or(false)
+    }
+
+    /// The resonant-return circles of the nominal encounter with returns of at
+    /// most `max_years`, in the same `(ξ, ζ)` km frame as the tracks. Each entry:
+    /// `h`, `k`, `a_prime_au`, `center_zeta_km`, `radius_km`, `b_min_km`,
+    /// `b_max_km`, `crosses_capture_disc`, `near_xi_km`, `near_zeta_km`,
+    /// `near_width_km`, `far_xi_km`, `far_zeta_km`, `far_width_km`. Empty before a
+    /// build. Closed-form (microseconds) — safe to call on `plan_changed`.
+    #[func]
+    fn keyhole_circles(&self, max_years: i64) -> Array<VarDictionary> {
+        let mut out = Array::new();
+        let Some(core) = self.core.as_ref() else {
+            return out;
+        };
+        for r in core.keyhole_circles(max_years.clamp(2, 20) as u32) {
+            let mut d = VarDictionary::new();
+            d.set("h", r.h as i64);
+            d.set("k", r.k as i64);
+            d.set("a_prime_au", r.a_prime_au);
+            d.set("center_zeta_km", r.center_zeta_km);
+            d.set("radius_km", r.radius_km);
+            d.set("b_min_km", r.b_min_km);
+            d.set("b_max_km", r.b_max_km);
+            d.set("crosses_capture_disc", r.crosses_capture_disc);
+            d.set("near_xi_km", r.near_point_km.0);
+            d.set("near_zeta_km", r.near_point_km.1);
+            d.set("near_width_km", r.near_width_km);
+            d.set("far_xi_km", r.far_point_km.0);
+            d.set("far_zeta_km", r.far_point_km.1);
+            d.set("far_width_km", r.far_width_km);
+            out.push(&d);
+        }
+        out
     }
 
     /// f64 nalgebra points → a Godot `PackedVector3Array` (the f32 cast at the FFI

@@ -39,7 +39,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anise::constants::frames::{SSB_J2000, SUN_J2000};
+use anise::constants::frames::{EARTH_J2000, SSB_J2000, SUN_J2000};
 use anise::prelude::Frame;
 use godot::global::godot_warn;
 use nalgebra::Vector3;
@@ -59,7 +59,8 @@ use asteroid_core::scenario::{
 };
 use asteroid_core::{
     along_track_unit, Clock, DvSolveTol, EphemerisPerturber, Epoch, GravityTractor, HoverGeometry,
-    OrbitalElements, StateVector, TowDirection, TowSolveTol, TowWindow,
+    OpikFrame, OrbitalElements, ResonantCircle, StateVector, TowDirection, TowSolveTol, TowWindow,
+    AU_M as CORE_AU_M,
 };
 
 /// Kilometres per astronomical unit — the display scale positions cross into.
@@ -175,6 +176,66 @@ fn project_bplane(
     basis: (Vector3<f64>, Vector3<f64>, Vector3<f64>),
 ) -> Vector3<f64> {
     Vector3::new(g_m.dot(&basis.0), g_m.dot(&basis.1), g_m.dot(&basis.2)) / M_PER_KM
+}
+
+/// Build the Öpik frame of an encounter from Earth's heliocentric state at
+/// `epoch` (the impact epoch — the closest approach to within the window's
+/// resolution, and the asymptote is the same anywhere along the hyperbola).
+/// `None` if the almanac cannot serve the epoch or the frame is degenerate; the
+/// caller falls back to the display basis and reports it.
+fn opik_frame_for(enc: &BPlaneEncounter, epoch: Epoch, eph: &Ephemeris) -> Option<OpikFrame> {
+    let (r_km, v_km) = eph
+        .state_km_s(EARTH_J2000, SUN_J2000, epoch.as_hifitime())
+        .ok()?;
+    let mu_sun = eph.sun_gm_m3_s2().ok()?;
+    OpikFrame::new(enc, r_km * M_PER_KM, v_km * M_PER_KM, mu_sun).ok()
+}
+
+/// One resonant-return circle as the frontend draws it — kilometres in the
+/// pinned `(ξ, ζ)` frame, and the keyhole widths at the two places a reader
+/// cares about: where the circle enters the capture disc (a return that is
+/// still a miss, `None` if the circle clears the disc — then the nearest point
+/// stands in) and its far end.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyholeCircleRow {
+    pub h: u32,
+    pub k: u32,
+    pub a_prime_au: f64,
+    pub center_zeta_km: f64,
+    pub radius_km: f64,
+    pub b_min_km: f64,
+    pub b_max_km: f64,
+    pub crosses_capture_disc: bool,
+    /// `(ξ, ζ)` km of the grazing point on the `+ξ` side, or the nearest point.
+    pub near_point_km: (f64, f64),
+    pub near_width_km: f64,
+    pub far_point_km: (f64, f64),
+    pub far_width_km: f64,
+}
+
+impl KeyholeCircleRow {
+    fn from_circle(f: &OpikFrame, c: &ResonantCircle) -> Self {
+        let (lo, hi) = c.b_range();
+        let near = c
+            .intersections_at_radius(f.capture_radius)
+            .map(|(g, _)| g)
+            .unwrap_or_else(|| c.nearest_point());
+        let far = c.farthest_point();
+        Self {
+            h: c.resonance.h,
+            k: c.resonance.k,
+            a_prime_au: c.a_prime / CORE_AU_M,
+            center_zeta_km: c.center_zeta / M_PER_KM,
+            radius_km: c.radius / M_PER_KM,
+            b_min_km: lo / M_PER_KM,
+            b_max_km: hi / M_PER_KM,
+            crosses_capture_disc: c.crosses_capture_disc(f.capture_radius),
+            near_point_km: (near.x / M_PER_KM, near.y / M_PER_KM),
+            near_width_km: f.keyhole_at(c, near).width / M_PER_KM,
+            far_point_km: (far.x / M_PER_KM, far.y / M_PER_KM),
+            far_width_km: f.keyhole_at(c, far).width / M_PER_KM,
+        }
+    }
 }
 
 /// Discover the loaded kernel's usable coverage window by bisecting on whether
@@ -895,6 +956,13 @@ pub struct MissionCore {
     /// undo — and the source of the capture radius every verdict is measured
     /// against, as well as the `Ŝ` the b-plane display frame is built on.
     nominal_encounter: Option<BPlaneEncounter>,
+    /// The pinned Öpik `(ξ, ζ)` frame of the nominal encounter (`core::keyhole`),
+    /// built at [`install`](Self::install) from the encounter and Earth's
+    /// heliocentric velocity at the impact epoch. `None` before a build, or in the
+    /// (physically impossible) degenerate case where Earth's velocity is parallel
+    /// to the asymptote — the display then falls back to the ecliptic-pole basis
+    /// and says so through [`bplane_frame_pinned`](Self::bplane_frame_pinned).
+    opik: Option<OpikFrame>,
     /// The pre-plan encounter picture, sampled once at build time (see
     /// [`BuiltScenario`]). The nominal track never changes, so neither does this.
     nominal_frame: Option<EncounterFrame>,
@@ -977,6 +1045,7 @@ impl MissionCore {
             scenario: None,
             nominal_clock: None,
             nominal_encounter: None,
+            opik: None,
             nominal_frame: None,
             tier2_shifts: None,
             plan: None,
@@ -1055,6 +1124,11 @@ impl MissionCore {
         self.small_bodies_mounted = built.small_bodies_mounted;
         self.nominal_clock = Some(built.nominal_clock);
         self.nominal_encounter = Some(built.nominal_encounter);
+        self.opik = opik_frame_for(
+            &built.nominal_encounter,
+            built.scenario.impact_epoch(),
+            &self.ephemeris,
+        );
         self.nominal_frame = Some(built.nominal_frame);
         // A new scenario invalidates any prior Tier-2 preview: the shifts were
         // measured against the old field. They are re-measured on demand when the
@@ -1498,9 +1572,39 @@ impl MissionCore {
     // The frontend receives `(ξ, ζ, s)` kilometres and draws them; it owns no
     // geometry, exactly as `set_plan` left it owning no orbital mechanics.
 
-    /// The b-plane display basis for the built scenario, or `None` before it is.
+    /// The b-plane basis the view draws in, or `None` before the scenario is built.
+    ///
+    /// Since the keyhole batch this is the core's **pinned Öpik frame** —
+    /// `ξ̂` across Earth's motion, `ζ̂` against it, `Ŝ` the asymptote — so the axes
+    /// on screen are the ones resonant circles are centred on, and a signed `ζ`
+    /// now means something (timing). The ecliptic-pole [`bplane_basis`] survives
+    /// only as the fallback for a frame the core could not build.
     fn encounter_basis(&self) -> Option<(Vector3<f64>, Vector3<f64>, Vector3<f64>)> {
+        if let Some(f) = self.opik.as_ref() {
+            return Some((f.xi_hat, f.zeta_hat, f.eta_hat));
+        }
         self.nominal_encounter.and_then(|e| bplane_basis(e.s_hat))
+    }
+
+    /// Whether the displayed axes are the core's pinned Öpik `(ξ, ζ)` — `false`
+    /// before a build or on the ecliptic-pole fallback, so the view can label the
+    /// frame honestly instead of printing `ξ`/`ζ` over display axes.
+    pub fn bplane_frame_pinned(&self) -> bool {
+        self.opik.is_some()
+    }
+
+    /// The resonant-return circles of the nominal encounter with returns of at
+    /// most `max_years`, within 60 capture radii, sorted by `a'` — the keyhole map
+    /// in the same `(ξ, ζ)` km frame the tracks and b-points are drawn in. Empty
+    /// before a build or without a pinned frame.
+    pub fn keyhole_circles(&self, max_years: u32) -> Vec<KeyholeCircleRow> {
+        let Some(f) = self.opik.as_ref() else {
+            return Vec::new();
+        };
+        f.resonant_circles(2..=max_years.max(2), 24, 60.0 * f.capture_radius)
+            .iter()
+            .map(|c| KeyholeCircleRow::from_circle(f, c))
+            .collect()
     }
 
     /// The nominal (impact) track through the encounter window, projected into the
@@ -4899,6 +5003,82 @@ mod tests {
             "sample span {:.1} s ≠ the core's ±{:.1} s window",
             hi - lo,
             ENCOUNTER_HALF_WINDOW_SECONDS
+        );
+    }
+
+    /// Kernel-gated. The b-plane view's axes are the core's pinned Öpik frame,
+    /// and the keyhole map it draws is the one `core::keyhole` computes: `ζ̂`
+    /// opposes Earth's motion, a retrograde along-track plan lands on `−ζ` (the
+    /// side where `a'` falls), and the 3:4 resonance the probes picked is listed
+    /// where the closed form puts it — through the disc, out to ~153 500 km.
+    #[test]
+    fn the_bplane_axes_are_the_pinned_opik_frame_and_the_keyhole_map_is_the_cores() {
+        if !have_kernels() {
+            eprintln!("skipping the_bplane_axes_are_the_pinned_opik_frame_*: no DE kernel");
+            return;
+        }
+        let mut mc = MissionCore::load().expect("load kernels");
+        assert!(!mc.bplane_frame_pinned());
+        assert!(mc.keyhole_circles(7).is_empty());
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        assert!(
+            mc.bplane_frame_pinned(),
+            "the Öpik frame must build on the shipping rock"
+        );
+
+        let (xi, zeta, s) = mc.encounter_basis().expect("basis");
+        let (_, v_km) = mc
+            .ephemeris
+            .state_km_s(
+                EARTH_J2000,
+                SUN_J2000,
+                Epoch::from_tdb_seconds_past_j2000(mc.impact_tdb_seconds()).as_hifitime(),
+            )
+            .expect("Earth velocity");
+        assert!(
+            zeta.dot(&v_km) < 0.0,
+            "ζ̂ must oppose Earth's heliocentric motion"
+        );
+        assert!(
+            xi.dot(&v_km).abs() < 1e-9 * v_km.norm(),
+            "ξ̂ must be ⊥ Earth's motion"
+        );
+        assert!(
+            (xi.cross(&s) - zeta).norm() < 1e-12,
+            "(ξ, η=Ŝ, ζ) must be right-handed"
+        );
+
+        let rows = mc.keyhole_circles(7);
+        let three_four = rows
+            .iter()
+            .find(|r| r.h == 3 && r.k == 4)
+            .expect("3:4 is in reach of the shipping encounter");
+        assert!(
+            three_four.crosses_capture_disc,
+            "3:4 passes through the capture disc"
+        );
+        assert!(
+            (150.0e3..=158.0e3).contains(&three_four.b_max_km),
+            "3:4 far end at {:.0} km",
+            three_four.b_max_km
+        );
+        assert!(
+            three_four.center_zeta_km < 0.0,
+            "3:4 lies on the −ζ (lowering) side"
+        );
+        assert!(three_four.near_width_km < 1.0 && three_four.far_width_km > 15.0);
+        assert!(rows.windows(2).all(|w| w[0].a_prime_au <= w[1].a_prime_au));
+
+        // A retrograde plan must land on −ζ: the picture and the physics agree on
+        // which way "later" is.
+        mc.set_plan(mc.period_seconds(), -0.2).expect("plan solves");
+        let p = mc.deflected_b_point_km().expect("deflected b-point");
+        assert!(
+            p.y < 0.0 && p.y.abs() > p.x.abs(),
+            "a retrograde nudge should move the b-point along −ζ, got ({:.0}, {:.0})",
+            p.x,
+            p.y
         );
     }
 

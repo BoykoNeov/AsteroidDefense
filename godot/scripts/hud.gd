@@ -310,7 +310,7 @@ func _help_line(w: float, h: float, dim: Color) -> void:
 	# and an unlisted key in the one view that needs it is why the closest-approach
 	# marker was effectively unreachable in the first place.
 	if view_name == "ENCOUNTER B-PLANE":
-		line += " [C]CLOSEST APPR"
+		line += " [C]CLOSEST APPR [H]KEYHOLES"
 	# Same rule for the launch-window map's keys: they bind only while it is up.
 	if view_name == "LAUNCH WINDOWS":
 		line += " [ARR]WINDOW [L]LAUNCHER [D]METRIC [E]VERIFY"

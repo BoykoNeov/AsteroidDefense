@@ -29,10 +29,15 @@ extends Control
 ## the old view drew a 3.7 R_E disc where the real one is 1.77 — it was reading
 ## 3.17 km/s where the encounter's v_inf is 7.63.
 ##
-## The axes are a **display** frame and are labelled as one. The core deliberately
-## leaves the Öpik/Kizner xi/zeta decomposition and B's sign unpinned (a Tier-3
-## keyhole question), so nothing here prints signed components under those names —
-## only the rotation-invariant scalars this view is entitled to.
+## The axes are the core's **pinned Öpik frame** since the keyhole batch
+## (core/src/keyhole.rs): xi across Earth's heliocentric motion, zeta against it,
+## B's sign pointing at the incoming asymptote. That is what lets this view draw
+## the **keyhole map** — the resonant-return circles, each the locus of b-plane
+## points whose flyby brings the rock back h years later — because those circles
+## are centred on the zeta axis, and it is why a signed zeta now means something:
+## "later" is down. `[H]` toggles the circles. If the core could not pin the
+## frame (`Sim.bplane_frame_pinned()` false) the axes fall back to a display
+## basis and the readout says so; no circles are drawn then.
 
 ## Plot half-span at open, lunar distances. Sized for the capture disc (0.029 LD),
 ## not for the LD-scale rings the heliocentric views use: this is the one frame
@@ -56,6 +61,12 @@ var _defl := PackedVector3Array()
 var _b_nom := Vector3.ZERO
 var _b_defl := Vector3.ZERO
 var _span := PackedFloat64Array()
+## The keyhole map: resonant-return circles with returns inside KEYHOLE_MAX_YEARS,
+## read from the core (closed-form; see Sim.keyhole_circles). Drawn when
+## `_keyholes` is on and the frame is pinned.
+const KEYHOLE_MAX_YEARS := 7
+var _circles: Array = []
+var _keyholes := true
 
 ## Whether the live-asteroid contact went on screen this frame. Set by
 ## _draw_marker, read by _draw_legend a few calls later — draw order, not cached
@@ -103,7 +114,14 @@ func _fetch() -> void:
 	_b_nom = Sim.encounter_b_point(false)
 	_b_defl = Sim.encounter_b_point(true)
 	_span = Sim.encounter_span_days()
+	_circles = Sim.keyhole_circles(KEYHOLE_MAX_YEARS) if Sim.bplane_frame_pinned() else []
 	_built = true
+
+
+## [H]: show or hide the resonant-return circles.
+func toggle_keyholes() -> void:
+	_keyholes = not _keyholes
+	Sim.event_logged.emit("KEYHOLE MAP %s" % ("ON" if _keyholes else "OFF"))
 
 
 # ------------------------------------------------------------------ draw ---
@@ -136,6 +154,8 @@ func _draw() -> void:
 	draw_line(Vector2(center.x, 0), Vector2(center.x, h), faint, 1.0)
 
 	_draw_rings(center, ppl, w, h, faint, dim)
+	if _keyholes:
+		_draw_keyholes(center, ppl, dim, faint)
 	_draw_earth_and_disc(center, ppl, bright, mid, dim)
 
 	# Tracks: context. Dim, and behind the b-points that actually decide things.
@@ -153,7 +173,8 @@ func _draw() -> void:
 	_centered("EARTH ENCOUNTER - B-PLANE VIEW", Vector2(w * 0.5, 40), dim, _fs)
 	_readout(w, h, mid, bright, dim)
 
-	var foot := "SPAN +/-%s LD   [WHEEL] ZOOM" % String.num(_half_ld, 3)
+	var foot := "SPAN +/-%s LD   [WHEEL] ZOOM   [H] KEYHOLES %s" % [
+		String.num(_half_ld, 3), "ON" if _keyholes else "OFF"]
 	_centered(foot, Vector2(w * 0.5, h - MARGIN - 4), dim, _fs - 2)
 
 
@@ -174,6 +195,57 @@ func _draw_rings(center: Vector2, ppl: float, w: float, h: float,
 		var lbl := String.num(r, 2) + " LD" + (" - LUNAR DIST" if r == 1.0 else "")
 		draw_string(_font, center + Vector2(rp * 0.7071 + 5, -rp * 0.7071 - 4),
 			lbl, HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, dim)
+
+
+## The keyhole map: one circle per resonant return, centred on the zeta axis at
+## (0, center_zeta) with radius R, both from the core. Every point on a circle is
+## a flyby that leaves the rock on an orbit meeting Earth again h years later; the
+## thin band around it that lands the return on the capture disc is the keyhole,
+## and its width is printed at whichever crossing of the zeta axis is on the plot.
+##
+## Most circles pass *through* the disc — part of every listed resonance is an
+## impact — and the far ends of the wide ones sit well outside the default span,
+## so zoom out with the wheel to see 3:4 whole. Circles are context, drawn under
+## the disc and the marks: they never decide anything on this screen.
+func _draw_keyholes(center: Vector2, ppl: float, dim: Color, faint: Color) -> void:
+	if _circles.is_empty():
+		return
+	var rect := Rect2(Vector2.ZERO, size).grow(-MARGIN)
+	var placed: Array[float] = []
+	for c: Dictionary in _circles:
+		var cc: Vector2 = _plot(center, ppl, Vector3(0.0, float(c["center_zeta_km"]), 0.0))
+		var r: float = float(c["radius_km"]) / Sim.LD_KM * ppl
+		# Entirely off-frame: the nearest point of the circle is beyond the corners.
+		if cc.distance_to(center) - r > rect.size.length():
+			continue
+		var is_three_four: bool = int(c["h"]) == 3 and int(c["k"]) == 4
+		var col := Color(dim, 0.9) if is_three_four \
+			else Color(faint.r * 1.6, faint.g * 1.6, faint.b * 1.6, 0.8)
+		var segs := 96 if r < 2000.0 else 256
+		draw_arc(cc, r, 0.0, TAU, segs, col, 1.4 if is_three_four else 1.0)
+		# Label at the far crossing of the zeta axis if it is on the plot, else the
+		# near one; skip when neither is.
+		var far := _plot(center, ppl, Vector3(float(c["far_xi_km"]), float(c["far_zeta_km"]), 0.0))
+		var near := _plot(center, ppl,
+			Vector3(float(c["near_xi_km"]), float(c["near_zeta_km"]), 0.0))
+		var at: Vector2
+		var width_km: float
+		if rect.has_point(far):
+			at = far
+			width_km = float(c["far_width_km"])
+		elif rect.has_point(near):
+			at = near
+			width_km = float(c["near_width_km"])
+		else:
+			continue
+		var y := at.y
+		for py: float in placed:
+			if absf(y - py) < _fs + 2.0:
+				y = py + _fs + 2.0
+		placed.append(y)
+		var txt := "%d:%d  KEYHOLE %s KM" % [int(c["h"]), int(c["k"]), String.num(width_km, 2)]
+		draw_string(_font, Vector2(at.x + 8.0, y + 4.0), txt,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 3, col)
 
 
 ## What the marks mean, stated once in a corner instead of on top of them. The
@@ -210,6 +282,10 @@ func _draw_legend(w: float, mid: Color, dim: Color) -> void:
 	draw_string(_font, Vector2(x, y + (row + 1.0) * lh),
 		"LINES = TRACK (BENDS - CONTEXT ONLY)",
 		HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, dim)
+	if _keyholes and not _circles.is_empty():
+		draw_string(_font, Vector2(x, y + (row + 2.0) * lh),
+			"CIRCLES = RESONANT RETURNS H:K (KEYHOLE MAP)",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, dim)
 
 
 ## Earth, and the disc that is the point of the whole view.
@@ -335,8 +411,8 @@ func _draw_track(pts: PackedVector3Array, center: Vector2, ppl: float,
 
 ## The encounter solution. Only quantities the core actually pins: |B| and the
 ## capture radius (the pair the verdict compares), the perigee (labelled as the
-## separate thing it is), and v_inf. No signed xi/zeta — the core has not settled
-## that convention, so printing components under those names would be inventing one.
+## separate thing it is), v_inf, and — now that the core has settled it — which
+## frame the axes are.
 func _readout(w: float, h: float, mid: Color, bright: Color, dim: Color) -> void:
 	var lh := _fs + 5.0
 	var ry := h * 0.56
@@ -345,7 +421,8 @@ func _readout(w: float, h: float, mid: Color, bright: Color, dim: Color) -> void
 
 	var p_nom: float = Sim.perigee_ld(false)
 	var lines := [
-		["FRAME", "GEOCENTRIC B-PLANE (DISPLAY AXES)"],
+		["FRAME", "OPIK XI/ZETA - ZETA OPPOSES EARTH MOTION" if Sim.bplane_frame_pinned()
+			else "GEOCENTRIC B-PLANE (DISPLAY AXES)"],
 		["V-INF", "%.2f KM/S" % Sim.encounter_v_inf_kms()],
 		["NOM |B|", "%.4f LD  (PERIGEE %s)" %
 			[Sim.nominal_b_ld(), "%.4f LD" % p_nom if p_nom >= 0.0 else "--"]],

@@ -2096,6 +2096,28 @@ func encounter_v_inf_kms() -> float:
 	return mission.encounter_v_inf_m_s() / 1000.0
 
 
+## Whether the b-plane view's axes are the core's pinned Opik (xi, zeta) frame —
+## xi across Earth's heliocentric motion, zeta against it — rather than the older
+## ecliptic-pole display basis. Settled by the keyhole batch (core/src/keyhole.rs);
+## the view labels the frame from this so it never prints xi/zeta over display axes.
+func bplane_frame_pinned() -> bool:
+	if not encounter_online:
+		return false
+	return mission.bplane_frame_pinned()
+
+
+## The resonant-return circles of the nominal encounter — the keyhole map — as an
+## Array of Dictionaries in the same (xi, zeta) km frame as `encounter_track`.
+## Keys: h, k, a_prime_au, center_zeta_km, radius_km, b_min_km, b_max_km,
+## crosses_capture_disc, near_xi_km, near_zeta_km, near_width_km, far_xi_km,
+## far_zeta_km, far_width_km. Closed-form in the core (microseconds), so it is
+## safe to re-read whenever the view rebuilds. Empty when the encounter is dormant.
+func keyhole_circles(max_years: int) -> Array:
+	if not encounter_online:
+		return []
+	return mission.keyhole_circles(max_years)
+
+
 ## Whether the *deflected* track is the one that is real right now.
 ##
 ## The single rule for "which pass is happening", because two places need it and

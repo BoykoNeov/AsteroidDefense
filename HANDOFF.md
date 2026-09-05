@@ -8,7 +8,7 @@ This document is the starting context for continuing development in Claude Code.
 
 ---
 
-## Where things stand — 2026-09-02
+## Where things stand — 2026-09-05
 
 A dashboard, because §10's task list has been complete since the MVP and the
 truth has lived in the dated session sections at the end of this file since.
@@ -22,7 +22,8 @@ Read this table first, then the session that owns the layer you are touching.
 | Mission design: Lambert (multi-rev), porkchop, launch vehicles, required impactor mass, cell verify | done | `core/src/{lambert,mission,launch_vehicle}.rs` |
 | Tier 3a: covariance → b-plane Jacobian → P(impact), linearity shell | done (covariance invented, labelled) | `core/src/uncertainty.rs` |
 | **Tier 3b: keyholes** — Öpik (ξ, ζ) frame and b-vector sign pinned, resonant circles in closed form, keyhole widths, the keyhole map, **the 3:4 keyhole flown to a return impact** | **done 2026-09-02** | `core/src/keyhole.rs`, `examples/probe_keyhole_{map,return}.rs`, `docs/keyhole_map.*` |
-| Godot frontend: DE440 orrery, real NEO scenery, planner, b-plane view (now with the keyhole map, `[H]`), launch-window map, Tier-2 force menu, tractor bench, threat-orbit knob | done; the keyhole overlay is **unrun** (no engine in the 2026-09-02 session) | `godot/`, `godot/rust/` |
+| Godot frontend: DE440 orrery, real NEO scenery, planner, b-plane view (with the keyhole map, `[H]`), launch-window map, Tier-2 force menu, tractor bench, threat-orbit knob | done; keyhole overlay **seen on screen 2026-09-05** and its captions budgeted | `godot/`, `godot/rust/` |
+| Godot visual/perf pass: 3D world in its own viewport with 4× MSAA and phosphor persistence (peak-hold trails), per-frame position memo, cached 2D orbit traces, the `_perf.gd` frame-time harness and `run_harness.ps1` | done 2026-09-05; the 2D map went 18.9 → 7.1 ms/frame, native calls/frame 764 → 29; follow-ups in `docs/plans/2026-09-05-visuals-performance-followups.md` | `godot/scripts/main.gd`, `godot/shaders/phosphor_persist.gdshader`, `godot/tests/` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -1428,3 +1429,103 @@ it, and the closed form corrected one of the numbers those probes recorded.
   Horizons `.neo` tests (the JPL API was blocked too; they fail under
   `REQUIRE_KERNELS` on this box only). Baseline before the batch: 211 core tests
   green with kernels (plus the three Horizons tests that cannot run here); after: 225.
+
+### The frontend measured and given its phosphor — 2026-09-05 session (frame times, the caches they justified, the world in its own viewport, and the keyhole map finally seen)
+
+The brief was "improve visuals and performance". The rule this project has
+always run on applied twice over: **measure first**, then change only what the
+measurement names — and look at the picture, because a frame that is fast and
+wrong is worse than a slow one. Everything below is verified by a number or a
+PNG, and the harness that produced them ships.
+
+- **A frame-time harness, because a per-frame cost has no other symptom.**
+  `godot/tests/_perf.gd` drives every view (3D at three framings, the 2D map,
+  the b-plane with and without zoom, the launch-window map, max warp) for 240
+  frames each and prints wall-clock frame time, **native binding calls per
+  frame** (`Sim.ffi_calls`, a new counter reset at the top of `Sim._process`),
+  and draw calls; plus a microbenchmark of the raw lookups. Two lessons cost an
+  hour each. `Performance.TIME_PROCESS` reported hundreds of milliseconds beside
+  an 8 ms frame on this build — dropped from the report rather than explained.
+  And windowed, every view sat at exactly **8.41 ms (119 fps) regardless of
+  content**: the desktop compositor pins frames to the monitor even with vsync
+  off, so a windowed run only shows a view *slower* than the display, and the
+  CPU cost is read `--headless` (the draw paths still run for visible nodes).
+
+- **What the numbers said.** Headless, before: the 2D map **18.9 ms/frame with
+  764 native calls**, every other view 7–10 ms with 47–61 calls. The map's
+  `_orbit_trace` re-walked six orbits from the ephemeris *inside `_draw`*,
+  every frame, for polylines that never change — 2.7 ms per planet trace
+  (measured), ~13 ms of the frame. The 3D view asked the same body positions
+  two and three times a frame across the scene, the tag layer and the HUD.
+  Fixes, each sized by that: **cached orbit traces** in `map2d.gd`, dropped
+  on `mission_ready` (all) and `plan_changed` (the deflected arc only); a
+  **per-frame memo** in `Sim.pos_ecl` keyed by body name and exact epoch,
+  cleared each `_process`, with the orbit walks routed around it
+  (`_lookup_ecl`) so they cannot evict the clock's answer; the impact point
+  read once on install (`Sim.impact_point_ecl`) instead of twice a frame; the
+  hidden 3D scene's `_process` switched off while a 2D view is up. After: the
+  map **7.1 ms, 29 calls**; the 3D views 6.9–7.4 ms, 29 calls; everything else
+  unchanged within the noise of a machine that was running two other projects'
+  Godot tests at the time.
+
+- **The 3D world moved into its own viewport, twice removed.** `main.gd` now
+  builds `world_vp` (the 3D scene, `own_world_3d`, **4× MSAA** — every body and
+  orbit is a one-pixel line and un-antialiased they crawl under camera motion)
+  as a child of `persist_vp`, a 2D viewport that is **never cleared**, whose one
+  ColorRect runs `shaders/phosphor_persist.gdshader`; the main viewport shows
+  that as a `TextureRect` under the HUD, and the CRT shader still governs the
+  whole screen. The camera rig stays in the main viewport for input ordering
+  (the encounter view swallows the wheel before it) and drives a `Camera3D`
+  that lives in the world by global transform (`attach_camera`). `_show_view`
+  disables both render targets while a 2D view is up and clears the
+  accumulation once on return. The first persistence shader was the textbook
+  exponential average, `world·(1−keep) + previous·keep`, and the max-warp
+  screenshot showed why that is wrong for this: a body that moves more than its
+  own width per frame is drawn at `1−keep` ≈ 6 % and *vanished*, leaving tags
+  pointing at nothing. It is **peak-hold with decay** now — `max(world,
+  previous·keep)`, read back through `hint_screen_texture`, `keep =
+  exp(−Δt/0.14 s)` — so the moving thing is at full brightness and its past
+  fades behind it, and static line work is exactly its own brightness. The
+  target is HDR because in 8-bit `v·0.9` rounds back to `v` below ~4/255 and
+  trails never reach black. `_shot.gd` gained `trails_1_max_warp` for it.
+
+- **The keyhole map ran for the first time, and its first picture was a
+  thicket.** All 27 circles with `h ≤ 7` came out at one weight with a caption
+  each, ~30 captions stacked down the ζ axis through Earth, the b-point and the
+  impact mark. `encounter.gd` now brightens each circle by its keyhole width on
+  a log scale (3:4 solid), and captions only the **seven widest in frame**
+  (`KEYHOLE_LABELS`), the 3:4 always among them — zoom in and the budget goes
+  to whatever is widest at that span. `[H]` verified as a toggle
+  (`enc_7_keyholes_off`). The physics drawn is unchanged.
+
+- **The run ritual is a script now, and it found two traps.** `godot/tests/
+  run_harness.ps1 -Harness _shot.gd [-Headless]` registers the autoload after
+  `Sim`, launches, restores `project.godot`, and kills **only the PID it
+  started**. Trap one: Godot on this machine does not always exit on `quit()`
+  — the plugin's teardown left three processes alive at 100 % CPU over the
+  session, one of which **held the debug DLL** so `cargo build -p
+  asteroid_gdext` failed with `Access is denied (os error 5)` while my wait
+  loop reported success, and Godot ran the July binding: `Nonexistent function
+  'bplane_frame_pinned' in base 'Mission'` (staleness trap 1 again, by a new
+  route). Trap two: other projects' Godot processes were running on the same
+  box; killing by name would have taken them — kill only your own PID.
+  Non-ASCII in a `.ps1` is a parse error under Windows PowerShell 5.1 (a curly
+  dash decodes to a quote), so the script is plain ASCII.
+
+- **One test de-raced.** `test_orrery.gd` asserted the build ran off-thread by
+  `polls > 1`; on the loaded machine the checks before the poll loop outlasted
+  the worker, the first poll found the build landed, and a correct build
+  failed as "blocking". It now asserts what the caller paid (`_ready()` under
+  3 s — measured 22 ms — against a build that took 5.9 s to land), and reports
+  the polls as information. 83/83.
+
+- **Cosmetic, but honest:** body spin is per second of wall time, not per frame
+  (it ran twice as fast on a 120 Hz display).
+
+Follow-ups, sized and ordered for a smaller model, are in
+`docs/plans/2026-09-05-visuals-performance-followups.md`: parallelising the
+independent jobs in the build worker (the sb441 mount and the comet flight
+beside the 10 s threat propagation) to cut the startup wait, a batched
+position lookup across the FFI, label de-collision in the tag layer and on the
+keyhole map, a persistence control, polyline drawing for the encounter tracks,
+and the Tier-3 ellipse on the b-plane view.

@@ -95,6 +95,36 @@ output.
   res://tests/test_orrery.gd` and the `_shot.gd` autoloads for screenshots (the
   visual layer is only verifiable by looking — see `memory/gdext-binding.md`).
 
+## The Godot harnesses: pictures and frame times
+
+`godot/tests/_*.gd` are autoload harnesses: each drives the running game the way
+a player would and either saves PNGs (`_shot.gd`, `_pork_shot.gd`, …) or prints
+frame times (`_perf.gd`). They run only when registered as an autoload, and the
+screenshot ones need a window. `godot/tests/run_harness.ps1` does the whole
+ritual — registers the autoload after `Sim`, launches, waits, restores
+`project.godot`, and kills **only the PID it started** if Godot lingers:
+
+```powershell
+powershell -File godot/tests/run_harness.ps1 -Harness _shot.gd            # PNGs → temp/AsteroidDefense/shots
+powershell -File godot/tests/run_harness.ps1 -Harness _perf.gd -Headless  # CPU cost per view, uncapped
+```
+
+Read `_perf.gd`'s output as: **ffi/frame** is the number of native binding calls
+the frame made (deterministic, the number to watch), **frame ms** is the wall
+clock. Run it `-Headless` for CPU cost — windowed, the desktop compositor pins
+the frame to the monitor's refresh even with vsync off, so a windowed run only
+shows a view that is *slower* than the display. The 2026-09-05 numbers, headless,
+before → after the per-frame caches: the 2D map **18.9 → 7.1 ms** and
+**764 → 29** native calls a frame; the 3D views 61 → 29 calls.
+
+Two traps the runner exists for. (1) Godot does not always exit on `quit()` here
+— the editor plugin's teardown can leave the process alive at 100 % CPU, which
+poisons the next measurement *and holds the debug DLL*, so the next
+`cargo build -p asteroid_gdext` fails with `Access is denied (os error 5)` and
+Godot keeps loading the stale binding (`Nonexistent function 'X' in base
+'Mission'`). (2) Other projects' Godot processes may be running on the same
+machine; the runner never touches them — kill only a PID you started.
+
 ## Layout
 
 ```

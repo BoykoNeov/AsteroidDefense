@@ -120,8 +120,12 @@ func _clear_mission_nodes() -> void:
 	_neo_orbit_lines.clear()
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	var t: float = Sim.t
+	# Cosmetic spin rates, per second of wall time rather than per frame: at a
+	# fixed per-frame step the rocks tumbled twice as fast on a 120 Hz display.
+	var spin: float = 0.6 * delta
+	var spin_x: float = 0.24 * delta
 	if Sim.bodies_online:
 		for el in Sim.planets:
 			body_nodes[el.name].position = Sim.pos3d(el, t)
@@ -147,8 +151,8 @@ func _process(_delta: float) -> void:
 	_nom_orbit_line.visible = active
 	if active:
 		ast_nominal.position = Sim.pos3d(Sim.ast_el, t)
-		ast_nominal.rotate_y(0.01)
-		ast_nominal.rotate_x(0.004)
+		ast_nominal.rotate_y(spin)
+		ast_nominal.rotate_x(spin_x)
 
 	# The deflected body needs a *solved* plan, not just a committed one: its track
 	# is the core's post-impulse arc and does not exist until the solve lands.
@@ -162,8 +166,8 @@ func _process(_delta: float) -> void:
 	ast_nominal.set_instance_shader_parameter("energy", 0.5 if burned else 2.2)
 	if ast_deflected.visible:
 		ast_deflected.position = Sim.pos3d(Sim.ast_defl_el, t)
-		ast_deflected.rotate_y(0.01)
-		ast_deflected.rotate_x(0.004)
+		ast_deflected.rotate_y(spin)
+		ast_deflected.rotate_x(spin_x)
 
 	# Hidden outside its propagated span, not drawn at ZERO — which in this
 	# heliocentric frame would put the comet on the Sun for most of the clock its
@@ -184,14 +188,14 @@ func _process(_delta: float) -> void:
 		_neo_orbit_lines[i].visible = on
 		if on:
 			_neo_nodes[i].position = Sim.pos3d(el, t)
-			_neo_nodes[i].rotate_y(0.008)
+			_neo_nodes[i].rotate_y(spin * 0.8)
 
 	if Sim.comet_online:
 		comet_node.visible = Sim.catalog_active(Sim.comet_el, t)
 		_comet_orbit_line.visible = comet_node.visible
 		if comet_node.visible:
 			comet_node.position = Sim.pos3d(Sim.comet_el, t)
-			comet_node.rotate_y(0.006)
+			comet_node.rotate_y(spin * 0.6)
 			_update_comet_tail()
 
 	if not Sim.interceptor_online:

@@ -116,6 +116,25 @@ var EPOCH0_TDB := 883569600.0          # 2028-01-01 TDB, the core's default
 
 var t := 0.0                           # mission-elapsed time, days
 var paused := false
+## Native binding calls made so far this frame — reset at the top of `_process`.
+## A measurement, not a control: `tests/_perf.gd` reads it to price each view, and
+## the point of counting is that a per-frame cost here has no other symptom.
+var ffi_calls := 0
+## Per-frame memo of `pos_ecl` answers, `name -> [t_days, Vector3]`. Cleared at the
+## top of `_process`, so it can only ever serve a value computed this frame.
+##
+## Three layers ask for the same bodies at the same clock every frame: the 3D
+## scene places the node, the tag layer projects it for a label, the HUD ranges
+## it. Each of those was a separate native lookup — around sixty a frame, at
+## 8–13 µs each — for answers that are identical within a frame by construction.
+## The memo does not make any lookup cheaper; it makes the second and third ask
+## free. A hit requires the exact `t_days` requested, so a caller sampling other
+## epochs (the impact point, an orbit walk) can never be handed the clock's value.
+var _pos_memo := {}
+## Where Earth is at the impact epoch, ecliptic AU — the "PREDICTED IMPACT" mark
+## two views draw every frame. Fixed for the life of a threat solution, so it is
+## read once on install rather than looked up sixty times a second.
+var impact_point_ecl := Vector3.ZERO
 var warp_idx := 3
 var time_dir := 1.0                    # +1 forward, -1 reverse (run time backward)
 # Selectable warp rates, days/sec — extended into years/sec so the long clock
@@ -466,6 +485,8 @@ func tdb(t_days: float = INF) -> float:
 
 
 func _process(delta: float) -> void:
+	ffi_calls = 0
+	_pos_memo.clear()
 	# These all run while paused: a paused clock does not mean a paused build, an
 	# operator who pauses mid-edit still wants their verdict solved, and the Tier-2
 	# measurement (kicked from the menu) must land whatever the clock is doing.
@@ -646,6 +667,9 @@ func _install_threat() -> void:
 	cap_km = mission.capture_radius_m() / 1000.0
 	R_E = mission.earth_radius_m() / 1000.0
 	nom_perigee_km = mission.nominal_perigee_m() / 1000.0
+	# Earth at the impact epoch: the predicted-impact mark. Read once here; the
+	# epoch is a config input and Earth's ephemeris does not change under a rebuild.
+	impact_point_ecl = _lookup_ecl(earth_el, T_IMPACT)
 	# The Tier-2 shifts are NOT measured with the build — that ~64 s would delay this
 	# very threat solution. They are measured on demand when the operator opens the
 	# force-model menu (`request_tier2_preview`), so `tier2_ready` starts false.
@@ -1927,19 +1951,37 @@ func req_dv_label() -> String:
 ## binding-side test pins every drawn id across the whole span so it stays that
 ## way.
 func pos_ecl(el: Dictionary, t_days: float) -> Vector3:
+	# Memoized per frame — see `_pos_memo`. Keyed by name, checked by epoch: a hit
+	# is the same body at the same instant, asked again by another layer.
+	var key: String = el.get("name", "")
+	var hit: Array = _pos_memo.get(key, [])
+	if not hit.is_empty() and hit[0] == t_days:
+		return hit[1]
+	var p := _lookup_ecl(el, t_days)
+	_pos_memo[key] = [t_days, p]
+	return p
+
+
+## The uncached lookup behind `pos_ecl`. Orbit walks call this directly: they ask
+## for hundreds of epochs of one body in a row, and routing those through the memo
+## would evict the clock's answer for that body every sample and cache nothing useful.
+func _lookup_ecl(el: Dictionary, t_days: float) -> Vector3:
 	match el.get("source", ""):
 		"ephem":
 			if not bodies_online:
 				return Vector3.ZERO
+			ffi_calls += 1
 			return mission.body_position_ecl_au(el.naif_id, tdb(t_days))
 		"threat":
 			if not threat_active(t_days):
 				return Vector3.ZERO
+			ffi_calls += 1
 			return mission.asteroid_position_ecl_au(tdb(t_days))
 		"threat_defl":
 			# No plan means no deflected arc to sample — not a zero-length one.
 			if not has_plan() or not threat_active(t_days):
 				return Vector3.ZERO
+			ffi_calls += 1
 			return mission.deflected_position_ecl_au(tdb(t_days))
 		"catalog":
 			# Orrery scenery, flown in the same field on the build worker. Gated on
@@ -1947,6 +1989,7 @@ func pos_ecl(el: Dictionary, t_days: float) -> Vector3:
 			# the binding returns ZERO, which here is the Sun.
 			if not catalog_active(el, t_days):
 				return Vector3.ZERO
+			ffi_calls += 1
 			return mission.catalog_position_ecl_au(el.catalog_index, tdb(t_days))
 	# Every drawn body now names a real source. Reaching here is a bug, and it must
 	# not present as one: ZERO is the Sun in this frame, so say so out loud rather
@@ -1987,6 +2030,7 @@ func orbit_points(el: Dictionary, count: int = 192) -> PackedVector3Array:
 			return pts
 		if src == "threat_defl" and not has_plan():
 			return pts
+		ffi_calls += 1
 		var track: PackedVector3Array = mission.asteroid_track_ecl_au(count) \
 			if src == "threat" else mission.deflected_track_ecl_au(count)
 		for p in track:
@@ -2004,7 +2048,7 @@ func orbit_points(el: Dictionary, count: int = 192) -> PackedVector3Array:
 		var t1: float = clampf(t0 + period_d, T_MIN, T_MAX)
 		for k in count + 1:
 			var td: float = t0 + (t1 - t0) * float(k) / float(count)
-			pts.append(ecl_to_godot(pos_ecl(el, td)))
+			pts.append(ecl_to_godot(_lookup_ecl(el, td)))
 		return pts
 
 	if src == "catalog":
@@ -2014,6 +2058,7 @@ func orbit_points(el: Dictionary, count: int = 192) -> PackedVector3Array:
 		if not mission_online or not el.has("catalog_index"):
 			return pts
 		var idx: int = el.catalog_index
+		ffi_calls += 3
 		var period_s: float = mission.catalog_orbit_period_seconds(idx)
 		var span: PackedFloat64Array = mission.catalog_span_tdb(idx)
 		# One orbital period, not the whole table. A NEO's states cover ~50 years

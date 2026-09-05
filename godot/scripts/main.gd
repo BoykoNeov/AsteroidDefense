@@ -5,12 +5,26 @@ extends Control
 ## comes from the styling layer, never from downscaling.
 
 const CRT_SHADER := preload("res://shaders/crt.gdshader")
+const PERSIST_SHADER := preload("res://shaders/phosphor_persist.gdshader")
 
 const PHOSPHOR_GREEN := Color(0.25, 1.0, 0.45)
 const PHOSPHOR_AMBER := Color(1.0, 0.62, 0.13)
+## Phosphor persistence time constant, seconds: a trail left by a moving body
+## fades to 1/e of its brightness in this long. Wall time, not frames, so the
+## look does not depend on the refresh rate.
+const PERSIST_TAU := 0.14
 
 var crt_mat: ShaderMaterial
 var viewport: SubViewport
+## The 3D world, rendered in its own viewport (see `_ready`). Only the 3D line
+## work goes through here; every Control is in `viewport` above it.
+var world_vp: SubViewport
+## Accumulates `world_vp` frames into the phosphor-persistence image.
+var persist_vp: SubViewport
+var persist_mat: ShaderMaterial
+var _persist_rect: ColorRect
+## Shows the persisted world inside the main viewport, under the HUD.
+var world_view: TextureRect
 var solar: SolarSystem
 var rig: OrbitCameraRig
 var hud: HUD
@@ -43,18 +57,71 @@ func _ready() -> void:
 	add_child(container)
 
 	viewport = SubViewport.new()
-	viewport.own_world_3d = true
 	viewport.handle_input_locally = true
+	# Nothing 3D renders here any more — the world has its own viewport below —
+	# so the empty 3D pass is switched off. The camera rig (a Node3D) still lives
+	# here for input ordering; it needs a tree, not a renderer.
+	viewport.disable_3d = true
 	container.add_child(viewport)
+
+	# --- The 3D world, twice removed --------------------------------------
+	# The world renders into `world_vp`, which feeds `persist_vp`, which the main
+	# viewport shows as a texture under the HUD. Two things the shared viewport
+	# could not give:
+	#   - 4x MSAA on the line work. Every body and orbit here is a one-pixel line,
+	#     and un-antialiased they crawl as the camera moves. The HUD text stays
+	#     crisp because it is not in this viewport.
+	#   - phosphor persistence: a moving body leaves a trail that decays in
+	#     PERSIST_TAU. Text and tags must not smear, so they are drawn above it.
+	# `world_vp` is a child of `persist_vp` so it renders first each frame; the
+	# persistence shader then reads this frame's world, not last frame's.
+	persist_vp = SubViewport.new()
+	persist_vp.name = "Persist"
+	persist_vp.disable_3d = true
+	# Never cleared: the image IS the accumulation. HDR (16-bit float) so the decay
+	# reaches black — in 8-bit a value times 0.9 rounds back to itself below ~4/255
+	# and every trail leaves a permanent faint ghost.
+	persist_vp.render_target_clear_mode = SubViewport.CLEAR_MODE_NEVER
+	persist_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	persist_vp.use_hdr_2d = true
+	viewport.add_child(persist_vp)
+
+	world_vp = SubViewport.new()
+	world_vp.name = "World"
+	world_vp.own_world_3d = true
+	world_vp.msaa_3d = Viewport.MSAA_4X
+	world_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	persist_vp.add_child(world_vp)
 
 	solar = SolarSystem.new()
 	solar.name = "SolarSystem"
-	viewport.add_child(solar)
+	world_vp.add_child(solar)
 
+	var cam := Camera3D.new()
+	cam.name = "Camera"
+	world_vp.add_child(cam)
+	cam.current = true
+
+	_persist_rect = ColorRect.new()
+	_persist_rect.name = "PersistBlend"
+	persist_mat = ShaderMaterial.new()
+	persist_mat.shader = PERSIST_SHADER
+	persist_mat.set_shader_parameter("world_tex", world_vp.get_texture())
+	_persist_rect.material = persist_mat
+	persist_vp.add_child(_persist_rect)
+
+	world_view = TextureRect.new()
+	world_view.name = "WorldView"
+	world_view.texture = persist_vp.get_texture()
+	world_view.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	viewport.add_child(world_view)
+
+	# The rig stays in the main viewport (input ordering — see orbit_camera.gd)
+	# and drives the world's camera by global transform.
 	rig = OrbitCameraRig.new()
 	rig.name = "CameraRig"
+	rig.attach_camera(cam)
 	viewport.add_child(rig)
-	rig.camera.current = true
 
 	map2d = Map2D.new()
 	map2d.name = "Map2D"
@@ -129,6 +196,12 @@ func _ready() -> void:
 			_focus_targets.append([body.name,
 				func() -> Vector3: return Sim.pos3d(body, Sim.t), dist])
 	_apply_focus()
+
+
+func _process(delta: float) -> void:
+	# Frame-rate independent decay: keep^(frames per second) is a fixed fraction
+	# per second whatever the refresh rate.
+	persist_mat.set_shader_parameter("keep", exp(-delta / PERSIST_TAU))
 
 
 func _input(event: InputEvent) -> void:
@@ -357,7 +430,21 @@ func _close_other_bottom_panels(keep: Control) -> void:
 func _show_view(which: Control) -> void:
 	for v: Control in [map2d, enc, pork]:
 		v.visible = (v == which)
-	tags.visible = which == null
+	var world_shown: bool = which == null
+	tags.visible = world_shown
+	# The 2D views paint an opaque frame, so the 3D world under them is invisible
+	# work: stop rendering it (and accumulating it) while one is up. On return the
+	# accumulation is cleared once, so the world does not fade in from a picture
+	# that is minutes stale.
+	world_view.visible = world_shown
+	var mode := SubViewport.UPDATE_ALWAYS if world_shown else SubViewport.UPDATE_DISABLED
+	world_vp.render_target_update_mode = mode
+	persist_vp.render_target_update_mode = mode
+	# Nor does the hidden scene need its ~30 body lookups a frame; it catches up on
+	# the first frame back, since every position is a function of the clock.
+	solar.set_process(world_shown)
+	if world_shown:
+		persist_vp.render_target_clear_mode = SubViewport.CLEAR_MODE_ONCE
 
 
 ## Park the clock on the live asteroid at its closest approach — the one moment
@@ -389,8 +476,12 @@ func _apply_focus() -> void:
 
 func _sync_overlay_sizes() -> void:
 	var vs := Vector2(viewport.size)
-	for c: Control in [map2d, enc, pork, tags, hud, planner, tier2_panel, tractor_panel,
-			threat_panel, boot]:
+	# The world and persistence viewports match the main one pixel for pixel, so
+	# `Camera3D.unproject_position` (the tag layer) lands where the HUD expects.
+	world_vp.size = viewport.size
+	persist_vp.size = viewport.size
+	for c: Control in [world_view, _persist_rect, map2d, enc, pork, tags, hud, planner,
+			tier2_panel, tractor_panel, threat_panel, boot]:
 		if is_instance_valid(c):
 			c.position = Vector2.ZERO
 			c.size = vs

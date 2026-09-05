@@ -29,7 +29,11 @@ func _check(ok: bool, msg: String) -> void:
 
 func _init() -> void:
 	var sim = load("res://scripts/sim.gd").new()
+	var t_ready0 := Time.get_ticks_msec()
 	sim._ready()
+	# How long the caller was held while the scenario build was kicked off. The
+	# build itself is ~10-30 s of integration; a blocking build would show here.
+	var ready_ms := Time.get_ticks_msec() - t_ready0
 
 	if not sim.bodies_online:
 		print("SKIP  no ephemeris on this machine:\n%s" % sim.kernel_error)
@@ -131,8 +135,12 @@ func _init() -> void:
 		OS.delay_msec(20)
 	_check(sim.build_state == sim.Build.READY,
 		"the scenario built (%s)" % sim.build_error)
-	_check(polls > 1, "the build ran on a worker, not the caller (%d polls, %d ms)"
-		% [polls, Time.get_ticks_msec() - t0])
+	# Off-thread is judged by what the caller paid, not by how many polls saw the
+	# build in flight: `polls > 1` was the old check, and it raced — on a loaded
+	# machine the checks above take longer than the worker, the first poll finds
+	# the build already landed, and a correct build "fails" as blocking.
+	_check(ready_ms < 3000, "the build ran on a worker, not the caller (_ready %d ms; %d polls, %d ms to land)"
+		% [ready_ms, polls, Time.get_ticks_msec() - t0])
 	_check(sim.mission_online, "the threat is online once the build lands")
 
 	# The b-plane view lights WITH the threat (3C-2c): its geometry is the same

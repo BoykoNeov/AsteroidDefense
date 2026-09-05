@@ -119,10 +119,24 @@ func _run() -> void:
 	Sim.paused = false
 	await _settle(2)
 
+	# 0c. PHOSPHOR PERSISTENCE, which only shows while things move: at the top warp
+	#     step every inner body sweeps degrees of orbit per frame, so each should
+	#     trail a fading arc behind it, while the HUD text and tags (drawn above
+	#     the persisted layer) stay sharp. A paused shot cannot show this, and no
+	#     other shot here runs the clock.
+	Sim.paused = false
+	Sim.jump(0.0)
+	Sim.warp_idx = Sim.WARP_STEPS.size() - 1
+	await _settle(40)
+	await _shot("trails_1_max_warp")
+	print("SHOT  trails: warp=%s t=%.0f d (bodies should streak, text should not)"
+		% [Sim.warp_label(), Sim.t])
+	Sim.warp_idx = 3
+	Sim.jump(0.0)
+	Sim.paused = false
+
 	# Show the b-plane view: exactly what [3] does, without an InputMap round-trip.
-	main.enc.visible = true
-	main.map2d.visible = false
-	main.tags.visible = false
+	main._show_view(main.enc)
 	main.hud.view_name = "ENCOUNTER B-PLANE"
 
 	# 1. No plan: the incoming impact, and nothing pretending to be a deflection.
@@ -182,9 +196,16 @@ func _run() -> void:
 	Sim.jump(0.0)
 	await _settle(2)
 
+	# 6b. The same view with the keyhole map off — [H] — so the circles are shown to
+	#     be a toggle and not baked into the plot.
+	main.enc.toggle_keyholes()
+	await _settle(3)
+	await _shot("enc_7_keyholes_off")
+	main.enc.toggle_keyholes()
+
 	# 7. The planner beside it — the two panels must agree, and this is the pair a
 	#    player reads against each other.
-	main.enc.visible = false
+	main._show_view(null)
 	main.planner.visible = true
 	Sim.planner_open = true
 	Sim.set_plan(Sim.threat_period_d(), 0.2, true)

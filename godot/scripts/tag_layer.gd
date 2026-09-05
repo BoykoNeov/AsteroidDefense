@@ -80,9 +80,10 @@ func _draw() -> void:
 	if Sim.interceptor_online and Sim.interceptor_phase(t) == "CRUISE":
 		_tag_cross(cam, Sim.interceptor_pos(t), "ATLAS-1", bright)
 
-	# Predicted impact point: Earth's position at the impact epoch.
+	# Predicted impact point: Earth's position at the impact epoch — a constant of
+	# the threat solution, read from Sim rather than looked up every frame.
 	if not burned:
-		var p_imp: Vector3 = Sim.pos3d(Sim.earth_el, Sim.T_IMPACT)
+		var p_imp: Vector3 = Sim.ecl_to_godot(Sim.impact_point_ecl)
 		if Sim.blink(2.2):
 			_tag_x(cam, p_imp, "PREDICTED IMPACT E-%04d" % int(maxf(0.0, Sim.T_IMPACT - t)), bright)
 

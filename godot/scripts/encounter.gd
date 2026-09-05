@@ -65,6 +65,8 @@ var _span := PackedFloat64Array()
 ## read from the core (closed-form; see Sim.keyhole_circles). Drawn when
 ## `_keyholes` is on and the frame is pinned.
 const KEYHOLE_MAX_YEARS := 7
+## How many circles get a caption at once (the widest in frame; see _draw_keyholes).
+const KEYHOLE_LABELS := 7
 var _circles: Array = []
 var _keyholes := true
 
@@ -211,7 +213,17 @@ func _draw_keyholes(center: Vector2, ppl: float, dim: Color, faint: Color) -> vo
 	if _circles.is_empty():
 		return
 	var rect := Rect2(Vector2.ZERO, size).grow(-MARGIN)
-	var placed: Array[float] = []
+
+	# First pass: the circles, every one. Brightness follows keyhole width, so the
+	# eye lands on the resonances that matter — a 25 km keyhole is a real target
+	# and a 0.03 km one is a hairline — and the 3:4 (the one the project flew) is
+	# drawn solid. The first time this map ran, all ~40 circles came out at one
+	# weight with a caption each, and the picture was a thicket: the widths went
+	# unread because nothing said which of forty lines to read first.
+	var widest := 0.0
+	for c: Dictionary in _circles:
+		widest = maxf(widest, maxf(float(c["far_width_km"]), float(c["near_width_km"])))
+	var labelled: Array = []                # [y_at, x_at, text, colour, width]
 	for c: Dictionary in _circles:
 		var cc: Vector2 = _plot(center, ppl, Vector3(0.0, float(c["center_zeta_km"]), 0.0))
 		var r: float = float(c["radius_km"]) / Sim.LD_KM * ppl
@@ -219,33 +231,50 @@ func _draw_keyholes(center: Vector2, ppl: float, dim: Color, faint: Color) -> vo
 		if cc.distance_to(center) - r > rect.size.length():
 			continue
 		var is_three_four: bool = int(c["h"]) == 3 and int(c["k"]) == 4
-		var col := Color(dim, 0.9) if is_three_four \
-			else Color(faint.r * 1.6, faint.g * 1.6, faint.b * 1.6, 0.8)
-		var segs := 96 if r < 2000.0 else 256
-		draw_arc(cc, r, 0.0, TAU, segs, col, 1.4 if is_three_four else 1.0)
-		# Label at the far crossing of the zeta axis if it is on the plot, else the
-		# near one; skip when neither is.
+		# Which crossing of the zeta axis is on the plot decides where the caption
+		# goes and which width it quotes; neither on-plot means no caption.
 		var far := _plot(center, ppl, Vector3(float(c["far_xi_km"]), float(c["far_zeta_km"]), 0.0))
 		var near := _plot(center, ppl,
 			Vector3(float(c["near_xi_km"]), float(c["near_zeta_km"]), 0.0))
-		var at: Vector2
-		var width_km: float
+		var at := Vector2.INF
+		var width_km := 0.0
 		if rect.has_point(far):
 			at = far
 			width_km = float(c["far_width_km"])
 		elif rect.has_point(near):
 			at = near
 			width_km = float(c["near_width_km"])
+		# Width on a log scale from the widest down to a thousandth of it.
+		var w_rel: float = clampf(1.0 + log(maxf(width_km, widest * 1e-3) / widest) / log(1000.0), 0.0, 1.0)
+		var col: Color
+		if is_three_four:
+			col = Color(dim, 0.95)
 		else:
-			continue
-		var y := at.y
+			var g: float = lerpf(faint.r * 1.15, dim.r, w_rel)
+			col = Color(g, g, g, lerpf(0.45, 0.9, w_rel))
+		var segs := 96 if r < 2000.0 else 256
+		draw_arc(cc, r, 0.0, TAU, segs, col, 1.4 if is_three_four else 1.0)
+		if at != Vector2.INF:
+			var txt := "%d:%d  KEYHOLE %s KM" % [int(c["h"]), int(c["k"]), String.num(width_km, 2)]
+			labelled.append([at.y, at.x, txt, col, width_km + (1e9 if is_three_four else 0.0)])
+
+	# Second pass: captions for the widest few only, the 3:4 always among them.
+	# Every circle used to get one; at the default span that is ~30 captions
+	# stacked down the zeta axis through Earth, the b-point and the impact mark.
+	# The rest are on the plot uncaptioned — zoom in and they get their turn, since
+	# the budget is spent on whatever is widest among the circles in frame.
+	labelled.sort_custom(func(a: Array, b: Array) -> bool: return a[4] > b[4])
+	var budget: int = mini(labelled.size(), KEYHOLE_LABELS)
+	var placed: Array[float] = []
+	for i in budget:
+		var e: Array = labelled[i]
+		var y: float = e[0]
 		for py: float in placed:
 			if absf(y - py) < _fs + 2.0:
 				y = py + _fs + 2.0
 		placed.append(y)
-		var txt := "%d:%d  KEYHOLE %s KM" % [int(c["h"]), int(c["k"]), String.num(width_km, 2)]
-		draw_string(_font, Vector2(at.x + 8.0, y + 4.0), txt,
-			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 3, col)
+		draw_string(_font, Vector2(e[1] + 8.0, y + 4.0), e[2],
+			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 3, e[3])
 
 
 ## What the marks mean, stated once in a corner instead of on top of them. The

@@ -101,3 +101,49 @@ a stale "Identifier not found: Sim" for freshly scanned scripts, runtime clean.
 scenario-designer UI surface, Moon + Earth-encounter zoom (moon marker on the
 1 LD ring), sound (Geiger-style telemetry ticks), CRT phosphor persistence
 (feedback buffer).
+
+## Measured and given its phosphor — 2026-09-05 (frame-time harness, caches, world viewport, persistence)
+
+**Architecture changed (main.gd):** the 3D world now renders in its own `world_vp` (own_world_3d,
+**4× MSAA**) nested inside `persist_vp` (2D, `CLEAR_MODE_NEVER`, `use_hdr_2d`), whose single ColorRect runs
+`shaders/phosphor_persist.gdshader`; the main viewport shows it as a TextureRect **under** the HUD/tags/2D
+views, and the CRT shader still wraps everything. `OrbitCameraRig` stays in the main viewport (input
+ordering — encounter.gd swallows the wheel first) and drives a `Camera3D` living in the world by global
+transform (`attach_camera`); `_show_view` disables both render targets + `solar.set_process(false)` while
+a 2D view is up and clears the accumulation once on return.
+
+**Persistence is PEAK-HOLD, not an average.** First version `world·(1−keep)+prev·keep` made fast movers
+vanish (drawn at 6 %) — `trails_1_max_warp.png` showed tags pointing at nothing. Shipped:
+`max(world, prev·keep)` via `hint_screen_texture`, `keep = exp(−Δt/PERSIST_TAU=0.14 s)`, HDR target so
+the decay reaches black. Static line work is exactly its own brightness.
+
+**Perf method (the reusable part):** `godot/tests/_perf.gd` (autoload harness; prints frame ms,
+`Sim.ffi_calls` per frame — a counter reset at the top of `Sim._process` — draw calls, plus a raw-lookup
+microbench) driven by **`godot/tests/run_harness.ps1 -Harness _x.gd [-Headless]`** which registers the
+autoload, runs, restores project.godot and kills only its own PID. **Run `-Headless` for CPU cost**: windowed,
+the compositor pins every view to 8.41 ms/119 fps regardless of content. `Performance.TIME_PROCESS` is
+garbage on this build (hundreds of ms beside an 8 ms frame) — dropped.
+
+**What it found and what fixed it:** map2d re-walked six orbits from the ephemeris inside `_draw` every
+frame (2.7 ms/planet trace; 764 native calls, 18.9 ms/frame) → cached traces (`_traces`, dropped on
+mission_ready / plan_changed→deflected only) → **7.1 ms, 29 calls**. 3D layers asked the same positions
+2–3× a frame (61 calls) → per-frame memo in `Sim.pos_ecl` keyed by name+exact epoch, cleared each
+`_process`, orbit walks bypass it via `Sim._lookup_ecl` → 29 calls. `Sim.impact_point_ecl` read once on
+install. Body spin is now per second, not per frame.
+
+**Keyhole map `[H]` SEEN for the first time** (was "unrun"): 27 circles + 30 stacked captions = a thicket →
+circle brightness by log keyhole width (3:4 solid), captions budgeted to the 7 widest in frame
+(`KEYHOLE_LABELS`). Toggle verified (`enc_7_keyholes_off`).
+
+**Traps (new):** (1) **Godot lingers after `quit()` at 100 % CPU** (plugin teardown) — it poisons timings
+AND **holds the debug DLL** → `cargo build -p asteroid_gdext` fails `Access is denied (os error 5)` → Godot
+runs the stale binding (`Nonexistent function 'bplane_frame_pinned'`). A `| tail` hid the failure and a
+wrong epoch threshold in my wait loop let Godot launch mid-build. (2) **Other sessions' Godot processes
+run on this box** (pebble_bed, River Basin) — kill only a PID you launched. (3) Non-ASCII in `.ps1` =
+parse error under PS 5.1 (curly dash → quote). (4) `test_orrery`'s `polls > 1` raced a loaded machine;
+now asserts `_ready()` < 3 s (measured 22 ms). 83/83.
+
+**Follow-ups** are sized for a smaller model in `docs/plans/2026-09-05-visuals-performance-followups.md`
+(parallelise mount+comet in the build worker to cut the 10–30 s startup wait; batched FFI positions; tag
+de-collision; keyhole-caption vs b-caption collision; persistence key + belt smear at max warp; encounter
+polylines; Tier-3 ellipse on the b-plane).

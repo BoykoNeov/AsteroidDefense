@@ -8,11 +8,27 @@ var _font: Font
 var _fs := 13
 var _sweep := 0.0
 
+## Orbit traces in plot units (ecliptic AU, y already flipped for the screen),
+## keyed by body name. Sampled from the core once and mapped to pixels per frame.
+##
+## This plot redraws every frame (the sweep turns, the markers blink), and it used
+## to re-walk every orbit from the ephemeris inside `_draw` — four planets, the
+## threat and the deflected arc, ~180 native lookups each — for polylines that do
+## not change from one frame to the next. Measured at ~2.7 ms per planet trace,
+## it was ~11 ms of the frame, and this view ran at half the rate of every other.
+## Now a trace is fetched when first drawn and dropped only when its source can
+## have changed: everything on `mission_ready` (a rebuilt threat lives on a new
+## orbit), the deflected arc on `plan_changed` (a new solve is a new arc).
+var _traces := {}
+
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 	_font = Sim.mono_font
+	Sim.mission_ready.connect(func() -> void: _traces.clear())
+	Sim.plan_changed.connect(func() -> void:
+		_traces.erase(Sim.ast_defl_el.get("name", "")))
 
 
 func _process(delta: float) -> void:
@@ -140,7 +156,7 @@ func _draw_threat(center: Vector2, s: float, t: float, bright: Color,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 1, bright)
 
 	if not burned and Sim.blink(2.2):
-		var p_x := _to_screen(Sim.pos_ecl(Sim.earth_el, Sim.T_IMPACT), center, s)
+		var p_x := _to_screen(Sim.impact_point_ecl, center, s)
 		draw_line(p_x + Vector2(-7, -7), p_x + Vector2(7, 7), bright, 1.5)
 		draw_line(p_x + Vector2(-7, 7), p_x + Vector2(7, -7), bright, 1.5)
 
@@ -157,16 +173,31 @@ func _map_pos(scene_pos: Vector3, center: Vector2, s: float) -> Vector2:
 ## a Kepler body has.
 func _orbit_trace(el: Dictionary, center: Vector2, s: float, col: Color,
 		dashed: bool = false) -> void:
-	var pts := PackedVector2Array()
-	for p in Sim.orbit_points(el, 180):
-		pts.append(_map_pos(p, center, s))
-	if pts.size() < 2:
+	var au := _trace_plot_units(el)
+	if au.size() < 2:
 		return
+	# One native transform for the whole polyline: plot units -> pixels.
+	var pts: PackedVector2Array = Transform2D(0.0, Vector2(s, s), 0.0, center) * au
 	if dashed:
 		for k in range(0, pts.size() - 1, 2):
 			draw_line(pts[k], pts[k + 1], col, 1.0)
 	else:
 		draw_polyline(pts, col, 1.0)
+
+
+## The cached trace for a body (see `_traces`), fetched from the core on a miss.
+## Stored in the units `_to_screen` maps from — ecliptic AU with y flipped — so
+## the per-frame step is a single scale-and-offset.
+func _trace_plot_units(el: Dictionary) -> PackedVector2Array:
+	var key: String = el.get("name", "")
+	if _traces.has(key):
+		return _traces[key]
+	var out := PackedVector2Array()
+	for p in Sim.orbit_points(el, 180):
+		# Scene units -> ecliptic AU (x, y) -> plot units (x, -y).
+		out.append(Vector2(p.x, p.z) / Sim.AU)
+	_traces[key] = out
+	return out
 
 
 func _dashed_line(a: Vector2, b: Vector2, col: Color, dash: float, gap: float) -> void:

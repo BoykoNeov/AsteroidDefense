@@ -93,6 +93,14 @@
 //! The measured consequence that motivated this module survives it: near-grazing
 //! resonances have the steepest gradient and the *narrowest* keyholes; the wide
 //! ones are far out where the deflection is weak.
+//!
+//! **How much order-unity slack, measured.** The one keyhole this project has
+//! flown ([`keyhole_target`](crate::keyhole_target), the 3:4 at Δv 0.216550 m/s)
+//! sits **20.4 km** from its circle against a **24.9 km** width — 1.64 *half*-
+//! widths, i.e. outside the band by this definition — and it returns *inside
+//! Earth* three years later. So the width here is conservative by about 1.6× on
+//! the one case with an answer. Quote it as "how many keyhole widths away", never
+//! as a yes/no: the binary would say no to a plan that comes back.
 
 use nalgebra::{Vector2, Vector3};
 
@@ -233,6 +241,22 @@ pub struct OpikFrame {
     pub sin_theta: f64,
 }
 
+/// Which of the two places a vertical line `ξ = const` crosses a resonant circle.
+///
+/// Named by the coordinate rather than by "near"/"far", because which one is
+/// nearer Earth depends on the sign of the circle's centre `ζ_c` and a name that
+/// silently flips with the geometry is a name that gets used wrongly. Use
+/// [`ResonantCircle::points_at_xi`] and compare `norm()` when the question really
+/// is "which is closer to Earth".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircleBranch {
+    /// `ζ = ζ_c − √(R² − ξ²)` — the lower-ζ crossing (arriving later against
+    /// Earth's motion, since `ζ̂` opposes it).
+    Minus,
+    /// `ζ = ζ_c + √(R² − ξ²)` — the upper-ζ crossing.
+    Plus,
+}
+
 /// A resonant-return circle: the locus of b-plane points whose flyby leaves the
 /// asteroid on the `h:k` resonant orbit. Centred on the ζ-axis.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -326,6 +350,61 @@ impl ResonantCircle {
         let xi = xi2.sqrt();
         Some((Vector2::new(xi, zeta), Vector2::new(-xi, zeta)))
     }
+
+    /// Where the vertical line `ξ = xi` crosses this circle: `(minus, plus)`,
+    /// the lower-ζ point first. `None` when the line misses the circle
+    /// (`|ξ| > radius`) — **the reachability answer**, and the reason this is not
+    /// a bare `√(R² − ξ²)` at a call site: a resonance whose circle is narrower
+    /// than the ξ a deflection naturally lands on cannot be aimed at from that ξ
+    /// at all, and a NaN would say so only by poisoning everything downstream.
+    ///
+    /// At `|ξ| = radius` the two coincide (the tangent point).
+    pub fn points_at_xi(&self, xi: f64) -> Option<(Vector2<f64>, Vector2<f64>)> {
+        let disc = self.radius * self.radius - xi * xi;
+        if !(disc >= 0.0) {
+            return None;
+        }
+        let root = disc.sqrt();
+        Some((
+            Vector2::new(xi, self.center_zeta - root),
+            Vector2::new(xi, self.center_zeta + root),
+        ))
+    }
+
+    /// One of the two [`points_at_xi`](Self::points_at_xi), chosen by branch.
+    pub fn point_at_xi(&self, xi: f64, branch: CircleBranch) -> Option<Vector2<f64>> {
+        self.points_at_xi(xi).map(|(minus, plus)| match branch {
+            CircleBranch::Minus => minus,
+            CircleBranch::Plus => plus,
+        })
+    }
+
+    /// The point of the circle nearest an arbitrary b-plane point — the radial
+    /// projection of `p` onto the circle from its centre `(0, ζ_c)`.
+    ///
+    /// `None` only when `p` *is* the centre, where every point of the circle is
+    /// equidistant and "nearest" has no answer. A caller wanting a number there
+    /// wants [`Self::signed_distance`], which is `−radius` and well defined.
+    pub fn closest_point_to(&self, p: Vector2<f64>) -> Option<Vector2<f64>> {
+        let centre = Vector2::new(0.0, self.center_zeta);
+        let d = p - centre;
+        let n = d.norm();
+        if !(n > 0.0) {
+            return None;
+        }
+        Some(centre + d * (self.radius / n))
+    }
+
+    /// How far `p` is from the circle, metres: **positive outside** the circle,
+    /// negative inside it, zero on it. `|p − (0, ζ_c)| − radius`.
+    ///
+    /// This is the raw distance to the *locus*, not a statement about the return.
+    /// Whether that distance is small enough to matter is the keyhole width, and
+    /// the width is only meaningful where the gradient was evaluated — see
+    /// [`OpikFrame::nearest_keyhole`], which pairs the two.
+    pub fn signed_distance(&self, p: Vector2<f64>) -> f64 {
+        (p - Vector2::new(0.0, self.center_zeta)).norm() - self.radius
+    }
 }
 
 /// The linearised keyhole at one point of a resonant circle.
@@ -339,6 +418,59 @@ pub struct Keyhole {
     pub semi_major_axis_tolerance: f64,
     /// The keyhole's full width across the circle, metres: `Δa'_tol / |∇a'|`.
     pub width: f64,
+}
+
+/// How close a given b-plane point came to one resonant return's keyhole — the
+/// answer to *"where does this plan leave the rock, in keyhole terms?"*.
+///
+/// The distance is to the **circle**, in the b-plane, in metres. That is a map
+/// coordinate and not a prediction of a return: `keyhole.rs`'s module doc puts
+/// the closed form's absolute placement error at `δa'/a' ≈ 1.3e-4`, which over
+/// an `h`-year return is hours of arrival slip — a million kilometres of Earth's
+/// motion against a keyhole tens of kilometres wide. Only a flown return says
+/// what actually happens. What the map *is* good for is the gradient, and the
+/// gradient is what [`Keyhole::width`] is, so the comparison of `distance`
+/// against `half_width` is self-consistent even where the absolute placement is
+/// not: it says how many keyhole widths of aiming error this plan carries.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyholeProximity {
+    /// The resonance whose circle this is.
+    pub circle: ResonantCircle,
+    /// The point on that circle nearest the queried b-point, `(ξ, ζ)` metres.
+    pub closest_point: Vector2<f64>,
+    /// Distance from the queried point to the circle, metres: **positive
+    /// outside** the circle, negative inside it.
+    pub signed_distance: f64,
+    /// The linearised keyhole evaluated **at `closest_point`** — the place the
+    /// plan would have to move to, so the width quoted is the width of the door
+    /// it is aiming at rather than of some other point of the same circle.
+    pub keyhole: Keyhole,
+}
+
+impl KeyholeProximity {
+    /// Half the keyhole's full width — the tolerance `signed_distance` is
+    /// measured against. Infinite at a near-tangency circle (radius → 0, where
+    /// `∇a' → 0`), which [`OpikFrame::keyhole_at`] returns as infinity on
+    /// purpose rather than clamping.
+    pub fn half_width(&self) -> f64 {
+        0.5 * self.keyhole.width
+    }
+
+    /// Whether the queried point lies inside the keyhole band — i.e. the plan,
+    /// as aimed, sets up this resonant return. See the type doc before quoting
+    /// this as a prediction: it is the map's answer, not a flown one.
+    pub fn inside(&self) -> bool {
+        self.signed_distance.abs() <= self.half_width()
+    }
+
+    /// `|signed_distance| / half_width` — how many keyhole half-widths of aiming
+    /// error the plan carries. Dimensionless, so it survives a comparison the
+    /// absolute placement does not: `< 1` is inside the door, `10` is ten doors
+    /// away. This, not the metres, is the honest way to rank two keyholes
+    /// against each other.
+    pub fn widths_away(&self) -> f64 {
+        self.signed_distance.abs() / self.half_width()
+    }
 }
 
 impl OpikFrame {
@@ -416,6 +548,24 @@ impl OpikFrame {
     /// `(ξ, ζ)` back to a 3-vector in the encounter's inertial frame.
     pub fn unproject(&self, p: Vector2<f64>) -> Vector3<f64> {
         p.x * self.xi_hat + p.y * self.zeta_hat
+    }
+
+    /// The perigee radius of the flyby hyperbola with impact parameter `b`:
+    /// `r_p = −c + √(c² + b²)`, the inverse of
+    /// [`impact_parameter_for_perigee`](Self::impact_parameter_for_perigee).
+    ///
+    /// Exposed because the b-plane is where a keyhole lives and a perigee is what
+    /// a deflection solver targets (`DeflectionScenario::required_dv`), so this
+    /// conversion sits on every path from "aim at this circle" to "here is the
+    /// Δv". Doing it by hand at each call site is how the two drift apart.
+    pub fn perigee_for_impact_parameter(&self, b: f64) -> f64 {
+        let c = self.c();
+        -c + (c * c + b * b).sqrt()
+    }
+
+    /// `b² = r_p² + 2 c r_p` — gravitational focusing, the other direction.
+    pub fn impact_parameter_for_perigee(&self, r_p: f64) -> f64 {
+        (r_p * r_p + 2.0 * self.c() * r_p).max(0.0).sqrt()
     }
 
     /// The flyby turn angle `δ` at impact parameter `b`: `tan(δ/2) = c/b`.
@@ -568,6 +718,75 @@ impl OpikFrame {
             semi_major_axis_tolerance: tolerance,
             width: tolerance / gradient.norm(),
         }
+    }
+
+    /// Where a b-plane point stands against each of `circles` — one
+    /// [`KeyholeProximity`] per circle, in the order given.
+    ///
+    /// `circles` is the caller's own mapped set (typically
+    /// [`resonant_circles`](Self::resonant_circles)), *not* a census taken here,
+    /// so a readout and the map it is read beside can never disagree about which
+    /// resonances were considered — and so a caller can say "nothing in the
+    /// mapped region" rather than quoting the nearest of a truncated list.
+    ///
+    /// Circles whose keyhole width is not finite are **skipped**: those are the
+    /// near-tangency artifacts (radius → 0, `∇a' → 0`) the module doc flags, and
+    /// an infinite width would rank ahead of every real keyhole while meaning
+    /// nothing. They stay visible through `resonant_circles`; they are only
+    /// unrankable.
+    pub fn keyhole_proximities(
+        &self,
+        circles: &[ResonantCircle],
+        p: Vector2<f64>,
+    ) -> Vec<KeyholeProximity> {
+        circles
+            .iter()
+            .filter_map(|c| {
+                let closest = c.closest_point_to(p).unwrap_or_else(|| c.point(0.0));
+                let keyhole = self.keyhole_at(c, closest);
+                keyhole.width.is_finite().then_some(KeyholeProximity {
+                    circle: *c,
+                    closest_point: closest,
+                    signed_distance: c.signed_distance(p),
+                    keyhole,
+                })
+            })
+            .collect()
+    }
+
+    /// The circle of `circles` whose locus passes closest to `p` in **metres**.
+    /// The one to quote as "this plan lands N km from the h:k circle".
+    pub fn nearest_keyhole(
+        &self,
+        circles: &[ResonantCircle],
+        p: Vector2<f64>,
+    ) -> Option<KeyholeProximity> {
+        self.keyhole_proximities(circles, p)
+            .into_iter()
+            .min_by(|a, b| {
+                a.signed_distance
+                    .abs()
+                    .partial_cmp(&b.signed_distance.abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }
+
+    /// The circle of `circles` the point is nearest **in keyhole widths** — the
+    /// one it is most at risk of actually being in, which is not always the one
+    /// nearest in kilometres: a wide far keyhole 200 km away is a likelier return
+    /// than a 25 km one 50 km away.
+    pub fn tightest_keyhole(
+        &self,
+        circles: &[ResonantCircle],
+        p: Vector2<f64>,
+    ) -> Option<KeyholeProximity> {
+        self.keyhole_proximities(circles, p)
+            .into_iter()
+            .min_by(|a, b| {
+                a.widths_away()
+                    .partial_cmp(&b.widths_away())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     }
 
     /// Vis-viva at Earth's heliocentric position for a heliocentric velocity.
@@ -932,6 +1151,116 @@ mod tests {
             }
         }
         assert!(compared > 50);
+    }
+
+    #[test]
+    fn distance_to_a_circle_is_signed_and_its_closest_point_is_on_the_circle() {
+        let mut seed = 4242;
+        let mut checked = 0;
+        for _ in 0..40 {
+            let (f, _) = random_frame(&mut seed);
+            for circle in f.resonant_circles(1..=20, 24, 100.0 * f.capture_radius) {
+                if circle.radius < 1.0e-3 * f.capture_radius {
+                    continue;
+                }
+                let centre = Vector2::new(0.0, circle.center_zeta);
+                // A point on the circle: distance 0, and its own closest point.
+                let angle = std::f64::consts::TAU * lcg(&mut seed);
+                let on = circle.point(angle);
+                assert!(
+                    circle.signed_distance(on).abs() <= 1e-6 * circle.radius,
+                    "{}: a point of the circle is {:.3e} m off it",
+                    circle.resonance,
+                    circle.signed_distance(on)
+                );
+                assert!((circle.closest_point_to(on).unwrap() - on).norm() <= 1e-6 * circle.radius);
+                // Pushed out along the radius by d: distance +d. Pulled in: −d.
+                let out = centre + (on - centre) * 1.25;
+                let din = centre + (on - centre) * 0.75;
+                assert!(
+                    (circle.signed_distance(out) - 0.25 * circle.radius).abs()
+                        <= 1e-6 * circle.radius,
+                    "outside must be positive"
+                );
+                assert!(
+                    (circle.signed_distance(din) + 0.25 * circle.radius).abs()
+                        <= 1e-6 * circle.radius,
+                    "inside must be negative"
+                );
+                // The closest point is the same one from either side, and it is
+                // the nearest point of the circle to a brute-force sweep.
+                for q in [out, din] {
+                    let cp = circle.closest_point_to(q).unwrap();
+                    assert!((cp - on).norm() <= 1e-6 * circle.radius);
+                    let mut best = f64::INFINITY;
+                    for i in 0..2000 {
+                        let a = std::f64::consts::TAU * (i as f64) / 2000.0;
+                        best = best.min((circle.point(a) - q).norm());
+                    }
+                    assert!(
+                        (cp - q).norm() <= best + 1e-3 * circle.radius,
+                        "{}: analytic {:.6e} beaten by sweep {:.6e}",
+                        circle.resonance,
+                        (cp - q).norm(),
+                        best
+                    );
+                }
+                // The centre itself: no nearest point, but a defined distance.
+                assert!(circle.closest_point_to(centre).is_none());
+                assert!((circle.signed_distance(centre) + circle.radius).abs() < 1e-9);
+                checked += 1;
+            }
+        }
+        assert!(checked > 50, "only {checked} circles exercised");
+    }
+
+    /// The readout the planner prints: how far a b-point is from the nearest
+    /// resonant return, and how that ranks against the keyhole's own width.
+    /// Ranked two ways on purpose — the nearest circle in kilometres is not
+    /// always the one the point is most likely to be *in*.
+    #[test]
+    fn the_nearest_keyhole_is_the_nearest_circle_and_widths_rank_differently() {
+        let mut seed = 20260905;
+        let mut saw_disagreement = false;
+        for _ in 0..60 {
+            let (f, _) = random_frame(&mut seed);
+            let circles = f.resonant_circles(1..=20, 24, 60.0 * f.capture_radius);
+            if circles.len() < 2 {
+                continue;
+            }
+            // A b-point somewhere in the mapped region.
+            let p = Vector2::new(
+                f.capture_radius * (6.0 * lcg(&mut seed) - 3.0),
+                f.capture_radius * (6.0 * lcg(&mut seed) - 3.0),
+            );
+            let all = f.keyhole_proximities(&circles, p);
+            assert!(all.iter().all(|k| k.keyhole.width.is_finite()));
+            let near = f.nearest_keyhole(&circles, p).expect("a nearest circle");
+            let tight = f.tightest_keyhole(&circles, p).expect("a tightest keyhole");
+            // Each selector really is the minimum of its own key.
+            for k in &all {
+                assert!(near.signed_distance.abs() <= k.signed_distance.abs() * (1.0 + 1e-12));
+                assert!(tight.widths_away() <= k.widths_away() * (1.0 + 1e-12));
+            }
+            // The proximity is self-consistent: the closest point is on its
+            // circle, at exactly |signed_distance| from the query.
+            for k in &all {
+                assert!(k.circle.signed_distance(k.closest_point).abs() <= 1e-6 * k.circle.radius);
+                assert!(
+                    ((k.closest_point - p).norm() - k.signed_distance.abs()).abs()
+                        <= 1e-6 * k.circle.radius.max(p.norm())
+                );
+                assert_eq!(k.keyhole.at, k.closest_point);
+                assert!(k.inside() == (k.widths_away() <= 1.0));
+            }
+            if near.circle.resonance != tight.circle.resonance {
+                saw_disagreement = true;
+            }
+        }
+        assert!(
+            saw_disagreement,
+            "kilometres and keyhole widths never disagreed — then one selector is redundant"
+        );
     }
 
     #[test]

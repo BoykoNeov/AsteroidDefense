@@ -61,10 +61,14 @@ var _defl := PackedVector3Array()
 var _b_nom := Vector3.ZERO
 var _b_defl := Vector3.ZERO
 var _span := PackedFloat64Array()
-## The keyhole map: resonant-return circles with returns inside KEYHOLE_MAX_YEARS,
-## read from the core (closed-form; see Sim.keyhole_circles). Drawn when
-## `_keyholes` is on and the frame is pinned.
-const KEYHOLE_MAX_YEARS := 7
+## The keyhole map: resonant-return circles with returns inside
+## Sim.KEYHOLE_MAX_YEARS, read from the core (closed-form; see
+## Sim.keyhole_circles). Drawn when `_keyholes` is on and the frame is pinned.
+##
+## The horizon lives on Sim because the planner's keyhole readout has to use the
+## same one: naming a resonance in the panel that this view does not draw would
+## be a picture and a number disagreeing, which is the failure the whole b-plane
+## view exists to end.
 ## How many circles get a caption at once (the widest in frame; see _draw_keyholes).
 const KEYHOLE_LABELS := 7
 var _circles: Array = []
@@ -116,7 +120,7 @@ func _fetch() -> void:
 	_b_nom = Sim.encounter_b_point(false)
 	_b_defl = Sim.encounter_b_point(true)
 	_span = Sim.encounter_span_days()
-	_circles = Sim.keyhole_circles(KEYHOLE_MAX_YEARS) if Sim.bplane_frame_pinned() else []
+	_circles = Sim.keyhole_circles(Sim.KEYHOLE_MAX_YEARS) if Sim.bplane_frame_pinned() else []
 	_built = true
 
 

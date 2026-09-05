@@ -212,8 +212,77 @@ func _run() -> void:
 	Sim._tick_plan_debounce(1.0)
 	await _settle(4)
 	await _shot("enc_5_planner_agrees")
+	print("SHOT  planner keyhole: %s | %s (alert=%s)"
+		% [Sim.keyhole_label(), Sim.keyhole_note(), Sim.keyhole_alert()])
+
+	# 8. The keyhole row with something to say. The default plan is hundreds of
+	#    widths from anything, which only ever exercises the CLEAR wording - and
+	#    the whole point of the row is the other case.
+	#
+	#    Measured 2026-09-05: a coarse sweep at the longest lead the planner
+	#    allows never gets closer than ~5,000 km to a circle, which reads as "a
+	#    player cannot reach a keyhole". That conclusion is an artifact of the
+	#    step size. As the impulse is dialled the b-point walks OUTWARD past one
+	#    resonant circle after another, so consecutive rungs bracket crossings;
+	#    the coarse sweep just steps over them. So: sweep to bracket, then refine
+	#    inside the best bracket, and shoot what a player would actually see with
+	#    their finger on the key.
+	var rungs := [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.6, 0.9, 1.4]
+	var best_dv := 0.0
+	var best_w := INF
+	var best_i := -1
+	for i in rungs.size():
+		var w := await _keyhole_widths_at(rungs[i])
+		print("SHOT  keyhole sweep dv=%.2f -> %s" % [rungs[i], Sim.keyhole_label()])
+		if w < best_w:
+			best_w = w
+			best_dv = rungs[i]
+			best_i = i
+	# Golden-section inside the neighbours of the best rung. Non-smooth where the
+	# nearest circle changes identity, which is fine: any minimum it finds is a
+	# real place a player can dial to, and that is all this picture claims.
+	if best_i >= 0:
+		var lo: float = rungs[maxi(best_i - 1, 0)]
+		var hi: float = rungs[mini(best_i + 1, rungs.size() - 1)]
+		var phi := 0.5 * (sqrt(5.0) - 1.0)
+		var x1 := hi - phi * (hi - lo)
+		var x2 := lo + phi * (hi - lo)
+		var f1 := await _keyhole_widths_at(x1)
+		var f2 := await _keyhole_widths_at(x2)
+		for _i in 10:
+			if f1 < f2:
+				hi = x2
+				x2 = x1
+				f2 = f1
+				x1 = hi - phi * (hi - lo)
+				f1 = await _keyhole_widths_at(x1)
+			else:
+				lo = x1
+				x1 = x2
+				f1 = f2
+				x2 = lo + phi * (hi - lo)
+				f2 = await _keyhole_widths_at(x2)
+		best_dv = x1 if f1 < f2 else x2
+		best_w = minf(f1, f2)
+		await _keyhole_widths_at(best_dv)
+		await _settle(4)
+		await _shot("enc_8_planner_keyhole")
+		print("SHOT  closest a player can dial: dv=%.5f at %d d -> %s (alert=%s)"
+			% [best_dv, int(Sim.plan_lead_d), Sim.keyhole_label(), Sim.keyhole_alert()])
+		print("SHOT  keyhole note: %s" % Sim.keyhole_note())
 
 	get_tree().quit(0)
+
+
+## Solve one plan at the longest allowed lead and report how many keyhole
+## half-widths it lands from the nearest resonant return. INF when there is
+## nothing to measure against (no b-point, no map).
+func _keyhole_widths_at(dv: float) -> float:
+	Sim.set_plan(Sim.LEAD_MAX, dv, true)
+	Sim._tick_plan_debounce(1.0)
+	await _settle(1)
+	var row: Dictionary = Sim.plan_keyhole.get("tightest", {})
+	return row.get("widths_away", INF) if not row.is_empty() else INF
 
 
 func _settle(frames: int) -> void:

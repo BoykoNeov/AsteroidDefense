@@ -5,6 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 997359ca-2967-40c6-87b2-33f6f77bebd0
+  modified: 2026-07-28T01:47:47.171Z
 ---
 
 **Phase-2 GDExtension core binding — Commit 1 (toolchain gate) DONE.** Exposes
@@ -550,55 +551,77 @@ either way (built once from the whole span, never queries the live clock, so it 
 Sun) — but an orbit drawn for a body the sim is not tracking still reads as a claim that it is. Lesson
 repeated: don't assert a parallel to existing code without opening the existing code.
 
-**~~NEXT — 3D (real-NEO half), NOT started~~ (SUPERSEDED — both halves DONE 2026-07-20, see below):** `sb441-n16.bsp` (on disk) via a new SPK-backed catalog source, not
-`add_synthetic_body`; teaching set is Apophis / Bennu / Didymos (HANDOFF §9). Interceptor stays cosmetic until a
+**3D real-bodies half — sb441 DONE 2026-07-20:** the recorded plan was WRONG and enumerating the kernel caught it:
+`sb441-n16.bsp` holds **16 main-belt PERTURBERS, zero NEOs** (Ceres..Interamnia, Sun-centered, 1550-2650) — it is
+ASSIST's perturber set, not a target list, so Apophis/Bennu/Didymos were never in there. User chose the split
+**sb441 now, Horizons NEOs next**: the mounting plumbing lands against a file already on disk, then per-object JPL
+Horizons SPKs reuse the SAME ephem read path. Horizons NOT SBDB-elements because integrating a real NEO hits the
+Tier-2 **1PN relativity** trap (HANDOFF §270 — omit it and Horizons validation SILENTLY fails); a Horizons SPK is
+JPL's already-relativistic trajectory, so reading it sidesteps the force model entirely. Placement decided by
+MEASUREMENT again: mount = **5.7 s cold / 272 ms warm** (646 MB page-cache I/O; queries ~5 us, free) vs
+`MissionCore::load_from` contractually ~ms on the first-frame path → folds into the EXISTING build worker. The
+worker **cannot** mount onto the almanac it is handed — `Ephemeris::with_constants` CONSUMES self and the served
+`Arc<Ephemeris>` is read every frame — so `mount_small_bodies` builds a SECOND almanac from paths and
+`BuiltScenario` carries it back for `install` to adopt; serving core never moves, never mutates. Mount failure
+WARNS and continues (a missing catalog beats a missing threat). `KernelPair.small_bodies: Option<PathBuf>` (plus
+`ASTEROID_SMALL_BODY_KERNEL`, mirrored in kernels.gd) is deliberately OUTSIDE the both-or-nothing pair rule —
+646 MB, absent on a fresh clone; failing the pair over it would drop the planets too. **ZERO-is-the-Sun 4th
+instance, gated pre-ship**: these are `"ephem"` bodies (the PLANETS' read path, not the catalog/integrate path),
+so 2 flags not 1 — `small_bodies_armed` (path handed over) is NOT `small_bodies_mounted()` (served almanac has
+it), every lookup fails in between; `small_body_count()` also returns 0 unmounted so an ungated caller iterates
+nothing. Verified by `_shot.gd` `belt_1_real_asteroids`: 16/16 mounted at 2.17-3.79 AU, spread, non-zero nodes; id table has teeth
+(2000704→2000705 → kernel rejects). **The almanac swap did NOT perturb the threat** — the same shot printed
+cap=11311 km / |B|=14639 MISS, matching the PRE-mount capture radius to the digit (advisor caught that this was
+the stronger evidence for the second-almanac design, and I had underused it). **"Verified by picture" was
+OVERSTATED in the first commit** — the picture proved the DATA PATH via printed console output, nothing was
+identifiable in the IMAGE: tag_layer.gd iterates `Sim.planets` so all 16 were UNLABELLED blobs among 1600 dust
+points. Fixed in a follow-up (tags past 18 AU camera distance, vis_r 0.020→0.045, energy 1.1→1.6) and re-shot
+with SYLVIA/VESTA/CERES/PALLAS/JUNO readable by name. map2d left alone ON PURPOSE: it clips a>2.0 (why Jupiter
+is off-plot), so main-belt bodies are correctly absent from an inner-system radar. **Lesson: "the numbers are
+right" is not "it is on screen" — this project's own standard, and I nearly shipped past it.** ~~OPEN: debug-DLL build went 11 s → **34 s**~~ (**BUILD-TIME ITEM CLOSED 2026-07-27 — does not reproduce.** `touch core` → gdext DLL is **2.5 s** warm, **19 s** with `target/debug/incremental` (933 MB) deleted, ~95 s on a session's FIRST build (cold OS file cache too). Deleting the cache and rebuilding twice back to back isolates it: 19 s then 2.45 s, same code, same profile → the variable is **rustc's incremental cache state**, NOT the grown core and NOT the `opt-level=3` override. The recorded 34 s was a post-edit cold-cache run.) (5.7 s was
+RELEASE; ANISE parsing 646 MB unoptimized is far slower) — extend profile-dev opt-level=3 to the mount path.
+
+**NEXT — Horizons NEO half, NOT started:** fetch per-object SPKs; teaching set is Apophis / Bennu / Didymos (HANDOFF §9). Interceptor stays cosmetic until a
 Lambert solver exists — `interceptor_online` is the flag. `required_dv` remains ~18.3 s → keep OFF every live
 path (`req_dv_label` is a labelled first-order estimate). Still open: osculating e/i for the HUD needs an
 ICRF-vs-ecliptic inclination decision; ξ/ζ sign stays Tier-3 (3C-2c coexists with it — display axes +
 rotation-invariant scalars only, so settling it later is free).
 
-**Horizons NEO half DONE 2026-07-20 (the real teaching asteroids on screen).** The recorded plan ("reuse the
-identical read path") was FALSE and the gate `core/examples/probe_horizons.rs` proved it before any plumbing:
-`sb441-n16.bsp` is SPK **type 2** (Chebyshev), a Horizons per-object SPK is **type 21** (ext. modified diff
-arrays), and **ANISE 0.10.3 has no type-21 evaluator** (dispatches 1/2/3/8/9/12/13, returns "not supported for
-SPK computations" for 21) — no request param changes the emitted type. Advisor-gated pivot to **Horizons
-VECTORS → in-project sampled trajectory + cubic Hermite**: fetch the trajectory as *states* (pos+vel,
-`EPHEM_TYPE=VECTORS`, heliocentric `CENTER='500@10'`, `REF_PLANE=FRAME` ICRF, `KM-S`, 1-day TDB cadence) and
-interpolate. Honesty preserved & is the point — interpolating JPL's own relativistic states, NOT integrating our
-own worse ones (rejected: integrating a state vector re-litigates the deleted display Kepler + hits the Tier-2
-1PN trap; implementing type 21 in a forked ANISE = variable-MAXTRM record parsing, a user-owned scope call).
-**NEOs are scenery — never the threat, never a deflection target.** New `core/src/horizons.rs`: `Neo` loads a
-plain-text `.neo` table (key/val header + one whitespace state per line, floats via Python `repr`; NOT JSON —
-core stays serde-free; hard-errors on magic/frame/declared-count mismatch), `helio_state_at` = cubic Hermite
-(velocity in the table → tangent to the real arc). Accuracy **measured not eyeballed** and the measurement
-FOUND something: median converges ~12×/halving (4th-order-ish) but worst case pins to the **2029 Apophis Earth
-flyby** (hours-long curvature no daily table resolves) → shipped cadence measured directly vs a committed
-**hourly** fixture = **median 24 m, worst 18 885 km** = 1.3e-4 AU, sub-pixel; both flyby fixtures
-(`core/tests/fixtures/apophis_flyby_{1d,1h}.neo`, ~173 KB) COMMITTED so that check runs kernel-free on a fresh
-clone. **NAIF trap** (flagged ahead by the sb441 note): Horizons uses **`20000000+number`** (Apophis =
-**20099942**), not sb441's `2000000+number` — verified by enumerating a fetched SPK's segment table, provenance
-only (sampled path never resolves it). Binding: `OrreryBody` now carries `Trajectory::{Integrated(Clock) = our
-physics/SSB m, Sampled(Neo) = JPL's/helio-ICRF m}`; the two frames differ by the Sun's barycentric wobble
-(~1e6 km, "looks like a rendering nudge") reconciled in the SINGLE `catalog_body_helio_ecl_au`;
-`catalog_provenance(i)` → "integrated"/"sampled" and GDScript labels bodies with it (unlabelled beside real
-physics = the deleted Kepler's sin). Tables at `<kernels>/neo/*.neo`, gitignored/regenerable
-(`pyref/fetch_horizons_neo.py`), absent on fresh clone = no asteroids & everything else works; resolver +
-skip-loud `load_all_for_test` mirror [[kernel-resolver]]. **ZERO-is-the-Sun 5th instance**: tables span
-2020–2070 vs the ~300-yr clock, `helio_state_at` returns None (never ZERO) outside span, per-body via
-`catalog_active`/`catalog_span_tdb`; `catalog_active` USED to gate on the single `comet_online` flag — right for
-1 body, wrong at 4 (Apophis's table ≠ the comet's arc in years). **Threat untouched STRUCTURALLY**: a sampled
-NEO never reaches the almanac, carries no GM, can't enter `tier1_perturber_field` — pinned by
-`neo_bodies_cannot_reach_the_force_model` (core, compile-time) + `real_asteroids_join_the_catalog_without_
-touching_the_threat` (one build, cap/perigee/impact read before & after NEO install, `==` not tolerance; cap
-stayed 11311, |B| 14639 to the digit). **Orbit lines draw ONE lap** (a decades-long table of a ~1-yr orbit =
-dozens of precessing laps overplotted; comet escaped it because its span IS one period): `Neo::
-orbital_period_seconds` (vis-viva, same "period-to-bound-the-window" move the `ephem` path makes) →
-`catalog_track_window_ecl_au` samples one period clamped in span. **Verified by picture** (`_shot.gd` neo_1_on_
-arc: 3 NEOs cyan, named, 1.0–1.3 AU near Earth at the flyby, one clean lap each; neo_2_past_span_gone: 2071, all
-gone/no lines/not on Sun) **and by the advisor's discriminating check**: every other NEO test is `norm()` =
-rotation-invariant, so a Sampled-branch frame error would pass them all — added a **co-location assertion**
-(Apophis's real 2029 flyby ~0.0003 AU from Earth → drawn on top of Earth; got **0.0073 AU** at t=471 d, jointly
-confirms frame+epoch+identity). 83/83 GDScript, 91 core + 16 gdext (178 s = real run not the skip trap).
-Incidental: debug-mount cost 11→34 s is now ~20 s, not chased. **Open/NEXT**: these are the §9 teaching
-asteroids on-screen but NOT validated vs Horizons — that's **Tier 2** (needs 1PN + Yarkovsky before our own
-integration of a real NEO could match JPL; the display is honest today *because* it doesn't integrate them).
+## THE THREE STALENESS TRAPS (2026-07-27/28 — an hour each, all silent)
+
+1. **Godot loads `target/debug/`, the Rust loop builds `--release`.** `.gdextension`
+   maps `windows.debug.x86_64` → `res://../target/debug/asteroid_gdext.dll`, and the
+   editor *and* the plain `godot` binary are debug builds. So a new `#[func]`
+   confirmed by a green `cargo test --release` **does not exist** to GDScript:
+   `Invalid call. Nonexistent function 'X' in base 'Mission'` — reads like a
+   registration bug, is a stale artifact. **Only tell = DLL timestamps.**
+   → **After ANY Rust change: `cargo build && cargo build --release`.**
+   (Kill Godot first or the debug build dies with `Access is denied (os error 5)` —
+   `reloadable = true` protects the *editor* case, not a running game.)
+2. **A new `class_name` is invisible until the editor rescans** → `main.gd` fails
+   to parse with *"Could not find type"* while the file is plainly there. Fix:
+   `godot --headless --editor --quit --path godot`.
+3. **`mission_ready` FIRES MORE THAN ONCE now** (2026-07-28, [[threat-orbit]]'s
+   `[N]` rebuild). It fired exactly once per session for the whole project's life,
+   so every handler `append`ed and `add_child`ed freely. On the second firing
+   `solar_system.gd` built a **second full set** of catalog nodes:
+   `_neo_nodes` outgrew `Sim.neos`, and `_process` — which iterates the node array
+   and indexes the element array — threw `Out of bounds get index '16'` **once per
+   frame**, while every duplicated body kept drawing at a stale position.
+   → **Any `mission_ready` handler must be idempotent**: free the nodes (not just
+   drop the array — an orphan is still a child and still drawn), clear the arrays,
+   and guard `connect()` with `is_connected()`. `encounter.gd`/`porkchop.gd` were
+   already fine because they only set `_built = false`.
+
+**`%e` DOES NOT EXIST in GDScript's `%` operator** — recorded at 3C-2b above and
+**re-learned the hard way on 2026-07-27**, so it is repeated here. It does NOT
+raise: it errors once per call and returns junk, so `%.3e` inside `_draw` prints an
+error string where a number belongs, 60×/s, on a panel that otherwise looks fine.
+Supported: `%s %c %d %o %x %X %f %v %%`. (`%%` *is* fine — `hud.gd:169` uses it;
+don't "fix" that.) Write a `_sci()` helper for anything outside `%f` range.
+
+**Harness rule:** a `while` that presses keys through `main._input()` with **no
+`await`** freezes the engine outright — no output, no error, looks like a hang.
+Always bound those loops and assert the exit condition.
+
+**Tier-2 force-model preview channel — DONE 2026-07-21** (see [[tier2-forces]] for the physics + the on-first-build→on-demand pivot). Two structural facts for future gdext work: (1) **`MissionCore.scenario` is now `Option<Arc<RealFieldScenario>>`** (was owned) — a core gate test pins `RealFieldScenario: Sync`, so a worker can hold an Arc clone and measure off the EXACT threat scenario while the render thread reads it every frame; `scenario_arc()` hands out the clone. Most call sites unchanged (auto-deref through `.as_ref()`). (2) **A 2nd mpsc worker channel** on `Mission` (`tier2_build`), begin/poll/is_measuring mirroring the build channel — the pattern to copy for any future on-demand off-thread compute. Free fn `measure_tier2_shifts(&scenario, mounted)` in mission_core is the reusable measurement (4× `nominal_encounter_with`, ~64 s, propagation-dominated). The pivot lesson: **anything chained before `install` delays `mission_online` = the threat solution + planner**, so expensive optional work goes on-demand, never on the build path.

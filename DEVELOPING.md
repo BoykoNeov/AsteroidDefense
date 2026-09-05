@@ -22,8 +22,14 @@ once made two verification claims vacuous. So:
 
 ```sh
 python tools/fetch_kernels.py --neo        # DE440 + pck11 (+ Horizons NEO tables)
-ASTEROID_REQUIRE_KERNELS=1 cargo test --workspace --release   # green means it RAN
+ASTEROID_REQUIRE_KERNELS=1 cargo test --workspace --release -- --test-threads=2
 ```
+
+Green there means the physics actually **ran**. The `--test-threads=2` is not
+optional on a normal desktop: the binding's 34 kernel-gated tests each build a
+full scenario — an ephemeris plus several dense-output clocks — and running them
+all at once exhausted memory on a 32 GB box (`memory allocation of 645727232
+bytes failed`, then `STATUS_STACK_BUFFER_OVERRUN`). Two at a time passes.
 
 `fetch_kernels.py` tries NAIF first and falls back to the `naif-de440` PyPI
 wheel (a proxy that blocks NAIF usually lets PyPI through) and to the ANISE
@@ -38,12 +44,12 @@ real-asteroid scenery reads (needs `ssd.jpl.nasa.gov`). The optional 646 MB
 ```sh
 cargo build --workspace --release
 cargo test --workspace --release                        # kernel-free: physics skips green
-ASTEROID_REQUIRE_KERNELS=1 cargo test --workspace --release   # the real suite
+ASTEROID_REQUIRE_KERNELS=1 cargo test --workspace --release -- --test-threads=2  # the real suite
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets --release
 ```
 
-Costs with kernels: `asteroid_core` ~150 s (211 tests), the `godot/rust`
-binding's kernel-gated tests several minutes (they solve real plans), the
+Costs with kernels: `asteroid_core` ~135 s (235 tests), the `godot/rust`
+binding ~14 min at `--test-threads=2` (34 tests, most solving real plans), the
 `validation` crate seconds. `--release` is not optional — the integration is
 ~40× slower unoptimised (the workspace already sets `opt-level = 3` for the core
 in dev builds for the same reason).

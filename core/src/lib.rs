@@ -32,6 +32,7 @@ pub mod horizons;
 pub mod integrator;
 pub mod kernels;
 pub mod keyhole;
+pub mod keyhole_target;
 pub mod lambert;
 pub mod launch_vehicle;
 pub mod mission;
@@ -65,8 +66,13 @@ pub use geometry::{
 pub use horizons::{Neo, NeoError};
 pub use integrator::{propagate_fixed, DenseSegment, Dop853, Integrator, IntegratorError, Rk4};
 pub use keyhole::{
-    perigee_state_for_asymptote, Keyhole, KeyholeError, OpikFrame, Resonance, ResonantCircle, AU_M,
-    JULIAN_YEAR_S,
+    perigee_state_for_asymptote, CircleBranch, Keyhole, KeyholeError, KeyholeProximity, OpikFrame,
+    Resonance, ResonantCircle, AU_M, JULIAN_YEAR_S,
+};
+pub use keyhole_target::{
+    aim_at_resonance, fly_keyhole_shot, solve_keyhole_return, FlownReturn, KeyholeAim,
+    KeyholeAiming, KeyholeRefineTol, KeyholeShot, KeyholeShotOptions, KeyholeSolution,
+    KeyholeTargetError,
 };
 pub use lambert::{lambert_universal, LambertError, LambertSolution};
 pub use launch_vehicle::{LaunchVehicle, LAUNCH_VEHICLES};

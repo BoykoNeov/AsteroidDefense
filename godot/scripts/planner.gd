@@ -24,7 +24,7 @@ func _process(_delta: float) -> void:
 
 func _draw() -> void:
 	var lh := _fs + 6.0
-	var rows := 14.0                         # drawn text rows, incl. separators
+	var rows := 16.0                         # drawn text rows, incl. separators
 	var ph := rows * lh + 2.0 * MARGIN + 4.0
 	var origin := Vector2(size.x * 0.5 - W * 0.5, size.y - ph - 60.0)
 	var bright := Color(1, 1, 1)
@@ -89,6 +89,27 @@ func _draw() -> void:
 	y += lh
 	_t(Vector2(x, y), "REQ DV EST", dim)
 	_t(Vector2(xv, y), Sim.req_dv_label() + " FOR 1.0 LD MISS", mid)
+	y += lh
+
+	# The corollary to the thesis, and the only row that can contradict a green
+	# VERDICT: a plan that clears Earth may have parked the rock on a resonant
+	# return, which comes back. Both lines come from Sim's formatters for the same
+	# reason the miss does - the "no b-plane point" case is a *success* here too
+	# (the pass left the gate), and formatting it locally would re-open that trap.
+	_t(Vector2(x, y), "KEYHOLE", dim)
+	# Blinks on the ALERT band, not on the map's `inside` flag. The linearised
+	# width is conservative by ~1.6x against the one keyhole this project has
+	# flown, so `inside` reads false for a plan that demonstrably returns to
+	# Earth - blinking on it would stay silent for the exact case this row exists
+	# to shout about. Sim owns the threshold; see Sim.KEYHOLE_ALERT_WIDTHS.
+	var alert: bool = Sim.keyhole_alert()
+	_t(Vector2(xv, y), Sim.keyhole_label(), bright if not alert or Sim.blink(1.4) else dim)
+	y += lh
+	# The caveat is indented under the LABEL column, not the value column: it runs
+	# to 45 characters and the value column only has room for ~40 before it
+	# overruns the panel border (measured - the first cut printed "CONFIRMS" on
+	# top of the frame).
+	_t(Vector2(x + 2.0 * _fs, y), Sim.keyhole_note(), faint)
 	y += lh
 	_t(Vector2(x, y), "-".repeat(56), faint)
 	y += lh

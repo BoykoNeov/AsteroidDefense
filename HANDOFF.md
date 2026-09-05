@@ -22,26 +22,27 @@ Read this table first, then the session that owns the layer you are touching.
 | Mission design: Lambert (multi-rev), porkchop, launch vehicles, required impactor mass, cell verify | done | `core/src/{lambert,mission,launch_vehicle}.rs` |
 | Tier 3a: covariance → b-plane Jacobian → P(impact), linearity shell | done (covariance invented, labelled) | `core/src/uncertainty.rs` |
 | **Tier 3b: keyholes** — Öpik (ξ, ζ) frame and b-vector sign pinned, resonant circles in closed form, keyhole widths, the keyhole map, **the 3:4 keyhole flown to a return impact** | **done 2026-09-02** | `core/src/keyhole.rs`, `examples/probe_keyhole_{map,return}.rs`, `docs/keyhole_map.*` |
+| **Tier 3c: keyhole targeting** — aim at any resonance on either branch, fly it, refine to the floor, and read the return in **its own** Öpik frame; the planner's `KEYHOLE` row | **done 2026-09-05** | `core/src/keyhole_target.rs`, `godot/scripts/{sim,planner}.gd` |
 | Godot frontend: DE440 orrery, real NEO scenery, planner, b-plane view (with the keyhole map, `[H]`), launch-window map, Tier-2 force menu, tractor bench, threat-orbit knob | done; keyhole overlay **seen on screen 2026-09-05** and its captions budgeted | `godot/`, `godot/rust/` |
 | Godot visual/perf pass: 3D world in its own viewport with 4× MSAA and phosphor persistence (peak-hold trails), per-frame position memo, cached 2D orbit traces, the `_perf.gd` frame-time harness and `run_harness.ps1` | done 2026-09-05; the 2D map went 18.9 → 7.1 ms/frame, native calls/frame 764 → 29; follow-ups in `docs/plans/2026-09-05-visuals-performance-followups.md` | `godot/scripts/main.gd`, `godot/shaders/phosphor_persist.gdshader`, `godot/tests/` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
 
-1. **Keyhole targeting as a core API.** `probe_keyhole_return`'s aim-then-refine
-   loop (closed-form circle point → `required_dv` → golden-section on the flown
-   return) generalised to any resonance and either ξ side, with the return's
-   b-plane reduced in *its own* Öpik frame; then a planner readout — "this plan
-   lands N km from the 3:4 keyhole" — so the thesis gains its corollary: a miss
-   can be worse than a hit if it is the wrong miss.
-2. **Real covariances from the SBDB** (equinoctial or Keplerian elements at their
+1. **Real covariances from the SBDB** (equinoctial or Keplerian elements at their
    own epoch, mixed units; validate the conversion by round-trip). This makes
    P(impact) real for Apophis/Bennu and retires the "invented" label.
-3. **P(impact) rising near a keyhole.** The deflected trajectory as the Tier-3
+2. **P(impact) rising near a keyhole.** The deflected trajectory as the Tier-3
    nominal, and a chained two-encounter Jacobian — `uncertainty_sampling_plan`
-   refuses two encounters in span today, by design, until this exists.
-4. **The Tier-3 ellipse on the Godot b-plane view** (the sensitivity solve is
+   refuses two encounters in span today, by design, until this exists. The
+   targeting layer now supplies the second encounter, reduced in its own frame.
+3. **The Tier-3 ellipse on the Godot b-plane view** (the sensitivity solve is
    ~17 s: an on-demand worker like the porkchop grid, not a build-path cost).
+4. **The keyhole width's order-unity slack, measured on more than one case.**
+   The flown 3:4 sits 1.64 half-widths from its own circle and still returns
+   inside Earth, so the linearised width is conservative by ~1.6× — on a sample
+   of one. Two or three more flown resonances would turn that into a calibration
+   the planner row could quote instead of hedging.
 5. **dop853 → IAS15 crossover**, now that 15-year multi-revolution arcs (the
    keyhole returns) are in the pipeline and the question has a customer.
 6. Phase 3.
@@ -1529,3 +1530,187 @@ beside the 10 s threat propagation) to cut the startup wait, a batched
 position lookup across the FFI, label de-collision in the tag layer and on the
 keyhole map, a persistence control, polyline drawing for the encounter tracks,
 and the Tier-3 ellipse on the b-plane view.
+
+
+### Keyhole targeting, and the corollary on the panel — 2026-09-05 session (aim at any resonance, fly it, read the return in its own frame, and print how many doors away the plan is)
+
+The keyhole batch (2026-09-02) proved a keyhole exists and flew one: the 3:4
+resonant return, hit at a retrograde Δv of 0.216550 m/s, coming back *inside
+Earth* three years after a flyby that missed by 153 000 km. But that shot lived
+in an example, hardcoded to one resonance and one branch, and nothing on screen
+said a word about it. This batch turns it into an API and puts its answer in
+front of the operator.
+
+The thesis this project exists for is *deflect early*. Its corollary is
+**a miss can be worse than a hit if it is the wrong miss** — and until now the
+planner could print `VERDICT: MISS - EARTH CLEAR` over a plan that had parked
+the rock on a resonant circle, with nothing to say so.
+
+#### The readout was separable from the targeting, and shipped first
+
+The roadmap phrased this as "generalise the API, *then* add a planner readout",
+which implies a dependency that is not there. The readout needs the **circle
+geometry** — closed-form, already computed, already drawn — not the four-minute
+aim-and-refine solve. Distance from a b-point to a circle centred at `(0, ζ_c)`
+is `| |p − (0,ζ_c)| − R |`; comparing it against the keyhole width at the
+nearest point costs microseconds. So the panel row shipped without waiting for
+the flying.
+
+- `core/src/keyhole.rs` gained the geometry: `ResonantCircle::closest_point_to`
+  and `signed_distance` (**positive outside**), and `OpikFrame::nearest_keyhole`
+  / `tightest_keyhole` over a caller-supplied census.
+- **Two rankings, because they disagree.** "Nearest in kilometres" and "nearest
+  in keyhole *widths*" are different questions: a wide far keyhole 200 km away is
+  a likelier return than a 25 km one 50 km away, and this project already
+  measured that **the wide keyholes are the far ones**. Both are returned; the
+  panel headlines the widths one. A test asserts the two selectors actually
+  disagree on some geometry — if they never did, one of them is dead code.
+- **The census is the caller's, not one taken inside.** The readout is handed the
+  same circle list the b-plane view draws, so a panel can never name a resonance
+  the map beside it does not show. `Sim.KEYHOLE_MAX_YEARS` is now one constant
+  for both.
+- **The truncation is reported, not papered over.** `keyhole_circles` stops at 60
+  capture radii (≈ 678 000 km). A plan beyond that gets
+  `beyond_mapped_region`, and the panel says so instead of quoting the nearest of
+  a truncated list.
+- **A clean miss has no b-point at all** — the pass left the 1.3 LD scan gate, so
+  there is nothing to place. The row says `UNMEASURED - PASS LEFT THE ENCOUNTER
+  GATE`, and the note underneath says why that is not reassurance: *the wide
+  keyholes are the far ones*, and a pass that far out flies past the widest doors
+  on the map with nothing measuring it.
+
+#### What the readout measured, and why the panel prints a number instead of a verdict
+
+Fed the **flown** keyhole plan (Δv 0.216550 m/s at campaign start — the one that
+returns inside Earth), the readout says: **20.4 km from the 3:4 circle, against a
+24.9 km keyhole width. 1.64 half-widths. `inside = false`.**
+
+So the closed form calls that plan *outside* a door the rock demonstrably flies
+through. That is the order-unity slack `keyhole.rs` warned its own width
+definition carries, now **measured at about 1.6×** on the one case with an
+answer. The consequence is a UI decision, not a bug fix: **the panel prints "N
+widths off", never a yes/no**, because a binary would say NO to a plan that comes
+back. Both `keyhole.rs` and the binding test now record the number so it is a
+measurement rather than an assumption.
+
+#### The targeting API, generalised
+
+`core/src/keyhole_target.rs` is the three steps as callable pieces:
+
+1. **`aim_at_resonance`** — closed-form, instant. Picks the circle point at a
+   held ξ on either **branch** (`CircleBranch::Minus` / `Plus`, the two ζ
+   crossings) and converts it to the perigee `required_dv` targets.
+   "Either ξ side" turned out to be two different questions and both are carried:
+   the branch, and the sign of ξ (which is a property of the deflection
+   *direction*, prograde or retrograde, and is measured rather than chosen).
+2. **`fly_keyhole_shot`** — re-fly, reduce encounter 1, hand off 30 days past it,
+   propagate `h + 0.6` years (the span now follows the resonance instead of the
+   3:4's hardcoded 3.6) and census with a wide 0.05 AU gate.
+3. **`solve_keyhole_return`** — bracket and golden-section on the return miss.
+
+**Reachability is a returned error, not a NaN.** The probe's `√(R² − ξ²)`
+survived only because the shipping geometry happened to fit; `points_at_xi`
+returns `None` when the line misses the circle, and `aim_at_resonance` turns that
+into `XiOffCircle` — refused in microseconds instead of poisoning a perigee, a
+Δv solve and four minutes of flying.
+
+#### The check that says whether a "physical floor" is really one
+
+The refinement's minimum is not zero, and the module claims what remains is the
+post-encounter orbit's **spatial** offset — which no timing change can remove.
+That claim is unfalsifiable from the scalar return distance, so the return is now
+reduced in **its own** Öpik frame (Earth's state at the *return* epoch, not
+encounter 1's), where the axes mean something again: `ζ` is timing, `ξ` is the
+orbit-to-orbit offset. Δv is a timing knob, so a converged search must drive
+`ζ₂ → 0` and leave the floor in `|ξ₂|`.
+
+**Measured at the flown floor: ξ₂ = 4 014 km, ζ₂ = 891 km — 78 % spatial,
+`|ζ₂|/|ξ₂| = 0.222`.** Converged. A floor sitting in `ζ₂` would have been an
+unconverged golden-section wearing a physics costume, and it would have looked
+identical in the one number the old probe printed.
+
+One number to keep straight while reading those: the return's **impact
+parameter** is 4 112 km while its **geocentric closest approach** is 1 141 km.
+The gap is gravitational focusing — the same pair `geometry.rs` documents for the
+first encounter, and the same mix-up that once printed SURFACE IMPACT over a
+working deflection.
+
+#### On the panel, and the sweep that nearly drew the wrong conclusion
+
+The planner grew two rows: the keyhole line and the caveat under it. Both come
+from `Sim` formatters for the reason the miss does — the "no b-point" case is a
+*success* here too, and formatting it at the draw site would re-open that trap.
+GDScript still owns zero orbital mechanics; it prints what the binding returns.
+
+The shot harness first swept ten impulses at the longest lead the planner allows
+and reported the closest a player could get as **~5 000 km** from any circle —
+every rung reading CLEAR. That reads as "keyholes are unreachable from the
+frontend", and it is **an artifact of the step size**: as the impulse is dialled
+up the b-point walks outward *past* one resonant circle after another, so
+consecutive rungs bracket crossings the sweep steps over. Refining inside the
+best bracket found it immediately:
+
+> **Δv 0.930 m/s at 900 days of lead → 2.9 widths off the 3:4 circle (36 km),
+> while the verdict above it reads `MISS - EARTH CLEAR` at 0.40 LD.**
+
+That is the corollary on screen, dialable with the panel's own keys
+(`godot/tests/_shot.gd` → `enc_8_planner_keyhole`). The harness keeps the
+bracket-then-refine so the picture stays reachable when the scenario moves.
+
+The alert threshold is **4 half-widths**, calibrated on the flown door rather
+than picked: the one keyhole known to return sits at 1.64, so the band worth
+shouting about is a small multiple of that — not a distance in kilometres, which
+means different things at a 25 km door and a 25 000 km one. The row blinks on
+that band, deliberately **not** on the core's `inside` flag, which would stay
+silent for exactly the case it exists to warn about.
+
+#### Which frame the readout's circles live in — asked, then measured
+
+The readout places the **deflected** b-point on the **nominal** encounter's
+circles, so the panel and the drawn map can never name different resonances.
+`keyhole_target.rs` argues the opposite for a *return* — rebuild the frame,
+because a different asymptote means the old axes carry no meaning — and the two
+look inconsistent until the scales are compared. A resonant circle depends on
+the encounter only through `c = μ⊕/v∞²` and `θ`, and a small along-track nudge
+years out moves *where* the rock arrives enormously while barely changing how
+fast or from what direction. A return three years later is a different
+encounter; a nudged version of the same flyby is not.
+
+That is an argument, and 20.4 km against a 24.9 km door has no room for
+arguments, so it is now a measurement the binding test prints and asserts:
+
+> `v_inf` **7 633.2** m/s nominal vs **7 635.6** m/s deflected (+3.1e-4), which
+> moves the 3:4 circle **1.5 km in centre and 1.6 km in radius** — ~12 % of the
+> door, ~15 % of the reported distance.
+
+Small enough that the shared frame stands; **not** small enough to call
+negligible, so the test fails if it ever reaches a quarter of the keyhole width.
+
+#### An operational bruise worth recording
+
+`ASTEROID_REQUIRE_KERNELS=1 cargo test --workspace --release` — the command
+`DEVELOPING.md` gives — **crashed** on the way through the binding suite:
+`memory allocation of 645727232 bytes failed`, then
+`STATUS_STACK_BUFFER_OVERRUN`. Thirty-four kernel-gated tests each build a full
+scenario (an ephemeris plus several dense-output clocks) and the default
+parallelism runs them all at once. `--test-threads=2` passes (34/34, 853 s) and
+is now what `DEVELOPING.md` documents. A re-run at default threads later passed,
+which proves nothing: an intermittent OOM is still an OOM, and CI's runners have
+less memory than this box. (CI itself is unaffected — its physics job runs only
+`-p asteroid_core -p validation`.)
+
+#### Traps recorded
+
+- **A coarse sweep over a monotone knob is not a survey of a non-monotone
+  quantity.** Distance-to-nearest-circle is a sawtooth in Δv; ten rungs sampled
+  its peaks and concluded the floor was 5 000 km when it is 36 km.
+- **`inside` is a linearisation, and a conservative one.** Never render it as a
+  verdict; render the ratio.
+- **Two b-plane points, one epoch.** `deflected_b_point_km` rescales its
+  magnitude so the drawn mark can never contradict the verdict's `|B|`. That
+  rescale is < 0.01 %, invisible on screen and *kilometres* at these radii — the
+  same order as a keyhole width. The keyhole readout takes the **raw**
+  projection; the picture keeps the rescaled one.
+- A 45-character caveat does not fit the planner's value column (the first cut
+  printed `CONFIRMS` on top of the panel border). It is indented under the label
+  column instead.

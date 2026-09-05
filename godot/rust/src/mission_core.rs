@@ -42,7 +42,7 @@ use std::sync::Arc;
 use anise::constants::frames::{EARTH_J2000, SSB_J2000, SUN_J2000};
 use anise::prelude::Frame;
 use godot::global::godot_warn;
-use nalgebra::Vector3;
+use nalgebra::{Vector2, Vector3};
 
 use asteroid_core::deflection::DeflectionError;
 use asteroid_core::ephemeris::Ephemeris;
@@ -59,8 +59,8 @@ use asteroid_core::scenario::{
 };
 use asteroid_core::{
     along_track_unit, Clock, DvSolveTol, EphemerisPerturber, Epoch, GravityTractor, HoverGeometry,
-    OpikFrame, OrbitalElements, ResonantCircle, StateVector, TowDirection, TowSolveTol, TowWindow,
-    AU_M as CORE_AU_M,
+    KeyholeProximity, OpikFrame, OrbitalElements, ResonantCircle, StateVector, TowDirection,
+    TowSolveTol, TowWindow, AU_M as CORE_AU_M,
 };
 
 /// Kilometres per astronomical unit — the display scale positions cross into.
@@ -236,6 +236,85 @@ impl KeyholeCircleRow {
             far_width_km: f.keyhole_at(c, far).width / M_PER_KM,
         }
     }
+}
+
+/// Where a plan's b-plane point stands against one resonant-return circle — the
+/// planner's keyhole readout, in kilometres.
+///
+/// **This is a map coordinate, not a prediction.** `core::keyhole`'s module doc
+/// puts the closed form's absolute placement error at `δa'/a' ≈ 1.3e-4`: over an
+/// `h`-year return that is hours of arrival slip, ~10^6 km of Earth's motion,
+/// against a keyhole tens of kilometres wide. What the closed form *is* good for
+/// is the gradient, and the width is the gradient, so `widths_away` — distance
+/// measured in keyhole widths — is the number that survives; the kilometres are
+/// for reading beside the drawn circle. Only a flown return says what happens.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyholePlanRow {
+    pub h: u32,
+    pub k: u32,
+    /// The resonant semi-major axis the circle is the level set of, AU.
+    pub a_prime_au: f64,
+    /// Where the *plan* actually lands in `a'`, AU — the closed form evaluated at
+    /// the plan's own b-point. `plan_a_prime_au − a_prime_au` is the miss in the
+    /// quantity that decides the return, and it equals `distance_km · |∇a'|` to
+    /// first order (the binding test pins that).
+    pub plan_a_prime_au: f64,
+    /// Distance from the plan's b-point to the circle, km: **positive outside**
+    /// the circle, negative inside it.
+    pub distance_km: f64,
+    /// The keyhole's full width at the point of the circle the plan is nearest, km.
+    pub width_km: f64,
+    /// `|distance| / (width/2)` — how many keyhole half-widths of aiming error.
+    pub widths_away: f64,
+    /// Whether the plan lies inside the keyhole band, i.e. the map says this plan
+    /// sets up the `h:k` return.
+    pub inside: bool,
+    /// The point of the circle nearest the plan, `(ξ, ζ)` km — where the plan
+    /// would have to move to.
+    pub closest_point_km: (f64, f64),
+}
+
+impl KeyholePlanRow {
+    fn from_proximity(f: &OpikFrame, p: Vector2<f64>, k: &KeyholeProximity) -> Self {
+        Self {
+            h: k.circle.resonance.h,
+            k: k.circle.resonance.k,
+            a_prime_au: k.circle.a_prime / CORE_AU_M,
+            plan_a_prime_au: f.post_encounter_semi_major_axis(p) / CORE_AU_M,
+            distance_km: k.signed_distance / M_PER_KM,
+            width_km: k.keyhole.width / M_PER_KM,
+            widths_away: k.widths_away(),
+            inside: k.inside(),
+            closest_point_km: (k.closest_point.x / M_PER_KM, k.closest_point.y / M_PER_KM),
+        }
+    }
+}
+
+/// The planner's whole keyhole answer for the current plan: where it lands, and
+/// against which resonant return.
+///
+/// Two circles are named because they answer different questions and are not
+/// always the same one: `nearest` is the closest locus in kilometres (the one to
+/// read beside the drawn map), `tightest` is the one the plan is nearest *in
+/// keyhole widths* — a wide far keyhole 200 km away is a likelier return than a
+/// 25 km one 50 km away, and the far keyholes are the wide ones.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyholeReadout {
+    /// The plan's b-point in the pinned frame, `(ξ, ζ)` km.
+    pub plan_point_km: (f64, f64),
+    /// `|B|` of the plan, km.
+    pub b_km: f64,
+    /// How far out the circle census reaches, km — `keyhole_circles`' own
+    /// 60-capture-radii cut. A plan beyond this has walked off the map.
+    pub mapped_b_max_km: f64,
+    /// `b_km > mapped_b_max_km`: the nearest mapped circle is then an artifact of
+    /// where the census was truncated, not a fact about the plan. Say so instead
+    /// of quoting it.
+    pub beyond_mapped_region: bool,
+    /// Closest in kilometres.
+    pub nearest: KeyholePlanRow,
+    /// Closest in keyhole widths.
+    pub tightest: KeyholePlanRow,
 }
 
 /// Discover the loaded kernel's usable coverage window by bisecting on whether
@@ -1605,6 +1684,66 @@ impl MissionCore {
             .iter()
             .map(|c| KeyholeCircleRow::from_circle(f, c))
             .collect()
+    }
+
+    /// Where the **current plan** leaves the rock in keyhole terms: the distance
+    /// from its b-point to the resonant-return circles of `keyhole_circles`.
+    ///
+    /// This is the thesis' corollary made readable — *a miss can be worse than a
+    /// hit if it is the wrong miss*. A plan that clears Earth by a comfortable
+    /// margin but parks the rock on a resonant circle has bought a return, and
+    /// nothing else in the panel would say so.
+    ///
+    /// `None` when there is no plan, no pinned frame, no b-plane reduction (a
+    /// clean miss leaves the 1.3 LD scan gate and *has* no b-point — which is
+    /// itself worth saying, because the wide keyholes are the far ones and a pass
+    /// that far out flies past them unmeasured), or when the census is empty.
+    ///
+    /// **Which frame the circles are computed in, and what that costs.** The
+    /// circles here are the *nominal* encounter's, and the deflected b-point is
+    /// placed on them — so the panel and the drawn map can never name different
+    /// resonances. `core::keyhole_target` takes the opposite discipline for a
+    /// *return* (rebuild the frame; a different asymptote means the old axes are
+    /// meaningless), and the two are reconciled by scale rather than by
+    /// principle: a resonant circle depends on the encounter only through
+    /// `c = μ⊕/v∞²` and `θ`, and a small along-track nudge years out changes
+    /// *where* the rock arrives enormously but barely changes how fast or from
+    /// what direction. A return three years later is a different encounter; a
+    /// nudged version of the same flyby is not.
+    ///
+    /// **Measured** on the flown 3:4 plan (the binding test prints it):
+    /// `v_inf` 7 633.2 m/s nominal vs 7 635.6 m/s deflected, `+3.1e-4` relative,
+    /// which moves the 3:4 circle by **1.5 km of centre and 1.6 km of radius
+    /// against a 24.9 km door** — ~12 % of the width, and ~15 % of the 20.4 km
+    /// this readout reports for that plan. Small enough that the shared-frame
+    /// choice stands; *not* small enough to call negligible, so it is asserted
+    /// rather than assumed, with the test failing if it ever reaches a quarter of
+    /// the keyhole width.
+    ///
+    /// **The plan's b-point is projected raw**, not through
+    /// [`deflected_b_point_km`](Self::deflected_b_point_km)'s magnitude rescale.
+    /// That rescale exists so the drawn mark can never contradict the verdict's
+    /// scalar `|B|`; it moves the point by under 0.01 %, which is invisible on
+    /// screen but is kilometres at these radii — the same order as a keyhole
+    /// width. The readout wants the true `(ξ, ζ)`, so it takes it.
+    ///
+    /// Closed-form throughout: microseconds, safe on `plan_changed`.
+    pub fn keyhole_readout(&self, max_years: u32) -> Option<KeyholeReadout> {
+        let f = self.opik.as_ref()?;
+        let enc = self.plan.as_ref()?.encounter?;
+        let p = f.project(&enc.b_vector);
+        let b_max = 60.0 * f.capture_radius;
+        let circles = f.resonant_circles(2..=max_years.max(2), 24, b_max);
+        let nearest = f.nearest_keyhole(&circles, p)?;
+        let tightest = f.tightest_keyhole(&circles, p)?;
+        Some(KeyholeReadout {
+            plan_point_km: (p.x / M_PER_KM, p.y / M_PER_KM),
+            b_km: enc.impact_parameter / M_PER_KM,
+            mapped_b_max_km: b_max / M_PER_KM,
+            beyond_mapped_region: enc.impact_parameter > b_max,
+            nearest: KeyholePlanRow::from_proximity(f, p, &nearest),
+            tightest: KeyholePlanRow::from_proximity(f, p, &tightest),
+        })
     }
 
     /// The nominal (impact) track through the encounter window, projected into the
@@ -5079,6 +5218,229 @@ mod tests {
             "a retrograde nudge should move the b-point along −ζ, got ({:.0}, {:.0})",
             p.x,
             p.y
+        );
+    }
+
+    /// Kernel-gated. The planner's keyhole readout — *a miss can be worse than a
+    /// hit if it is the wrong miss.*
+    ///
+    /// Pinned against the one keyhole this project has actually **flown**:
+    /// `probe_keyhole_return` (and `core::keyhole`'s regression test) put the 3:4
+    /// resonant return at a retrograde Δv of **0.216550 m/s** applied at campaign
+    /// start, which comes back inside Earth 3 years later. So the readout, given
+    /// that exact plan, has to say the plan is in — or within a whisker of — the
+    /// 3:4 keyhole. Any other answer means the closed-form map and the flown
+    /// trajectory disagree, and the map is the thing on screen.
+    ///
+    /// **Measured (2026-09-05): 20.4 km from the 3:4 circle, against a 24.9 km
+    /// keyhole width — 1.64 half-widths, so the map calls it *outside* a door the
+    /// rock demonstrably flies through.** That is the linearised width being
+    /// conservative by about 1.6×, exactly the order-unity slack `core::keyhole`
+    /// warns its width definition carries. It is why the panel prints the
+    /// distance in widths rather than a yes/no: a binary would say NO to a plan
+    /// that returns to Earth. Pinned here so the slack is a measurement rather
+    /// than an assumption — if it moves, the copy has to move with it.
+    ///
+    /// The rest is the self-consistency the readout claims: the named resonance
+    /// is one the drawn map contains, the closest point really sits on that
+    /// circle, and the two rankings — nearest in kilometres, nearest in keyhole
+    /// widths — are each the minimum of their own key over the same census.
+    #[test]
+    fn the_keyhole_readout_finds_the_three_four_door_the_probe_flew() {
+        if !have_kernels() {
+            eprintln!("skipping the_keyhole_readout_finds_the_three_four_door: no DE kernel");
+            return;
+        }
+        let mut mc = MissionCore::load().expect("load kernels");
+        assert!(
+            mc.keyhole_readout(7).is_none(),
+            "no scenario, no readout — never a zeroed one"
+        );
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        assert!(
+            mc.keyhole_readout(7).is_none(),
+            "no plan, no readout: the nominal is an impact, not a miss to place"
+        );
+
+        // The flown keyhole: the probe's Δv, applied where the probe applied it.
+        let lead = mc.impact_tdb_seconds() - mc.epoch0_tdb_seconds();
+        mc.set_plan(lead, -0.216_550)
+            .expect("the flown plan solves");
+        let r = mc
+            .keyhole_readout(7)
+            .expect("a readout for a plan with a b-point");
+        println!(
+            "flown 3:4 plan: b {:.0} km at (xi {:.0}, zeta {:.0}); tightest {}:{} \
+             d {:.1} km, width {:.1} km, {:.3} widths, inside {}; nearest {}:{} d {:.1} km",
+            r.b_km,
+            r.plan_point_km.0,
+            r.plan_point_km.1,
+            r.tightest.h,
+            r.tightest.k,
+            r.tightest.distance_km,
+            r.tightest.width_km,
+            r.tightest.widths_away,
+            r.tightest.inside,
+            r.nearest.h,
+            r.nearest.k,
+            r.nearest.distance_km
+        );
+        assert!(!r.beyond_mapped_region, "the flown plan is on the map");
+        assert_eq!(
+            (r.tightest.h, r.tightest.k),
+            (3, 4),
+            "the flown Δv aims at the 3:4 return; the readout named {}:{}",
+            r.tightest.h,
+            r.tightest.k
+        );
+        assert!(
+            (1.2..2.2).contains(&r.tightest.widths_away),
+            "the flown keyhole Δv sits {:.2} half-widths from the 3:4 circle; 1.64 was \
+             measured, and this rock returns to Earth from there. Outside that band the \
+             closed-form map and the flown return have parted company, and the panel's \
+             \"N widths off\" copy is no longer calibrated against anything",
+            r.tightest.widths_away
+        );
+        assert!(
+            (18.0..23.0).contains(&r.tightest.distance_km.abs())
+                && (22.0..28.0).contains(&r.tightest.width_km),
+            "3:4 door: {:.1} km away, {:.1} km wide (20.4 / 24.9 measured)",
+            r.tightest.distance_km,
+            r.tightest.width_km
+        );
+
+        // |B| is the same number the verdict reads, and the point plots there.
+        let b_km = mc.deflected_impact_parameter_m().expect("|B|") / M_PER_KM;
+        assert!((r.b_km - b_km).abs() < 1e-6 * b_km);
+        let plotted =
+            (r.plan_point_km.0 * r.plan_point_km.0 + r.plan_point_km.1 * r.plan_point_km.1).sqrt();
+        assert!(
+            (plotted - b_km).abs() < 1e-3 * b_km,
+            "the raw (xi, zeta) must carry the plan's own |B| to the projection's accuracy: \
+             plotted {plotted:.1} km vs |B| {b_km:.1} km"
+        );
+
+        // ---- the frame question, measured rather than assumed ---------------
+        //
+        // The readout places the DEFLECTED b-point on circles computed in the
+        // NOMINAL encounter's Öpik frame. `core::keyhole_target` argues the
+        // opposite discipline for a *return* — rebuild the frame, because a
+        // different asymptote means the old axes carry no meaning — so the two
+        // have to be reconciled rather than left to look inconsistent.
+        //
+        // The reconciliation is that a resonant circle depends on the encounter
+        // only through `c = μ⊕/v∞²` and `θ`, and a small along-track nudge years
+        // out moves *where* the rock arrives enormously while barely changing
+        // *how fast* or *from what direction*. A return three years later is a
+        // different encounter entirely; a nudged version of the same flyby is
+        // not. That is an argument, so here is the measurement: rebuild the
+        // frame from the deflected encounter and compare the 3:4 circle it
+        // produces against the one the readout used. The gap has to be small
+        // beside the 24.9 km door, or the reported 20.4 km is partly frame error.
+        let f_nom = mc.opik.as_ref().expect("nominal frame");
+        let defl = mc
+            .plan
+            .as_ref()
+            .expect("plan")
+            .encounter
+            .expect("encounter");
+        let t_ca = Epoch::from_tdb_seconds_past_j2000(mc.impact_tdb_seconds());
+        let f_def = opik_frame_for(&defl, t_ca, &mc.ephemeris).expect("deflected frame");
+        let c_nom = f_nom
+            .resonant_circle(asteroid_core::Resonance { h: 3, k: 4 })
+            .expect("3:4 in the nominal frame");
+        let c_def = f_def
+            .resonant_circle(asteroid_core::Resonance { h: 3, k: 4 })
+            .expect("3:4 in the deflected frame");
+        let d_centre = (c_nom.center_zeta - c_def.center_zeta).abs() / M_PER_KM;
+        let d_radius = (c_nom.radius - c_def.radius).abs() / M_PER_KM;
+        println!(
+            "frame check: v_inf {:.3} vs {:.3} m/s ({:+.2e} rel); 3:4 centre {:.1} km apart, \
+             radius {:.1} km apart, against a {:.1} km door",
+            f_nom.v_inf,
+            f_def.v_inf,
+            (f_def.v_inf - f_nom.v_inf) / f_nom.v_inf,
+            d_centre,
+            d_radius,
+            r.tightest.width_km
+        );
+        assert!(
+            d_centre + d_radius < 0.25 * r.tightest.width_km,
+            "rebuilding the Öpik frame from the deflected encounter moves the 3:4 circle by \
+             {:.1} km (centre) + {:.1} km (radius) against a {:.1} km keyhole. The readout \
+             places the deflected b-point on the NOMINAL frame's circles so the panel and the \
+             drawn map agree; at this size that choice is no longer free and the reported \
+             distance is partly frame error",
+            d_centre,
+            d_radius,
+            r.tightest.width_km
+        );
+
+        // The rows are self-consistent, and consistent with the drawn circles.
+        let circles = mc.keyhole_circles(7);
+        for row in [&r.nearest, &r.tightest] {
+            let c = circles
+                .iter()
+                .find(|c| c.h == row.h && c.k == row.k)
+                .expect("the named resonance is one the map draws");
+            assert!(
+                (c.a_prime_au - row.a_prime_au).abs() < 1e-12,
+                "the row's resonance must be the map's"
+            );
+            let dx = row.closest_point_km.0;
+            let dy = row.closest_point_km.1 - c.center_zeta_km;
+            assert!(
+                ((dx * dx + dy * dy).sqrt() - c.radius_km).abs() < 1e-6 * c.radius_km,
+                "{}:{} closest point is off its own circle",
+                row.h,
+                row.k
+            );
+            println!(
+                "  {}:{}  d {:.2} km  |da'| {:.3e} AU  (width {:.2} km, {:.3} widths)",
+                row.h,
+                row.k,
+                row.distance_km,
+                (row.plan_a_prime_au - row.a_prime_au).abs(),
+                row.width_km,
+                row.widths_away
+            );
+        }
+
+        // Each ranking is the minimum of its own key, over the same census.
+        for c in &circles {
+            let dx = r.plan_point_km.0;
+            let dy = r.plan_point_km.1 - c.center_zeta_km;
+            let d = ((dx * dx + dy * dy).sqrt() - c.radius_km).abs();
+            assert!(
+                r.nearest.distance_km.abs() <= d * (1.0 + 1e-9),
+                "{}:{} at {:.1} km beats the reported nearest {:.1} km",
+                c.h,
+                c.k,
+                d,
+                r.nearest.distance_km.abs()
+            );
+        }
+
+        // And the frontend's own default plan — one period of lead, 0.2 m/s — is
+        // a *different* place on the map, so the readout is reading the plan and
+        // not a constant.
+        mc.set_plan(mc.period_seconds(), -0.2).expect("plan solves");
+        let d = mc.keyhole_readout(7).expect("readout");
+        println!(
+            "default plan: b {:.0} km; tightest {}:{} d {:.1} km ({:.2} widths)",
+            d.b_km, d.tightest.h, d.tightest.k, d.tightest.distance_km, d.tightest.widths_away
+        );
+        assert!(
+            (d.plan_point_km.1 - r.plan_point_km.1).abs() > 1.0,
+            "two different plans must not land on the same b-point"
+        );
+        assert!(
+            d.tightest.widths_away > r.tightest.widths_away,
+            "the flown-keyhole Δv must be closer to its door ({:.2} widths) than the \
+             default plan is to any ({:.2})",
+            r.tightest.widths_away,
+            d.tightest.widths_away
         );
     }
 

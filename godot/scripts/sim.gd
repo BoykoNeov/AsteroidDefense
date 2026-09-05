@@ -43,6 +43,20 @@ const AU_KM := 1.495978707e8
 const LD_KM := 384400.0                # lunar distance, km
 const DAY_S := 86400.0
 
+## How far ahead the resonant-return census looks, years. One constant for the
+## whole app: the b-plane view draws the circles inside this horizon and the
+## planner's keyhole readout names one of them, and a panel naming a resonance
+## the map does not draw would be the picture contradicting the number.
+const KEYHOLE_MAX_YEARS := 7
+
+## How close, in keyhole half-widths, before the planner stops saying CLEAR and
+## starts printing the number. The flown 3:4 keyhole sits at 1.64 half-widths
+## and returns the rock to Earth (core/src/keyhole_target.rs), which is the
+## calibration: the alert band is a small multiple of a door known to work, not
+## a distance in kilometres, because a kilometre means different things at a
+## 25 km door and a 25 000 km one.
+const KEYHOLE_ALERT_WIDTHS := 4.0
+
 ## Whether the threat and planner are live: true once the core's scenario has
 ## finished building and installed (see `_poll_build`). Consumers check this
 ## before drawing or reading anything threat-shaped; nothing fakes a number while
@@ -403,6 +417,15 @@ var plan_clean_miss := false
 ## plan, not the one on screen. Readouts must say so rather than assert a stale
 ## verdict as current.
 var plan_solving := false
+
+## Where the solved plan leaves the rock in **keyhole** terms — the core's
+## `keyhole_readout`, refreshed once per solve rather than per frame (it is
+## closed-form and cheap, but the panel reads it every frame it is open).
+##
+## Empty when there is no plan, no pinned Opik frame, or no b-plane reduction to
+## measure against. All of the keys are documented on the binding; nothing here
+## computes any of them. Read it through `keyhole_label` / `keyhole_note`.
+var plan_keyhole := {}
 
 ## Debounce for the core solve. Each solve re-propagates the post-impulse arc
 ## (~0.9 s, down from ~11 s before the core's nominal cache) — fast enough to feel
@@ -1186,6 +1209,7 @@ func _solve_plan() -> void:
 		plan_clean_miss = false
 		miss_ld = 0.0
 		deflect_ok = false
+		plan_keyhole = {}
 		event_logged.emit(_stamp(t) + "  PLAN SOLVE FAILED - " + str(mission.last_error()))
 		plan_changed.emit()
 		return
@@ -1219,6 +1243,9 @@ func _solve_plan() -> void:
 	# `b_km > cap_km` would read the best possible outcome as a catastrophic
 	# failure at a negative miss distance.
 	deflect_ok = plan_clean_miss or b_km > cap_km
+	# The keyhole corollary: a plan can clear Earth and still park the rock on a
+	# resonant-return circle, which nothing else in the panel would say.
+	plan_keyhole = mission.keyhole_readout(KEYHOLE_MAX_YEARS)
 	if committed:
 		_rebuild_events()
 	plan_changed.emit()
@@ -1926,6 +1953,86 @@ func try_commit() -> void:
 ## brackets and bisects on the real perigee — but takes ~18 s to do it, which is
 ## not a readout that can sit next to a live planner. So this stays a labelled
 ## first-order guess rather than a number pretending to be the solve.
+## The keyhole line the planner prints — the thesis' corollary in one row:
+## *a miss can be worse than a hit if it is the wrong miss.*
+##
+## Names the resonance the plan is nearest **in keyhole widths**, not in
+## kilometres, because that is the comparison the closed form actually supports:
+## the map's absolute placement carries ~1.3e-4 in a', which over a multi-year
+## return is a million kilometres of Earth's motion, while its *gradient* — which
+## is what a keyhole width is — is trustworthy. So "2.6 doors away" survives and
+## "41 km" is only a coordinate to read beside the drawn circle. The kilometres
+## are printed too, second, for exactly that.
+func keyhole_label() -> String:
+	if plan_solving:
+		return "SOLVING..."
+	if not has_plan():
+		return "--"
+	# A clean miss has left the core's scan gate, so there is no b-plane
+	# reduction to place against a circle. Not a blank and not a reassurance:
+	# the WIDE keyholes are the FAR ones, so a pass this far out flies past the
+	# widest doors on the map with nothing measuring it.
+	if plan_clean_miss:
+		return "UNMEASURED - PASS LEFT THE ENCOUNTER GATE"
+	if plan_keyhole.is_empty():
+		return "NO MAP - FRAME NOT PINNED"
+	if plan_keyhole.get("beyond_mapped_region", false):
+		return "PAST THE MAPPED RETURNS (>%s KM)" % group_num(
+			int(plan_keyhole.get("mapped_b_max_km", 0.0)))
+	var r: Dictionary = plan_keyhole.get("tightest", {})
+	if r.is_empty():
+		return "NO RESONANT RETURN IN REACH"
+	var name := "%d:%d" % [int(r.get("h", 0)), int(r.get("k", 0))]
+	var w: float = r.get("widths_away", 0.0)
+	var km := group_num(int(abs(r.get("distance_km", 0.0))))
+	if r.get("inside", false):
+		return "** IN THE %s KEYHOLE - RETURN SET UP" % name
+	# Three registers, because 1.6 widths and 560 widths are different news and a
+	# single "%.1f WIDTHS" prints both in the same voice. The 4-width cut is where
+	# the map stops being able to tell "near" from "nowhere near": the one keyhole
+	# this project has flown sits at 1.64 half-widths and returns to Earth, so the
+	# band worth shouting about is a small multiple of that, not a fixed distance.
+	if w <= KEYHOLE_ALERT_WIDTHS:
+		return "%.1f WIDTHS OFF %s  (%s KM)" % [w, name, km]
+	return "CLEAR - NEAREST %s IS %s KM OFF" % [name, km]
+
+
+## Whether the plan is close enough to a resonant return that the panel should
+## shout. The one condition, so the blink and the wording can never disagree.
+##
+## Deliberately NOT the core's `inside` flag: the closed form's keyhole width is
+## conservative by about 1.6x against the only keyhole this project has actually
+## flown (20.4 km from the 3:4 circle, 24.9 km wide, and it returns inside Earth),
+## so `inside` would read false for the very case the row exists to warn about.
+func keyhole_alert() -> bool:
+	if plan_solving or not has_plan() or plan_clean_miss or plan_keyhole.is_empty():
+		return false
+	if plan_keyhole.get("beyond_mapped_region", false):
+		return false
+	var r: Dictionary = plan_keyhole.get("tightest", {})
+	return not r.is_empty() and float(r.get("widths_away", 1e30)) <= KEYHOLE_ALERT_WIDTHS
+
+
+## The caveat that has to travel with `keyhole_label`, in the same spirit as the
+## b-plane view's frame label: the map says where to fly, and only a flown return
+## says what happens. Empty when there is nothing to caveat.
+func keyhole_note() -> String:
+	if plan_solving or not has_plan() or plan_keyhole.is_empty():
+		return ""
+	if plan_clean_miss:
+		return "THE WIDE KEYHOLES ARE THE FAR ONES"
+	var r: Dictionary = plan_keyhole.get("tightest", {})
+	var near: Dictionary = plan_keyhole.get("nearest", {})
+	# When the closest circle in kilometres is not the one the plan is most at
+	# risk of being in, say so - that disagreement IS the lesson.
+	if not r.is_empty() and not near.is_empty() and (
+			int(near.get("h", 0)) != int(r.get("h", 0))
+			or int(near.get("k", 0)) != int(r.get("k", 0))):
+		return "NEAREST CIRCLE IS %d:%d - NARROWER DOOR" % [
+			int(near.get("h", 0)), int(near.get("k", 0))]
+	return "CLOSED-FORM MAP - ONLY A FLOWN RETURN CONFIRMS"
+
+
 func req_dv_label() -> String:
 	if plan_solving or not has_plan():
 		return "--"

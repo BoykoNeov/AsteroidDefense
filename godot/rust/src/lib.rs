@@ -30,9 +30,9 @@ use mission_core::{
     display_comet, heaviest_deliverable_kg, launch_vehicle, launch_vehicle_count, load_neo_bodies,
     measure_tier2_shifts, mount_small_bodies, probe_tow_plan, required_cell_mass, seed_orrery_body,
     solve_required_dv_anchor, tractor_readout as score_tractor_plan, verify_porkchop_cell,
-    BuiltScenario, CellVerdict, MissionCore, OrreryBody, PorkchopView, ThreatOrbitKnobs,
-    Tier2Shifts, TractorPlan, REQUIRED_DV_LAW_MIN_PERIODS, SB441_BODIES, THREAT_RADIUS_M,
-    TRACTOR_HOVER_RADII,
+    BuiltScenario, CellVerdict, KeyholePlanRow, MissionCore, OrreryBody, PorkchopView,
+    ThreatOrbitKnobs, Tier2Shifts, TractorPlan, REQUIRED_DV_LAW_MIN_PERIODS, SB441_BODIES,
+    THREAT_RADIUS_M, TRACTOR_HOVER_RADII,
 };
 
 /// The launcher at a GDScript-supplied index, or `None` for a negative or
@@ -2259,6 +2259,60 @@ impl Mission {
             out.push(&d);
         }
         out
+    }
+
+    /// Where the current plan leaves the rock **in keyhole terms** — the planner's
+    /// answer to *"a miss can be worse than a hit if it is the wrong miss"*.
+    ///
+    /// Empty dictionary when there is no plan, no pinned frame, or no b-plane
+    /// reduction (a clean miss has left the 1.3 LD scan gate and has no b-point;
+    /// the wide keyholes are the far ones, so such a pass flies past them
+    /// unmeasured — say that rather than printing a blank).
+    ///
+    /// Otherwise: `plan_xi_km`, `plan_zeta_km`, `b_km`, `mapped_b_max_km`,
+    /// `beyond_mapped_region`, and two sub-dictionaries `nearest` (closest locus
+    /// in kilometres) and `tightest` (closest in keyhole widths — not always the
+    /// same circle), each with `h`, `k`, `a_prime_au`, `plan_a_prime_au`,
+    /// `distance_km` (signed, + outside the circle), `width_km`, `widths_away`,
+    /// `inside`, `closest_xi_km`, `closest_zeta_km`.
+    ///
+    /// **The kilometres are a map coordinate, not a prediction of a return** —
+    /// see `MissionCore::keyhole_readout`. Closed-form; safe on `plan_changed`.
+    #[func]
+    fn keyhole_readout(&self, max_years: i64) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        let Some(r) = self
+            .core
+            .as_ref()
+            .and_then(|c| c.keyhole_readout(max_years.clamp(2, 20) as u32))
+        else {
+            return d;
+        };
+        d.set("plan_xi_km", r.plan_point_km.0);
+        d.set("plan_zeta_km", r.plan_point_km.1);
+        d.set("b_km", r.b_km);
+        d.set("mapped_b_max_km", r.mapped_b_max_km);
+        d.set("beyond_mapped_region", r.beyond_mapped_region);
+        d.set("nearest", &Self::keyhole_row(&r.nearest));
+        d.set("tightest", &Self::keyhole_row(&r.tightest));
+        d
+    }
+
+    /// One [`KeyholePlanRow`] as a dictionary — the two the readout returns share
+    /// a shape so the panel can format either with one helper.
+    fn keyhole_row(r: &KeyholePlanRow) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        d.set("h", r.h as i64);
+        d.set("k", r.k as i64);
+        d.set("a_prime_au", r.a_prime_au);
+        d.set("plan_a_prime_au", r.plan_a_prime_au);
+        d.set("distance_km", r.distance_km);
+        d.set("width_km", r.width_km);
+        d.set("widths_away", r.widths_away);
+        d.set("inside", r.inside);
+        d.set("closest_xi_km", r.closest_point_km.0);
+        d.set("closest_zeta_km", r.closest_point_km.1);
+        d
     }
 
     /// f64 nalgebra points → a Godot `PackedVector3Array` (the f32 cast at the FFI

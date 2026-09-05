@@ -72,7 +72,7 @@ pub use keyhole::{
 pub use keyhole_target::{
     aim_at_resonance, fly_keyhole_shot, solve_keyhole_return, FlownReturn, KeyholeAim,
     KeyholeAiming, KeyholeRefineTol, KeyholeShot, KeyholeShotOptions, KeyholeSolution,
-    KeyholeTargetError,
+    KeyholeTargetError, RETURN_GATE_PER_YEAR_M,
 };
 pub use lambert::{lambert_universal, LambertError, LambertSolution};
 pub use launch_vehicle::{LaunchVehicle, LAUNCH_VEHICLES};

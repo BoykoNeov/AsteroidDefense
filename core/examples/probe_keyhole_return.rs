@@ -30,22 +30,33 @@
 //! search wearing a physics costume, and the scalar return distance looks
 //! identical either way.
 //!
-//! **Measured (2026-09-02, shipping scenario, 3:4 Minus, retrograde):** the
-//! closed-form aim gave Δv = 0.216438 m/s and a return at 53 841 km; the refined
-//! floor is **0.216550 m/s → 1 130 km from Earth's centre on 2042-12-31**, 3.00 yr
-//! after the 2040-01-01 flyby. Inside Earth: the 3:4 keyhole is an **impact**
-//! keyhole. The Δv window at the floor is ~1.3e-5 m/s, which at ~1e6 km of b per
-//! m/s is ~13 km of b-plane — the same order as the closed form's 24.9 km far-end
-//! keyhole width. `keyhole_target.rs` re-flies that Δv as a 30 s regression test.
+//! **Measured through this path (2026-09-06, shipping scenario, 3:4 Minus,
+//! retrograde), 18 flights in 491 s:** the closed-form aim gave
+//! Δv = 0.216438 m/s and a return at 53 841 km; the refined floor is
+//! **0.216550 m/s → 1 130 km from Earth's centre on 2042-12-31**, 3.00 yr after
+//! the 2040-01-01 flyby. Inside Earth: the 3:4 keyhole is an **impact** keyhole.
+//! The Δv window at the floor is ~1.3e-5 m/s, which at ~1e6 km of b per m/s is
+//! ~13 km of b-plane — the same order as the closed form's 24.9 km far-end keyhole
+//! width. (These reproduce the 2026-09-02 run that predated the core API, so the
+//! generalisation cost nothing in accuracy.) `keyhole_target.rs` re-flies that Δv
+//! as a 30 s regression test.
+//!
+//! **What the refinement actually does**, in the return's own frame: the aim
+//! lands at `ξ₂ 3 549 / ζ₂ −60 185 km` — a miss that is almost entirely *arrival
+//! timing* — and the search drives `ζ₂` to 786 km while `ξ₂` barely moves. The
+//! floor is the orbit-to-orbit offset, and this is the run that shows it rather
+//! than asserting it.
 //!
 //! Requires kernels. ~4 min (the Δv solve ~230 s, then ~15 re-flies at ~15 s).
 //!
 //!   cargo run -p asteroid_core --release --example probe_keyhole_return
 //!   cargo run -p asteroid_core --release --example probe_keyhole_return -- 5 6 plus pro
 //!
-//! Arguments (all optional, positional): `h k branch direction`, where `branch`
-//! is `minus`|`plus` (which of the two ζ crossings at that ξ) and `direction` is
-//! `retro`|`pro` (which ξ side the nudge lands on — measured, not chosen).
+//! Arguments (all optional, positional): `h k branch direction iterations`, where
+//! `branch` is `minus`|`plus` (which of the two ζ crossings at that ξ),
+//! `direction` is `retro`|`pro` (which ξ side the nudge lands on — measured, not
+//! chosen), and `iterations` is the golden-section budget (default 12; each one
+//! is a flight).
 
 use anise::constants::frames::{EARTH_J2000, SUN_J2000};
 use asteroid_core::{
@@ -65,6 +76,10 @@ fn main() {
     };
     let retrograde =
         !matches!(args.get(3).map(|s| s.to_lowercase()), Some(s) if s.starts_with("pro"));
+    // Golden-section iterations. 12 is enough for the 3:4 (a 1 % bracket that
+    // never widens); a resonance whose aim is further off needs more, and the
+    // ξ₂/ζ₂ split below is what tells you which case you are in.
+    let iterations: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(12);
     let resonance = Resonance { h, k };
     println!(
         "target: {resonance}, {:?} branch, {} nudge",
@@ -109,6 +124,11 @@ fn main() {
     // impulse barely moves. Held fixed; the aim chooses ζ.
     let xi = frame.project(&nominal.b_vector).x;
 
+    let tol = KeyholeRefineTol {
+        max_iterations: iterations,
+        ..Default::default()
+    };
+
     let t = Instant::now();
     let solution = match solve_keyhole_return(
         &scenario,
@@ -123,7 +143,7 @@ fn main() {
         xi,
         branch,
         &KeyholeShotOptions::default(),
-        KeyholeRefineTol::default(),
+        tol,
         DvSolveTol {
             rel_tol: 1.0e-3,
             ..Default::default()
@@ -164,15 +184,47 @@ fn main() {
             r.distance_m / nominal.capture_radius,
             r.distance_m / 384_400e3
         );
+        // A search that never bracketed its minimum has stopped on the edge of its
+        // own interval, and golden-section reports a *vanishing* Δv window while
+        // doing it — so a wall is indistinguishable from a tight answer unless the
+        // bracketing is reported. Say it before anything else, because every
+        // number underneath it is a number from the wall.
+        if !solution.bracketed {
+            println!(
+                "!! THE SEARCH NEVER BRACKETED THE MINIMUM. Δv {:.6} is the edge of the \
+                 interval, not its bottom: the widening reaches {:.0}% either side of \
+                 the aim and the minimum is further out. Raise `max_widenings`; the \
+                 Δv window below is the wall closing, not convergence.",
+                solution.best.dv_m_s,
+                100.0 * tol.reach_fraction()
+            );
+        }
+        // Whether the residual is a *floor* is a measurement, not a conclusion of
+        // having stopped searching. Δv buys arrival time, so a converged minimum
+        // has spent the timing coordinate ζ₂ and left the spatial one ξ₂. If ζ₂ still
+        // dominates, the search ran out of iterations and calling what is left
+        // "the orbit-to-orbit offset" is simply false — which is exactly what this
+        // probe printed for 7:9 before the split was checked.
+        let timing = r.timing_share().unwrap_or(f64::NAN);
+        let converged = timing < 1.0;
         if solution.is_impact_return() {
             println!(
                 "** RESONANT-RETURN IMPACT: the {resonance} keyhole is an impact keyhole, flown."
             );
-        } else {
+        } else if converged {
             println!(
                 "the {resonance} return misses by at least {:.0} km: the post-encounter orbit's \
-                 spatial offset at the return, which no timing change removes.",
+                 spatial offset at the return, which no timing change removes \
+                 (|ζ₂|/|ξ₂| = {timing:.2}, so the timing is spent).",
                 r.distance_m / 1e3
+            );
+        } else {
+            println!(
+                "NOT A FLOOR: {:.0} km of return miss is still {:.1}x more TIMING than \
+                 spatial (|ζ₂|/|ξ₂| = {timing:.2}), and Δv is a timing knob — so there is \
+                 impulse left to spend and this number is not the orbits' offset.",
+                r.distance_m / 1e3,
+                timing
             );
         }
     }

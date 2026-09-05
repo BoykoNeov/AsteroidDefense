@@ -42,7 +42,12 @@ Read this table first, then the session that owns the layer you are touching.
    The flown 3:4 sits 1.64 half-widths from its own circle and still returns
    inside Earth, so the linearised width is conservative by ~1.6× — on a sample
    of one. Two or three more flown resonances would turn that into a calibration
-   the planner row could quote instead of hedging.
+   the planner row could quote instead of hedging. **7:9 was the first attempt
+   and does not calibrate it**: its refined return floors at 46 608 km, 4.12
+   capture radii out, so it is a resonant return but not an impact keyhole for
+   this rock at this ξ — there is no "flew through the door" to measure the door
+   against. The next candidates need to be resonances whose circle passes near
+   the *impact* region, not merely near the b-point.
 5. **dop853 → IAS15 crossover**, now that 15-year multi-revolution arcs (the
    keyhole returns) are in the pipeline and the question has a customer.
 6. Phase 3.
@@ -1711,6 +1716,210 @@ less memory than this box. (CI itself is unaffected — its physics job runs onl
   rescale is < 0.01 %, invisible on screen and *kilometres* at these radii — the
   same order as a keyhole width. The keyhole readout takes the **raw**
   projection; the picture keeps the rescaled one.
+- **A converged search and a search stuck on its own bound are the same
+  picture.** Golden-section against a wall reports a *shrinking* interval, so the
+  tightness metric moves the wrong way. Report whether the minimum was ever
+  bracketed; never infer it from the window.
+- **A step that adds a constant is not a search that widens.** `hi = mid + (mid −
+  lo)` reads like it grows and reaches only `f·(n+1)`. Doubling reaches
+  `f·(2ⁿ⁺¹−1)` for the same number of flights — but only if each branch doubles
+  the gap it is **extending**. Doubling the *trailing* gap grows as `2^(n/2)` and
+  is indistinguishable by eye.
+- **A test that asserts a formula against a literal tests nothing.** It passes
+  with the code it describes deleted. Run the loop over a synthetic objective and
+  measure where it ends up.
+- **A parameter validated on one case is a parameter validated on zero cases.**
+  Both census gates and the widening reach were constants that happened to fit
+  the 3:4, and all three broke on the first other resonance tried.
 - A 45-character caveat does not fit the planner's value column (the first cut
   printed `CONFIRMS` on top of the panel border). It is indented under the label
   column instead.
+
+#### The second resonance broke it three ways — 2026-09-06
+
+The API above was written to generalise past the 3:4 and validated *on* the 3:4,
+which is not the same thing. Pointing it at **7:9** — the obvious next thing to
+try, a far circle with a wide door — failed three times, and none of the three
+failures announced itself as a bug. Two were constants that were only ever right
+for the resonance the code grew up on.
+
+**1. The first-encounter census gate is sized for a rock that hits.** The
+shipping scan gate is 5×10⁸ m, which is generous for a threat whose whole
+problem is that it arrives at Earth. A keyhole aim is the opposite: it flies
+*far* out on purpose, and this project already measured that **the wide keyholes
+are the far ones**. The 7:9 aim wants `b ≈ 5.2×10⁸ m`, just past the gate, so the
+flight returned `NoFirstEncounter` for a flyby that was there the whole time.
+`KeyholeShotOptions::widened_for_aim` now raises the gate to `max(gate, 2·b)`
+before the first flight. Widening is safe for an argmin — a wider census can only
+admit approaches that were being rejected, never move a minimum already inside —
+and it is one-way, so a caller who set a *wider* gate keeps it.
+
+**2. The return census gate has to grow with the return.** It was a constant
+0.05 AU, wide enough that it read as paranoid. It is not a taste and it is not a
+margin: the closed form misplaces `a'` by some relative δ, that becomes a period
+error `ΔT/T = 1.5δ`, and over an `h`-year return the arrival slips by
+`h·yr·1.5·δ` while Earth keeps moving at ~30 km/s. **The placement error is
+linear in `h`**, so a constant gate is correct for exactly one resonance.
+Measured: the flown 7:9 `a'` came out `9.3e-4` from the resonance — seven times
+the `1.3e-4` the module doc quotes from the 3:4, and the far circles are where
+that matters — which over seven years is ~3.6 days of slip, **~9.2×10⁶ km** of
+Earth motion against a `0.05 AU` = `7.5×10⁶ km` window. *Every* flight in the
+search reported "no return" for a return sitting just outside it. The gate is now
+`h × RETURN_GATE_PER_YEAR_M`, and that constant is defined as `0.05 AU / 3` so
+that at `h = 3` it reproduces the exact width the flown 3:4 result ran at — the
+generalisation costs the one answer this project has nothing.
+
+**3. A probe impulse that fails to fly must score, not abort.** The refinement
+called the flight directly, so any Δv in the bracket that left no encounter
+inside the gate killed the whole solve with an error instead of being scored as
+"infinitely bad and move on". Golden-section handles an infinite sample fine; it
+cannot handle an exception. The flight is now wrapped so an unusable Δv returns
+`None` → `f64::INFINITY`, while the **aim itself** and the **final best** must
+genuinely fly — scoring those as infinity would hand back a "solution" that never
+happened.
+
+#### The convergence check earned its keep on the first resonance it was pointed at
+
+The ξ₂/ζ₂ split was added as a way to falsify the module's own claim about the
+3:4 floor. On the 3:4 it confirmed it, which is the weak kind of evidence. The
+strong evidence is what it does *across* a solve — aim versus refined floor:
+
+| 3:4 | ξ₂ (spatial) | ζ₂ (timing) | ratio |
+| --- | --- | --- | --- |
+| closed-form aim, Δv 0.216438 | 3 549 km | −60 185 km | 16.96 |
+| refined floor, Δv 0.216550 | 4 013 km | 786 km | **0.196** |
+
+Timing falls by a factor of 77; the spatial offset barely moves. That is exactly
+the signature "Δv is a timing knob" predicts, and it means the ratio is a real
+convergence gauge rather than a number that happens to be small.
+
+Pointed at 7:9, the same gauge says the opposite. The search stopped at a
+3 924 232 km return miss made of `ξ₂ = 129 230 km` and `ζ₂ = −3 928 736 km` —
+**30.4× more timing than spatial** — and the old probe printed that as "the
+spatial offset, which no timing change removes", which is simply false. Δv is a
+timing knob and the residual was almost all timing, so there was impulse left to
+spend.
+
+#### The gauge said "not a floor". Believing *why* took one more measurement.
+
+The obvious reading was "the golden section ran out of iterations", and it was
+wrong. Re-running 7:9 at **30** iterations instead of 12:
+
+| 7:9 | 12 iterations | 30 iterations |
+| --- | --- | --- |
+| floor Δv | 0.772255 | 0.772272 |
+| return miss | 3 924 232 km | 3 922 376 km |
+| `ζ₂`/`ξ₂` | 30.40 | 30.43 |
+| Δv window | 4.48e-5 | **5.32e-8** |
+
+Eighteen extra flights shrank the Δv window by a factor of 842 — golden-section
+doing exactly its job — and moved the answer 1 856 km out of 3.9 million, 0.05 %.
+**Iterations were never the constraint.** Golden-section narrows a bracket; it
+does not move one.
+
+The real fault is in the bracketing, and it is arithmetic anyone can check:
+
+> The widening step was `hi = mid + (mid - lo)` — **a constant step, not a
+> doubling one**. Six widenings of 1 % therefore reach `aim × 1.07` and no
+> further. The 7:9 aim is 0.721750; `0.721750 × 1.07 = 0.772272`. **That is the
+> reported "floor", to every digit printed.**
+
+The search converged onto the **upper wall of its own search interval**. And the
+one number that should have exposed that — the Δv window — pointed the other way:
+golden-section squeezing against a bound produces a *vanishing* window, which
+reads as a tight, well-converged answer. A wall and a floor were indistinguishable
+in every number the API returned.
+
+The 3:4 never showed it because its aim is already right: it walks 5e-4 from aim
+to floor, comfortably inside the very first ±1 % bracket, so the widening loop
+never ran a single step. **The bug was unreachable from the only case the code
+had ever been run on.**
+
+Three changes:
+
+- **The widening step doubles.** `KeyholeRefineTol::reach_fraction()` is now
+  `f·(2ⁿ⁺¹ − 1)` = **127 %** of the aim at the defaults, against the old
+  `f·(n + 1)` = 7 %. Same six widenings, same cost when they are not needed.
+- **`KeyholeSolution::bracketed` says whether the minimum was ever actually
+  enclosed** — a centre strictly finite and no worse than both ends. If it is
+  false, `best` is a wall and the caller is told so instead of inferring it from
+  a suspiciously small window.
+- **The probe leads with it.** `!! THE SEARCH NEVER BRACKETED THE MINIMUM` prints
+  above everything else, because every number underneath is a number from the
+  wall.
+
+A test pins the coincidence rather than the fix, since the coincidence is the
+evidence: 7:9's walk from aim to reported floor is 6.99993 %, and the old reach
+was 7.00000 %. They are not merely close — they agree to five figures, because
+one *was* the other.
+
+#### What was behind the wall
+
+| 7:9 | on the wall | with a bracket that reaches |
+| --- | --- | --- |
+| floor Δv | 0.772272 (= the bound) | **0.810311** |
+| return miss | 3 922 376 km | **46 608 km** |
+| `ξ₂` spatial | 129 230 km | −52 998 km |
+| `ζ₂` timing | −3 928 736 km | **−0 km** |
+| ratio | 30.43 | **0.000** |
+| bracketed | no, and it never said so | yes |
+
+**The wall was 84× worse than the answer** — and it was reported with a Δv window
+of 5.3e-8, the tightest-looking number this project has produced.
+
+At the real floor the timing coordinate is driven to *zero*, which is exactly
+what "Δv is a timing knob" predicts of a converged search, and it means the
+sentence the probe prints — "the post-encounter orbit's spatial offset at the
+return, which no timing change removes" — is now **earned** rather than asserted.
+The 3:4 reproduces its pushed result to every digit (aim 0.216438 → 53 841 km;
+floor 0.216550 → 1 130 km; resonant-return impact; 18 flights), because its
+widening loop still never runs a step.
+
+#### The fix was wrong the first time, in the same way
+
+The first version of the doubling step read the **trailing** gap rather than the
+leading one:
+
+```rust
+// right branch
+let step = 2.0 * (mid - lo);   // the gap being left behind
+```
+
+which still grows — just as `2^(n/2)`. With `g = mid − lo` and `h = hi − mid`, the
+shift makes `gₖ₊₁ = hₖ` and `hₖ₊₁ = 2gₖ`, so `h` only doubles every *second*
+widening. The walk goes `w, 3w, 5w, 9w, 13w, 21w, 29w`: **reach 0.29, while
+`reach_fraction()` said 1.27.** Reading the leading gap (`2.0 * (hi - mid)` on
+the right, `2.0 * (mid - lo)` on the left) gives `w, 3w, 7w, 15w, 31w, 63w,
+127w`, which is what the formula claims. Both versions look like "doubling" in
+the source.
+
+The 7:9 result above was flown on the 0.29 version and is unaffected — its floor
+is 12.3 % from the aim, well inside 29 %, and `bracketed` came back true — but the
+*message* would have lied: a resonance needing a 40 % walk would have been told
+the bracket already reached 127 % and to look elsewhere.
+
+**Why it survived the test that existed.** `the_widening_reach_is_geometric_not_arithmetic`
+asserted `reach_fraction()` against the literal `1.27` — the formula checked
+against itself. **It would pass with the loop deleted.** The widening is now a
+`Bracket` type whose `widen` runs over any objective, and the test walks it
+downhill with `f(dv) = −dv` (which never brackets, so every widening is spent
+walking) and asserts where `hi` actually lands. Two more pin the behaviour rather
+than the claim: a minimum at half the reach must be bracketed *and* enclosed by
+`[lo, hi]`, one at twice it must not be; and three infinities are not a bracket.
+That pair also exposed the margin — `reach_fraction()` is where **`hi`** lands,
+but bracketing needs the *centre* past the minimum, and the centre reaches only
+`f·(2ⁿ − 1)`, about half as far. 7:9's floor is 12 % out against a 127 % walk, so
+the shipping margin is ample; the guarantee is "comfortably inside", not
+"inside".
+
+That is the third time in this batch that a number was checked against another
+statement of itself instead of against the thing it describes.
+
+**And the physics answer, which the bug had been hiding: 7:9 is not an impact
+keyhole for this rock at this ξ.** A resonant return is not the same thing as an
+impact; the keyhole is a short arc of the resonant circle, and 7:9's floor sits
+53 000 km off it in the *spatial* coordinate. No larger along-track impulse
+closes that — ξ is a property of the deflection **direction**, so reaching it
+would need an out-of-plane component, not more of the same nudge. That is the
+first honest negative result for a resonance other than the 3:4, and it cost 31
+flights in 814 s.

@@ -47,11 +47,24 @@
 //! physics costume**, and the scalar return distance alone cannot tell the two
 //! apart. That split is the check this module exists to make possible.
 //!
-//! **Measured on the flown 3:4 return (2026-09-05):** `ξ₂ = 4 014 km`,
-//! `ζ₂ = 891 km` — 78 % spatial, so the search converged. Its impact parameter is
-//! 4 112 km and its geocentric closest approach 1 141 km; the gap between those
-//! two is gravitational focusing, and mixing them up is the same trap
-//! `geometry.rs` documents for the first encounter.
+//! **Measured on the flown 3:4 return (2026-09-06), aim against floor** — and
+//! the contrast is the whole argument, not the floor value alone:
+//!
+//! | | `ξ₂` (spatial) | `ζ₂` (timing) | `|ζ₂|/|ξ₂|` | return |
+//! |---|---|---|---|---|
+//! | closed-form aim, Δv 0.216438 | 3 549 km | **−60 185 km** | 16.96 | 53 841 km |
+//! | refined floor, Δv 0.216550 | 4 013 km | 786 km | 0.196 | **1 130 km** |
+//!
+//! The refinement drives the **timing** component down 77× while the **spatial**
+//! one barely moves. That is the claim made visible: Δv buys arrival time and
+//! nothing else, and what is left when the timing is spent is the offset between
+//! the two orbits. A search that stopped early would sit somewhere along that
+//! first row with a plausible scalar distance and no way to tell.
+//!
+//! One number to keep straight: at the floor the return's **impact parameter** is
+//! ~4 100 km while its **geocentric closest approach** is 1 130 km. The gap is
+//! gravitational focusing, and mixing the two up is the same trap `geometry.rs`
+//! documents for the first encounter.
 //!
 //! **Where the same discipline is deliberately *not* applied.** A planner readout
 //! that places a *deflected* b-point on the *nominal* encounter's circles is
@@ -130,13 +143,6 @@ pub enum KeyholeTargetError {
         /// The impulse magnitude tried, m/s.
         dv_m_s: f64,
     },
-    /// The flight found no Earth approach inside the return gate.
-    NoReturn {
-        /// The impulse magnitude tried, m/s.
-        dv_m_s: f64,
-        /// The gate searched, metres.
-        gate_m: f64,
-    },
     /// A deflection solve or evaluation failed.
     Deflection(DeflectionError),
     /// A propagation or scenario operation failed.
@@ -165,11 +171,6 @@ impl std::fmt::Display for KeyholeTargetError {
             KeyholeTargetError::NoFirstEncounter { dv_m_s } => write!(
                 f,
                 "Δv {dv_m_s:.6} m/s left no Earth encounter inside the scan gate"
-            ),
-            KeyholeTargetError::NoReturn { dv_m_s, gate_m } => write!(
-                f,
-                "Δv {dv_m_s:.6} m/s produced no return inside {:.4} AU",
-                gate_m / AU_M
             ),
             KeyholeTargetError::Deflection(e) => write!(f, "deflection: {e}"),
             KeyholeTargetError::Scenario(e) => write!(f, "scenario: {e}"),
@@ -270,10 +271,11 @@ pub struct KeyholeShotOptions {
     pub return_span_seconds: Option<f64>,
     /// Snapshot cadence of the return propagation, seconds.
     pub return_cadence_seconds: f64,
-    /// Census gate for the **return**, metres. Deliberately wide (0.05 AU by
-    /// default): the closed form can be ~10⁶ km out in arrival placement, so a
+    /// Census gate for the **return**, metres, or `None` to derive it from the
+    /// resonance — see [`gate_for`](Self::gate_for). Deliberately wide: the closed
+    /// form can be millions of kilometres out in arrival placement, so a
     /// shipping-sized gate would report "no return" for a return that is there.
-    pub return_gate_m: f64,
+    pub return_gate_m: Option<f64>,
     /// Sampling cadence and time tolerance of the return census.
     pub return_scan_max_sample_dt: f64,
 }
@@ -289,13 +291,68 @@ impl Default for KeyholeShotOptions {
             handoff_seconds_after_ca: 30.0 * 86_400.0,
             return_span_seconds: None,
             return_cadence_seconds: 86_400.0,
-            return_gate_m: 0.05 * AU_M,
+            return_gate_m: None,
             return_scan_max_sample_dt: 6.0 * 3600.0,
         }
     }
 }
 
+/// The return census gate **per year of return**, metres: 0.05 AU over the 3:4's
+/// three years, which is the width `probe_keyhole_return` ran at.
+///
+/// The gate has to grow with the return, and it is not a taste: the closed form
+/// misplaces `a'` by some relative `δ`, that becomes a period error
+/// `ΔT/T = 1.5δ`, and over an `h`-year return the arrival slips by `h·yr·1.5·δ`
+/// while Earth keeps moving at ~30 km/s. So the placement error is **linear in
+/// `h`** and a constant gate is only ever right for one resonance.
+///
+/// Measured, which is how this stopped being a constant: aiming at **7:9** put
+/// the flown `a'` `9.3e-4` from the resonance (7× the module doc's `1.3e-4`, and
+/// the far circles are where that matters), which over seven years is ~3.6 days
+/// of slip — **~9.2×10⁶ km** of Earth motion against a fixed `0.05 AU` =
+/// `7.5×10⁶ km` gate. Every flight reported "no return" for a return sitting
+/// just outside the window.
+pub const RETURN_GATE_PER_YEAR_M: f64 = 0.05 * AU_M / 3.0;
+
 impl KeyholeShotOptions {
+    /// The return census gate for a resonance, metres — the explicit
+    /// `return_gate_m` if set, else `h ×` [`RETURN_GATE_PER_YEAR_M`].
+    ///
+    /// At `h = 3` the derived value is exactly the 0.05 AU the 3:4 probe used, so
+    /// the resonance this project has flown is unaffected.
+    pub fn gate_for(&self, resonance: Resonance) -> f64 {
+        self.return_gate_m
+            .unwrap_or(resonance.h as f64 * RETURN_GATE_PER_YEAR_M)
+    }
+
+    /// These options with the **first**-encounter scan gate widened, if needed, to
+    /// cover an aim at impact parameter `b` — `max(gate, 2·b)`.
+    ///
+    /// The shipping gate is 5×10⁸ m, chosen for a threat that hits Earth. A
+    /// keyhole aim is the opposite: it deliberately flies *far* out, and the far
+    /// resonances are the ones with the usable keyholes. Measured — aiming the
+    /// shipping rock at **7:9** wants `b ≈ 5.2×10⁸ m`, just past the gate, and the
+    /// flight reported `NoFirstEncounter` for an encounter that was there all
+    /// along. That is the generalisation failing on the second resonance tried,
+    /// which is why the gate now follows the aim instead of being a constant.
+    ///
+    /// Widening is safe for the *argmin*: `closest_approach` returns the minimum
+    /// over the span, and raising the gate can only admit approaches that were
+    /// previously rejected — it can never move a minimum that was already inside.
+    /// The `2×` covers the difference between the aimed `b` and the flown one.
+    pub fn widened_for_aim(&self, impact_parameter_m: f64) -> Self {
+        let want = 2.0 * impact_parameter_m;
+        let mut out = *self;
+        out.first_scan.max_distance = match self.first_scan.max_distance {
+            // No gate at all is *wider* than any aim; imposing one here would be a
+            // narrowing, which is the one thing this method promises not to do.
+            None => None,
+            Some(gate) if gate >= want => Some(gate),
+            Some(_) => Some(want),
+        };
+        out
+    }
+
     /// The flight span for a given resonance, seconds — the explicit
     /// `return_span_seconds` if set, else `h` years plus 0.6 yr of margin.
     pub fn span_for(&self, resonance: Resonance) -> f64 {
@@ -427,7 +484,7 @@ pub fn fly_keyhole_shot(
         ScanOptions {
             max_sample_dt: opts.return_scan_max_sample_dt,
             time_tol_seconds: opts.first_scan.time_tol_seconds,
-            max_distance: Some(opts.return_gate_m),
+            max_distance: Some(opts.gate_for(resonance)),
         },
     )
     .map_err(|e| KeyholeTargetError::Scenario(e.to_string()))?;
@@ -479,12 +536,26 @@ pub struct KeyholeRefineTol {
     /// Initial bracket half-width as a fraction of the aimed Δv.
     pub bracket_fraction: f64,
     /// How many times the bracket may be widened before giving up on containing
-    /// the minimum.
+    /// the minimum. Each widening **doubles** the step, so the reach grows as
+    /// `2ⁿ` — see [`reach_fraction`](Self::reach_fraction).
     pub max_widenings: usize,
     /// Golden-section iterations.
     pub max_iterations: usize,
     /// Stop when the bracket is this fraction of the aimed Δv.
     pub rel_tol: f64,
+}
+
+impl KeyholeRefineTol {
+    /// How far from the aimed Δv the widening can reach, as a fraction of it.
+    ///
+    /// The steps double, so `n` widenings cover `f·(2ⁿ⁺¹ − 1)`: at the defaults,
+    /// `0.01·127 = 1.27`, i.e. anywhere from the aim down to zero and up to
+    /// 2.27× it. **This used to be `f·(n + 1)` = 7 %**, because the widening
+    /// added a constant step instead of a doubling one, and 7 % is less than the
+    /// walk a far resonance needs — see [`KeyholeSolution::bracketed`].
+    pub fn reach_fraction(&self) -> f64 {
+        self.bracket_fraction * ((2.0f64).powi(self.max_widenings as i32 + 1) - 1.0)
+    }
 }
 
 impl Default for KeyholeRefineTol {
@@ -515,6 +586,17 @@ pub struct KeyholeSolution {
     pub dv_window_m_s: f64,
     /// How many flights it took (aim flight included).
     pub flights: usize,
+    /// Whether the widening ever actually **bracketed** the minimum — i.e. found
+    /// a centre lower than both ends before running out of widenings.
+    ///
+    /// **If this is false, `best` is a wall, not a floor.** Golden-section on an
+    /// interval whose minimum lies outside it converges to the nearest end and
+    /// reports a vanishing `dv_window_m_s` while doing so, which looks exactly
+    /// like a tight, well-converged answer. Measured: aiming at 7:9 with the old
+    /// constant-step widening put the "floor" at Δv 0.772272, which is the aim
+    /// 0.721750 plus six steps of 1 % — the upper bound of the search interval,
+    /// to every digit printed. Nothing else in the result said so.
+    pub bracketed: bool,
 }
 
 impl KeyholeSolution {
@@ -525,6 +607,81 @@ impl KeyholeSolution {
             .flown_return
             .as_ref()
             .is_some_and(|r| r.distance_m <= self.aimed.encounter.capture_radius)
+    }
+}
+
+/// Three impulses and their return misses, ordered `lo < mid < hi`, being grown
+/// until the middle one is the lowest — the bracketing step golden-section needs
+/// before it means anything.
+///
+/// This is a separate type for one reason: [`KeyholeRefineTol::reach_fraction`]
+/// is an *arithmetic claim about this loop*, and a test that checks the claim
+/// against a literal would pass with the loop deleted. Split out, the loop can be
+/// run over a synthetic objective in microseconds and the claim checked against
+/// what it actually does. That test is not hypothetical — it caught the reach
+/// being 0.29 while the formula said 1.27, one swapped subtraction later.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Bracket {
+    lo: f64,
+    mid: f64,
+    hi: f64,
+    f_lo: f64,
+    f_mid: f64,
+    f_hi: f64,
+}
+
+impl Bracket {
+    /// Whether the centre is a finite value no worse than both ends.
+    ///
+    /// Finiteness is not pedantry: an unusable Δv scores as infinity, and a
+    /// centre that is merely not-worse than two infinities brackets nothing.
+    fn is_bracketing(&self) -> bool {
+        self.f_mid.is_finite() && self.f_mid <= self.f_lo && self.f_mid <= self.f_hi
+    }
+
+    /// Walk downhill, **doubling the step** each time, until the centre is the
+    /// lowest of the three or `max_widenings` is spent. Returns whether it
+    /// bracketed.
+    ///
+    /// Each branch doubles the gap it is *extending* — the leading one. Reading
+    /// the trailing gap instead still grows, but as `2^(n/2)`: the steps come out
+    /// `w, 2w, 2w, 4w, 4w, 8w, 8w` and six widenings reach `29w`, not `127w`.
+    /// Both look like "doubling" in the source.
+    ///
+    /// The predecessor of this loop added a **constant** step, reaching
+    /// `f·(n + 1)` = 7 % of the aim. That is ample for a resonance whose aim is
+    /// already nearly right (the 3:4 walks 5e-4 from aim to floor, so this loop
+    /// never runs a single step for it) and hopeless for one whose aim is not:
+    /// 7:9 needs 12 %, and the search stopped *exactly on the 7 % bound* and
+    /// reported it as a floor 84× worse than the answer.
+    fn widen<E>(
+        &mut self,
+        max_widenings: usize,
+        mut f: impl FnMut(f64) -> Result<f64, E>,
+    ) -> Result<bool, E> {
+        for _ in 0..max_widenings {
+            if self.is_bracketing() {
+                return Ok(true);
+            }
+            if self.f_lo < self.f_mid {
+                let step = 2.0 * (self.mid - self.lo);
+                self.hi = self.mid;
+                self.f_hi = self.f_mid;
+                self.mid = self.lo;
+                self.f_mid = self.f_lo;
+                self.lo = (self.mid - step).max(0.0);
+                self.f_lo = f(self.lo)?;
+            } else {
+                let step = 2.0 * (self.hi - self.mid);
+                self.lo = self.mid;
+                self.f_lo = self.f_mid;
+                self.mid = self.hi;
+                self.f_mid = self.f_hi;
+                self.hi = self.mid + step;
+                self.f_hi = f(self.hi)?;
+            }
+        }
+        Ok(self.is_bracketing())
     }
 }
 
@@ -571,71 +728,97 @@ pub fn solve_keyhole_return(
         aim.perigee_m,
         dv_tol,
     )?;
+    // The aim decides how far out the flyby is, so it decides how wide the census
+    // has to look. See `widened_for_aim` — a constant gate silently reported "no
+    // encounter" for a 7:9 aim that flew fine.
+    let opts = &opts.widened_for_aim(aim.impact_parameter_m);
 
     let mut flights = 0usize;
-    let mut fly = |dv: f64| -> Result<KeyholeShot, KeyholeTargetError> {
-        flights += 1;
-        fly_keyhole_shot(scenario, ds, aiming, dv, resonance, opts)
+    // **A probe impulse that produces no return scores as infinity; it does not
+    // abort the search.** The three ways that happens are all legitimate answers
+    // to "how good is this Δv", not failures of the machinery:
+    //
+    //   - the flight found no return inside the census gate (already infinity,
+    //     via [`KeyholeShot::return_distance_m`]);
+    //   - the bracket walked to a negative Δv (`InvalidInput`) — clamped at zero
+    //     below, but a widening step can still ask;
+    //   - the pass left the **first**-encounter scan gate entirely
+    //     (`NoFirstEncounter`), which a widening step can easily do when the
+    //     resonance sits near the gate. The shipping 3:4 has ~3× of headroom, so
+    //     this would never have shown up there — which is exactly why it is worth
+    //     handling rather than discovering on the next resonance.
+    //
+    // Anything else — a propagation or ephemeris failure — still propagates,
+    // because that is the machinery breaking and scoring it as "a bad Δv" would
+    // silently hand back a minimum found over lies.
+    //
+    // `Ok(None)` is "this Δv is unusable, score it as infinitely bad"; the error
+    // arm is "the machinery broke".
+    let fly = |dv: f64, flights: &mut usize| -> Result<Option<KeyholeShot>, KeyholeTargetError> {
+        *flights += 1;
+        match fly_keyhole_shot(scenario, ds, aiming, dv.max(0.0), resonance, opts) {
+            Ok(shot) => Ok(Some(shot)),
+            Err(KeyholeTargetError::NoFirstEncounter { .. })
+            | Err(KeyholeTargetError::InvalidInput(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     };
-
-    let aimed = fly(aim_dv)?;
-    let mut f_mid = aimed.return_distance_m();
-    let mut mid = aim_dv;
-    let mut lo = aim_dv * (1.0 - tol.bracket_fraction);
-    let mut hi = aim_dv * (1.0 + tol.bracket_fraction);
-    let mut f_lo = fly(lo)?.return_distance_m();
-    let mut f_hi = fly(hi)?.return_distance_m();
-
-    // Widen until the centre is the lowest of the three: the miss is ~linear in
-    // |Δv − Δv*| on each side, so a mis-centred bracket walks downhill fast.
-    for _ in 0..tol.max_widenings {
-        if f_mid <= f_lo && f_mid <= f_hi {
-            break;
-        }
-        if f_lo < f_mid {
-            hi = mid;
-            f_hi = f_mid;
-            mid = lo;
-            f_mid = f_lo;
-            lo = mid - (hi - mid);
-            f_lo = fly(lo)?.return_distance_m();
-        } else {
-            lo = mid;
-            f_lo = f_mid;
-            mid = hi;
-            f_mid = f_hi;
-            hi = mid + (mid - lo);
-            f_hi = fly(hi)?.return_distance_m();
-        }
+    /// The score a shot (or the absence of one) contributes to the search.
+    fn miss(shot: &Option<KeyholeShot>) -> f64 {
+        shot.as_ref()
+            .map_or(f64::INFINITY, |s| s.return_distance_m())
     }
+
+    // The aim itself must fly — if the closed-form target is unreachable there is
+    // nothing to refine, and silently scoring it as infinity would hand back a
+    // "solution" that never flew.
+    let aimed = fly(aim_dv, &mut flights)?
+        .ok_or(KeyholeTargetError::NoFirstEncounter { dv_m_s: aim_dv })?;
+    let lo = (aim_dv * (1.0 - tol.bracket_fraction)).max(0.0);
+    let hi = aim_dv * (1.0 + tol.bracket_fraction);
+
+    // Widen until the centre is the lowest of the three. See [`Bracket::widen`].
+    let mut bracket = Bracket {
+        lo,
+        mid: aim_dv,
+        hi,
+        f_lo: miss(&fly(lo, &mut flights)?),
+        f_mid: aimed.return_distance_m(),
+        f_hi: miss(&fly(hi, &mut flights)?),
+    };
+    let bracketed = bracket.widen(tol.max_widenings, |dv| {
+        Ok::<f64, KeyholeTargetError>(miss(&fly(dv, &mut flights)?))
+    })?;
+    let Bracket { lo, hi, .. } = bracket;
 
     // Golden-section on [lo, hi].
     let phi = 0.5 * (5.0f64.sqrt() - 1.0);
     let (mut a, mut b) = (lo, hi);
     let mut x1 = b - phi * (b - a);
     let mut x2 = a + phi * (b - a);
-    let mut f1 = fly(x1)?.return_distance_m();
-    let mut f2 = fly(x2)?.return_distance_m();
+    let mut f1 = miss(&fly(x1, &mut flights)?);
+    let mut f2 = miss(&fly(x2, &mut flights)?);
     for _ in 0..tol.max_iterations {
         if f1 < f2 {
             b = x2;
             x2 = x1;
             f2 = f1;
             x1 = b - phi * (b - a);
-            f1 = fly(x1)?.return_distance_m();
+            f1 = miss(&fly(x1, &mut flights)?);
         } else {
             a = x1;
             x1 = x2;
             f1 = f2;
             x2 = a + phi * (b - a);
-            f2 = fly(x2)?.return_distance_m();
+            f2 = miss(&fly(x2, &mut flights)?);
         }
         if (b - a) < tol.rel_tol * aim_dv.max(f64::MIN_POSITIVE) {
             break;
         }
     }
     let dv_best = if f1 < f2 { x1 } else { x2 };
-    let best = fly(dv_best)?;
+    let best = fly(dv_best, &mut flights)?
+        .ok_or(KeyholeTargetError::NoFirstEncounter { dv_m_s: dv_best })?;
 
     Ok(KeyholeSolution {
         aim,
@@ -644,6 +827,7 @@ pub fn solve_keyhole_return(
         best,
         dv_window_m_s: b - a,
         flights,
+        bracketed,
     })
 }
 
@@ -772,11 +956,14 @@ mod tests {
     /// scalar `distance_m` is identical either way, which is exactly why this
     /// test reduces the return in its own frame instead of trusting it.
     ///
-    /// **Measured (2026-09-05):** ξ₂ = 4 014 km, ζ₂ = 891 km, so the floor is
-    /// 78 % spatial and the search has converged. Note that the return's *impact
-    /// parameter* is 4 112 km while its geocentric closest approach is 1 141 km —
-    /// gravitational focusing, and the reason the two numbers in this project's
-    /// keyhole notes are not the same number.
+    /// **Measured (2026-09-06):** ξ₂ = 4 014 km, ζ₂ = 891 km — 78 % spatial, so the
+    /// search has converged. The full solve (`examples/probe_keyhole_return.rs`)
+    /// shows the same thing as a *change*: at the closed-form aim the split is
+    /// ξ₂ 3 549 / ζ₂ −60 185 km, and refining drives the timing component down 77×
+    /// while the spatial one barely moves. Note the return's *impact parameter* is
+    /// ~4 100 km while its geocentric closest approach is 1 130 km — gravitational
+    /// focusing, and the reason the two numbers in this project's keyhole notes
+    /// are not the same number.
     ///
     /// The full four-minute solve lives in `examples/probe_keyhole_return.rs`.
     /// This is the 30-second regression that keeps the answer pinned.
@@ -905,6 +1092,184 @@ mod tests {
             (b2 - enc2.impact_parameter).abs() < 1e-6 * enc2.impact_parameter,
             "the return's own (ξ, ζ) must carry its |B|"
         );
+    }
+
+    /// Build the starting three-point bracket the solve builds, for an objective
+    /// `f` around an aim of 1.0.
+    fn bracket_around(aim: f64, fraction: f64, f: impl Fn(f64) -> f64) -> Bracket {
+        let (lo, mid, hi) = (aim * (1.0 - fraction), aim, aim * (1.0 + fraction));
+        Bracket {
+            lo,
+            mid,
+            hi,
+            f_lo: f(lo),
+            f_mid: f(mid),
+            f_hi: f(hi),
+        }
+    }
+
+    /// **The loop, not the formula.** `reach_fraction()` is a claim *about*
+    /// `Bracket::widen`, so it has to be measured against the loop: run an
+    /// objective that never brackets (monotone downhill) and see where the walk
+    /// actually ends. Checking the formula against a literal is what let the reach
+    /// read 1.27 while the loop delivered 0.29 — that test passes with the loop
+    /// deleted.
+    #[test]
+    fn the_widening_walk_reaches_exactly_what_reach_fraction_promises() {
+        let t = KeyholeRefineTol::default();
+        let aim = 1.0;
+        // Strictly decreasing: the centre is never the lowest, so every widening
+        // is spent walking right and `hi` lands on the reach.
+        let mut b = bracket_around(aim, t.bracket_fraction, |dv| -dv);
+        let ok = b.widen(t.max_widenings, |dv| Ok::<f64, ()>(-dv)).unwrap();
+        assert!(!ok, "a monotone objective has no minimum to bracket");
+        let reached = (b.hi - aim) / aim;
+        assert!(
+            (reached - t.reach_fraction()).abs() < 1e-12,
+            "the walk reached {reached}, reach_fraction() promises {}",
+            t.reach_fraction()
+        );
+    }
+
+    /// And it must actually *enclose* a minimum inside that reach — the whole job,
+    /// and the part `bracketed` reports to callers.
+    ///
+    /// Note the margin: `reach_fraction()` is where **`hi`** ends up, and
+    /// bracketing needs the *centre* to get past the minimum, which only reaches
+    /// `f·(2ⁿ − 1)` — about half as far. So the guarantee is "comfortably inside
+    /// the reach", not "inside it"; a target at 0.9 of the walk needs a seventh
+    /// widening. 7:9's floor is at 12 % against a 127 % walk, so the shipping
+    /// margin is ample.
+    #[test]
+    fn a_minimum_inside_the_reach_is_bracketed_and_one_beyond_it_is_not() {
+        let t = KeyholeRefineTol::default();
+        let aim = 1.0;
+        for (offset, expect) in [(0.5, true), (2.0, false)] {
+            let target = aim * (1.0 + offset * t.reach_fraction());
+            let f = move |dv: f64| (dv - target) * (dv - target);
+            let mut b = bracket_around(aim, t.bracket_fraction, f);
+            let ok = b.widen(t.max_widenings, |dv| Ok::<f64, ()>(f(dv))).unwrap();
+            assert_eq!(ok, expect, "target at {offset} of the reach");
+            if expect {
+                assert!(
+                    b.lo < target && target < b.hi,
+                    "a bracket that reports success must contain the minimum: \
+                     [{}, {}] vs {target}",
+                    b.lo,
+                    b.hi
+                );
+            }
+        }
+    }
+
+    /// An unusable Δv scores infinity, and a centre that is merely not-worse than
+    /// two infinities brackets nothing. Reporting that as success would hand
+    /// golden-section an interval with no minimum in it.
+    #[test]
+    fn three_infinities_are_not_a_bracket() {
+        let b = Bracket {
+            lo: 0.9,
+            mid: 1.0,
+            hi: 1.1,
+            f_lo: f64::INFINITY,
+            f_mid: f64::INFINITY,
+            f_hi: f64::INFINITY,
+        };
+        assert!(!b.is_bracketing());
+    }
+
+    /// The widening reach doubles, and the old arithmetic reach is what let a
+    /// search stop on its own upper bound and call it a floor.
+    #[test]
+    fn the_widening_reach_is_geometric_not_arithmetic() {
+        let t = KeyholeRefineTol::default();
+        // Defaults: 1 % initial half-width, six doublings → f·(2⁷ − 1) = 1.27.
+        assert!((t.reach_fraction() - 1.27).abs() < 1e-12);
+        // The 7:9 aim needed a 7 % walk (0.721750 → the true minimum is past
+        // 0.772272), and the old constant-step reach was exactly f·(n+1) = 7 %.
+        let arithmetic = t.bracket_fraction * (t.max_widenings as f64 + 1.0);
+        let walk_79 = (0.772272 - 0.721750) / 0.721750;
+        // It does not merely *exceed* the reach; it **equals** it to five figures,
+        // because it WAS the bound. That coincidence is the whole evidence that
+        // the number was a wall rather than a minimum, so it is what gets pinned.
+        assert!(
+            (walk_79 - arithmetic).abs() < 1.0e-5,
+            "7:9 stopped at a walk of {walk_79}, which should be the old reach \
+             {arithmetic} to five figures — if these ever drift apart, this test is \
+             no longer describing the bug it exists for"
+        );
+        // The new reach clears that walk by more than an order of magnitude, so a
+        // resonance like 7:9 now gets a bracket that can contain its minimum.
+        assert!(t.reach_fraction() > 10.0 * walk_79);
+        // And it doubles: one more widening buys another factor of ~2.
+        let more = KeyholeRefineTol {
+            max_widenings: t.max_widenings + 1,
+            ..t
+        };
+        assert!((more.reach_fraction() / t.reach_fraction() - 2.0).abs() < 0.02);
+    }
+
+    /// The first-encounter gate follows the aim. A constant gate is what made the
+    /// second resonance ever tried (7:9, `b ≈ 5.2e8 m`) report "no encounter" for
+    /// a flyby that was there — the shipping 5e8 m gate is sized for a rock that
+    /// *hits*, and a keyhole aim deliberately flies far out.
+    #[test]
+    fn the_first_scan_gate_follows_the_aim_and_never_narrows() {
+        let o = KeyholeShotOptions::default();
+        assert_eq!(o.first_scan.max_distance, Some(5.0e8));
+        // A near aim leaves the shipping gate alone — widening is one-way.
+        assert_eq!(
+            o.widened_for_aim(1.5e8).first_scan.max_distance,
+            Some(5.0e8),
+            "a gate already wide enough must not shrink to fit the aim"
+        );
+        // A far aim raises it to 2x the aim.
+        assert_eq!(
+            o.widened_for_aim(5.2e8).first_scan.max_distance,
+            Some(1.04e9)
+        );
+        // Everything else is carried through untouched.
+        let w = o.widened_for_aim(9.9e8);
+        assert_eq!(w.return_gate_m, o.return_gate_m);
+        assert_eq!(w.handoff_seconds_after_ca, o.handoff_seconds_after_ca);
+        assert_eq!(w.first_scan.max_sample_dt, o.first_scan.max_sample_dt);
+        // No gate at all means "no limit"; an aim must not impose one, because
+        // that would be a narrowing wearing the name `widened_for_aim`.
+        let none = KeyholeShotOptions {
+            first_scan: ScanOptions {
+                max_distance: None,
+                ..o.first_scan
+            },
+            ..o
+        };
+        assert_eq!(none.widened_for_aim(5.2e8).first_scan.max_distance, None);
+    }
+
+    /// The return census gate grows with the return, because the closed form's
+    /// arrival-placement error does. A constant gate reported "no return" for a
+    /// 7:9 return that was there, just outside it.
+    #[test]
+    fn the_return_gate_scales_with_the_return_length() {
+        let o = KeyholeShotOptions::default();
+        // The flown resonance is unchanged: h = 3 gives exactly the 0.05 AU the
+        // 3:4 probe ran at, so this generalisation costs that result nothing.
+        assert!((o.gate_for(Resonance { h: 3, k: 4 }) - 0.05 * AU_M).abs() < 1.0);
+        // And it is linear in h — the slip is h·yr·1.5·δ and Earth keeps moving.
+        for h in [2u32, 7, 13] {
+            let g = o.gate_for(Resonance { h, k: h + 1 });
+            assert!(
+                (g / (h as f64) - RETURN_GATE_PER_YEAR_M).abs() < 1.0,
+                "h={h}"
+            );
+        }
+        // 7:9 needs more than the old constant, which is the bug this fixes.
+        assert!(o.gate_for(Resonance { h: 7, k: 9 }) > 0.05 * AU_M);
+        // An explicit gate still wins.
+        let fixed = KeyholeShotOptions {
+            return_gate_m: Some(0.02 * AU_M),
+            ..o
+        };
+        assert!((fixed.gate_for(Resonance { h: 9, k: 10 }) - 0.02 * AU_M).abs() < 1.0);
     }
 
     /// The span default follows the resonance rather than a constant, which is

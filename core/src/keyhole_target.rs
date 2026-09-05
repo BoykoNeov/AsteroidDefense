@@ -581,8 +581,15 @@ pub struct KeyholeSolution {
     pub aimed: KeyholeShot,
     /// The flight at the refined impulse.
     pub best: KeyholeShot,
-    /// The final bracket width in Δv, m/s. This is the **keyhole in Δv terms**:
-    /// how finely the impulse has to be controlled to stay in the door.
+    /// The final bracket width in Δv, m/s — **only when [`bracketed`](Self::bracketed)
+    /// is true**, in which case it is the **keyhole in Δv terms**: how finely the
+    /// impulse has to be controlled to stay in the door.
+    ///
+    /// When `bracketed` is false this is the wall closing, not a door width, and
+    /// it is *smaller* the worse the answer is: 7:9 on its bound reported 5.32e-8
+    /// m/s, the tightest number this project has produced, for a result 84× off.
+    /// Golden-section squeezing against a bound converges just as hard as it does
+    /// onto a minimum. **Read `bracketed` before reading this.**
     pub dv_window_m_s: f64,
     /// How many flights it took (aim flight included).
     pub flights: usize,

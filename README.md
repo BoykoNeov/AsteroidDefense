@@ -44,10 +44,12 @@ The keyhole work (2026-09) settled the last open physics question in the spec:
 the b-plane's Öpik `(ξ, ζ)` frame and the b-vector sign are pinned by derivation
 and by measurement, the resonant-return circles come out in closed form (proved
 identical to the flyby rotation the project already modelled), and the **3:4
-keyhole was flown with the propagator** — a 0.2166 m/s retrograde nudge twelve
+keyhole was flown with the propagator** — a 0.2165 m/s retrograde nudge twelve
 years before the 2040 encounter sends the shipping rock through the flyby and
-back to within 1 130 km of Earth's centre on 2042-12-31. The keyhole is an impact
-keyhole, measured rather than asserted, and it is a regression test.
+back to within 1 087 km of Earth's centre on 2042-12-31. The keyhole is an impact
+keyhole, measured rather than asserted; a slightly coarser refinement of the same
+shot — 1 130 km, from the solver's default iteration budget — is pinned as a
+regression test.
 
 ![The keyhole map of the shipping encounter](docs/keyhole_map.svg)
 

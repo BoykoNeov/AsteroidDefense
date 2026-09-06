@@ -55,6 +55,13 @@
 //! 3:4 keyhole measured by `probe_keyhole_return` (2026-09-06). Re-solving it
 //! costs four minutes and this probe is not the place to pay that.
 //!
+//! That default is the **12-iteration** stop, rounded; the sharper floor is
+//! `0.2165483096` (1 087 km instead of 1 130). Deliberately not changed: the
+//! 1.6e-6 m/s difference is far below what this layer resolves — the impact
+//! probability at a keyhole is set by how well the *orbit* is known and comes out
+//! flat across the whole door, so re-running to make digits match would be churn.
+//! See `probe_keyhole_floor.rs`.
+//!
 //! Requires kernels.
 
 use anise::constants::frames::{EARTH_J2000, SUN_J2000};

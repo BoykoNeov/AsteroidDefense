@@ -47,10 +47,20 @@
 //! actually reads, at each tolerance:
 //!
 //! - **`ζ₂`**, the return's timing coordinate. This is the load-bearing one. The
-//!   refined 3:4 floor is called converged *because* `ζ₂` (786 km) is small beside
-//!   `ξ₂` (4 013 km) — and truncation error over a 15-year arc lands as secular
-//!   **phase** error, which is exactly `ζ₂`. If tolerance moves `ζ₂` by hundreds of
-//!   km, that check dissolves and so does the door-width calibration built on it.
+//!   refined 3:4 floor is called converged *because* `ζ₂` is small beside `ξ₂` —
+//!   and truncation error over a 15-year arc lands as secular **phase** error,
+//!   which is exactly `ζ₂`. If tolerance moves `ζ₂` by hundreds of km, that check
+//!   dissolves and so does the door-width calibration built on it.
+//!
+//!   **What `ζ₂` reads here is not the floor's `ζ₂`** (settled 2026-09-06). This
+//!   probe flies [`DV_FLOOR_M_S`], a *six-decimal* Δv, and `ζ₂` responds at 5.4e8
+//!   km per m/s — so the rounding alone is ±271 km of it. The table below prints
+//!   ~891 km; the true refined floor (`0.2165483096`, 20 iterations) reads −26.6
+//!   km. Both are honest flights of different shots. This probe is unaffected
+//!   either way: it measures how much `ζ₂` **moves with tolerance at a fixed Δv**,
+//!   and 365 m is 365 m wherever on the curve you stand. Only the *denominator* in
+//!   "365 m out of 891 km" was an artefact — against the ~25 km closed-form keyhole
+//!   width, the honest scale for "does this change a conclusion", it is 1.5 %.
 //! - **`ξ₂`**, the spatial floor no timing change removes.
 //! - the return distance, which the golden-section search minimises.
 //! - encounter 1's perigee, which every Tier-2 term was measured as a shift in.
@@ -116,6 +126,15 @@ const RTOLS: [f64; 5] = [1.0e-9, 1.0e-10, 1.0e-11, 1.0e-12, 1.0e-13];
 
 /// The refined floor of the shipping rock's 3:4 keyhole, m/s — measured by
 /// `probe_keyhole_return` at the **shipping** tolerance on 2026-09-06.
+///
+/// **Rounded to six decimals, and deliberately left that way.** The real
+/// 20-iteration floor is `0.2165483096`; this constant is 1.7e-6 m/s off it, which
+/// is ~917 km of `ζ₂` at 5.4e8 km per m/s. Changing it would move every absolute
+/// number in the table without changing a single *delta*, since what this probe
+/// measures is the tolerance derivative at a fixed shot. Keeping it pins the
+/// published sweep. Just never read the absolute `ζ₂` below as the floor's `ζ₂` —
+/// that mistake is what made this file's own header contradict its own table for
+/// two months.
 ///
 /// Held fixed across the sweep on purpose. Re-solving it per tolerance would cost
 /// four minutes each and would answer a different question: this probe asks whether

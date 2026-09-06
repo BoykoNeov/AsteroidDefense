@@ -31,21 +31,37 @@
 //! identical either way.
 //!
 //! **Measured through this path (2026-09-06, shipping scenario, 3:4 Minus,
-//! retrograde), 18 flights in 491 s:** the closed-form aim gave
-//! Δv = 0.216438 m/s and a return at 53 841 km; the refined floor is
-//! **0.216550 m/s → 1 130 km from Earth's centre on 2042-12-31**, 3.00 yr after
-//! the 2040-01-01 flyby. Inside Earth: the 3:4 keyhole is an **impact** keyhole.
-//! The Δv window at the floor is ~1.3e-5 m/s, which at ~1e6 km of b per m/s is
-//! ~13 km of b-plane — the same order as the closed form's 24.9 km far-end keyhole
-//! width. (These reproduce the 2026-09-02 run that predated the core API, so the
-//! generalisation cost nothing in accuracy.) `keyhole_target.rs` re-flies that Δv
-//! as a 30 s regression test.
+//! retrograde), 26 flights in 623 s at 20 iterations:** the closed-form aim gave
+//! Δv = 0.2164375000 m/s and a return at 53 841 km; the refined floor is
+//! **0.2165483096 m/s → 1 087 km from Earth's centre on 2042-12-31**, 3.00 yr
+//! after the 2040-01-01 flyby. Inside Earth: the 3:4 keyhole is an **impact**
+//! keyhole. `keyhole_target.rs` re-flies that Δv as a 30 s regression test.
+//!
+//! **Run this with 20 iterations, not the default 12.** Twelve stops at
+//! 0.2165498080 — 1.6e-6 m/s short, a return of 1 130 km — because the budget runs
+//! out long before `rel_tol` binds (see below). Both are honest flights; only the
+//! wider one is the floor.
+//!
+//! **The reported Δv window is not a door width.** It is the final bracket, and at
+//! the defaults that is arithmetic: `2 · 0.01 · Δv_aim · 0.618ⁿ`, which is 1.34e-5
+//! m/s at n = 12 and 2.86e-7 at n = 20 — a 47× change from nothing but the
+//! iteration count. This file used to convert 1.3e-5 into "~13 km of b-plane, the
+//! same order as the closed form's 24.9 km keyhole width"; that agreement was a
+//! coincidence of running 12 iterations. The door the return actually flies
+//! through — the Δv span keeping it inside its own focused capture disc — is
+//! ~±2e-5 m/s. See `probe_keyhole_floor.rs`.
 //!
 //! **What the refinement actually does**, in the return's own frame: the aim
 //! lands at `ξ₂ 3 549 / ζ₂ −60 185 km` — a miss that is almost entirely *arrival
-//! timing* — and the search drives `ζ₂` to 786 km while `ξ₂` barely moves. The
-//! floor is the orbit-to-orbit offset, and this is the run that shows it rather
-//! than asserting it.
+//! timing* — and the search drives `ζ₂` to **−26.6 km**, a 2 261× fall, while `ξ₂`
+//! moves 13 %. The floor is the orbit-to-orbit offset, and this is the run that
+//! shows it rather than asserting it.
+//!
+//! **Never round the floor Δv.** `ζ₂` responds at 5.4e8 km per m/s, so a
+//! six-decimal print carries ±271 km of it. Printing `0.216550` and re-flying
+//! *that* is a different shot reading ζ₂ ≈ 890 km, and the resulting mismatch
+//! against this file's own table looked for two months like a frame or integrator
+//! disagreement. Every Δv here is at ten decimals for that reason.
 //!
 //! Requires kernels. ~4 min (the Δv solve ~230 s, then ~15 re-flies at ~15 s).
 //!
@@ -56,7 +72,7 @@
 //! `branch` is `minus`|`plus` (which of the two ζ crossings at that ξ),
 //! `direction` is `retro`|`pro` (which ξ side the nudge lands on — measured, not
 //! chosen), and `iterations` is the golden-section budget (default 12; each one
-//! is a flight).
+//! is a flight; the published 3:4 floor above used **20** — `-- 3 4 minus retro 20`).
 
 use anise::constants::frames::{EARTH_J2000, SUN_J2000};
 use asteroid_core::{
@@ -168,12 +184,12 @@ fn main() {
         aim.perigee_m / nominal.earth_radius,
         aim.circle.a_prime / AU_M
     );
-    println!("closed-form aim Δv: {:.6} m/s", solution.aim_dv_m_s);
+    println!("closed-form aim Δv: {:.10} m/s", solution.aim_dv_m_s);
 
     report("aim", &solution.aimed, &nominal);
     report("floor", &solution.best, &nominal);
     println!(
-        "\n{} flights in {elapsed:.0} s; Δv window at the floor ~{:.2e} m/s of {:.6}",
+        "\n{} flights in {elapsed:.0} s; Δv window at the floor ~{:.2e} m/s of {:.10}",
         solution.flights, solution.dv_window_m_s, solution.best.dv_m_s
     );
 
@@ -191,7 +207,7 @@ fn main() {
         // number underneath it is a number from the wall.
         if !solution.bracketed {
             println!(
-                "!! THE SEARCH NEVER BRACKETED THE MINIMUM. Δv {:.6} is the edge of the \
+                "!! THE SEARCH NEVER BRACKETED THE MINIMUM. Δv {:.10} is the edge of the \
                  interval, not its bottom: the widening reaches {:.0}% either side of \
                  the aim and the minimum is further out. Raise `max_widenings`; the \
                  Δv window below is the wall closing, not convergence.",
@@ -234,7 +250,7 @@ fn main() {
 /// that says whether the residual is spatial (converged) or timing (not).
 fn report(label: &str, shot: &KeyholeShot, nominal: &asteroid_core::BPlaneEncounter) {
     print!(
-        "\n{label}: Δv {:.6} m/s → encounter-1 b {:.0} km ({:.2} R⊕ perigee), closed-form \
+        "\n{label}: Δv {:.10} m/s → encounter-1 b {:.0} km ({:.2} R⊕ perigee), closed-form \
          a' {:.6} AU",
         shot.dv_m_s,
         shot.encounter.impact_parameter / 1e3,
@@ -253,8 +269,8 @@ fn report(label: &str, shot: &KeyholeShot, nominal: &asteroid_core::BPlaneEncoun
             );
             match (r.xi_m, r.zeta_m) {
                 (Some(xi), Some(zeta)) => println!(
-                    "  in the RETURN's own Öpik frame: ξ₂ {:.0} km (spatial offset), \
-                     ζ₂ {:.0} km (timing), |ζ₂|/|ξ₂| = {:.3}",
+                    "  in the RETURN's own Öpik frame: ξ₂ {:.3} km (spatial offset), \
+                     ζ₂ {:.3} km (timing), |ζ₂|/|ξ₂| = {:.3}",
                     xi / 1e3,
                     zeta / 1e3,
                     r.timing_share().unwrap_or(f64::NAN)

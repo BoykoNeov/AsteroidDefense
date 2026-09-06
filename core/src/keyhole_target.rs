@@ -52,17 +52,34 @@
 //!
 //! | | `ξ₂` (spatial) | `ζ₂` (timing) | `|ζ₂|/|ξ₂|` | return |
 //! |---|---|---|---|---|
-//! | closed-form aim, Δv 0.216438 | 3 549 km | **−60 185 km** | 16.96 | 53 841 km |
-//! | refined floor, Δv 0.216550 | 4 013 km | 786 km | 0.196 | **1 130 km** |
+//! | closed-form aim, Δv 0.2164375000 | 3 549 km | **−60 185 km** | 16.96 | 53 841 km |
+//! | refined floor, Δv 0.2165483096 | 4 006 km | −26.6 km | 0.007 | **1 087 km** |
 //!
-//! The refinement drives the **timing** component down 77× while the **spatial**
-//! one barely moves. That is the claim made visible: Δv buys arrival time and
-//! nothing else, and what is left when the timing is spent is the offset between
-//! the two orbits. A search that stopped early would sit somewhere along that
-//! first row with a plausible scalar distance and no way to tell.
+//! The refinement drives the **timing** component down 2 261× while the
+//! **spatial** one moves 13 %. That is the claim made visible: Δv buys arrival
+//! time and nothing else, and what is left when the timing is spent is the offset
+//! between the two orbits. A search that stopped early would sit somewhere along
+//! that first row with a plausible scalar distance and no way to tell.
+//!
+//! **Quote the floor Δv to ten decimals or not at all** (2026-09-06). `ζ₂`
+//! responds at **5.4e8 km per m/s**, so the ±5e-7 m/s a six-decimal print carries
+//! is ±271 km of `ζ₂` — wider than any floor value worth reporting. A rounded
+//! `0.216550` is a *different shot* from the refined `0.2165483096`: flying the
+//! rounded value returns **1 141 km with `ζ₂` = 891 km**, while the 12-iteration
+//! solve's own `0.2165498080` returns 1 130 km with `ζ₂` = 786 km. Three shots,
+//! three honest answers. That gap is not frame choice, not
+//! integrator error and not physics: it is the rounding, and for two months it
+//! read as a disagreement between this table and
+//! `examples/probe_integrator_convergence.rs`. See
+//! `examples/probe_keyhole_floor.rs`, which flies the ladder that settles it.
+//!
+//! **And the floor above is a 20-iteration floor.** The shipping default of 12
+//! stops 1.6e-6 m/s short, at a return of 1 130 km with several hundred km of
+//! `ζ₂` — which is not the orbits' timing residual, only how far short the search
+//! stopped. See [`KeyholeSolution::dv_window_m_s`].
 //!
 //! One number to keep straight: at the floor the return's **impact parameter** is
-//! ~4 100 km while its **geocentric closest approach** is 1 130 km. The gap is
+//! ~4 006 km while its **geocentric closest approach** is 1 087 km. The gap is
 //! gravitational focusing, and mixing the two up is the same trap `geometry.rs`
 //! documents for the first encounter.
 //!
@@ -603,11 +620,23 @@ pub struct KeyholeSolution {
     pub aimed: KeyholeShot,
     /// The flight at the refined impulse.
     pub best: KeyholeShot,
-    /// The final bracket width in Δv, m/s — **only when [`bracketed`](Self::bracketed)
-    /// is true**, in which case it is the **keyhole in Δv terms**: how finely the
-    /// impulse has to be controlled to stay in the door.
+    /// The final bracket width in Δv, m/s — **how far short of the minimum the
+    /// search stopped**, and nothing more. It is *not* a door width.
     ///
-    /// When `bracketed` is false this is the wall closing, not a door width, and
+    /// **At the shipping defaults it is pure arithmetic.** Twelve golden-section
+    /// steps close a 1 % bracket by `0.618¹²`, so the window is
+    /// `2 · 0.01 · Δv_aim · 0.618¹²` — for the 3:4 aim that is 1.34e-5 m/s, which
+    /// is exactly what the solve reports. [`KeyholeRefineTol::rel_tol`] (1e-7 of
+    /// Δv ≈ 2.2e-8 m/s there) would need ~26 iterations and never binds at 12, so
+    /// the number measures **how long the search ran**, not the geometry. Raise
+    /// `max_iterations` and it shrinks with the iteration count; any door width
+    /// read off it is a coincidence of that count. Measured 2026-09-06: the door
+    /// the 3:4 return actually flies through — the Δv span over which the return
+    /// stays inside its own focused capture disc — is ~±2e-5 m/s, ~3× *wider*
+    /// than the 12-iteration window, and the two have no reason to agree.
+    ///
+    /// When `bracketed` is false this is the wall closing, not even a stopping
+    /// distance, and
     /// it is *smaller* the worse the answer is: 7:9 on its bound reported 5.32e-8
     /// m/s, the tightest number this project has produced, for a result 84× off.
     /// Golden-section squeezing against a bound converges just as hard as it does
@@ -1321,14 +1350,20 @@ mod tests {
     /// scalar `distance_m` is identical either way, which is exactly why this
     /// test reduces the return in its own frame instead of trusting it.
     ///
-    /// **Measured (2026-09-06):** ξ₂ = 4 014 km, ζ₂ = 891 km — 78 % spatial, so the
-    /// search has converged. The full solve (`examples/probe_keyhole_return.rs`)
+    /// **Measured (2026-09-06):** ξ₂ = 4 006 km, ζ₂ = −26.6 km — 99.3 % spatial, so
+    /// the search has converged. The full solve (`examples/probe_keyhole_return.rs`)
     /// shows the same thing as a *change*: at the closed-form aim the split is
-    /// ξ₂ 3 549 / ζ₂ −60 185 km, and refining drives the timing component down 77×
-    /// while the spatial one barely moves. Note the return's *impact parameter* is
-    /// ~4 100 km while its geocentric closest approach is 1 130 km — gravitational
-    /// focusing, and the reason the two numbers in this project's keyhole notes
-    /// are not the same number.
+    /// ξ₂ 3 549 / ζ₂ −60 185 km, and refining drives the timing component down
+    /// 2 261× while the spatial one moves 13 %. Note the return's *impact
+    /// parameter* is ~4 006 km while its geocentric closest approach is 1 087 km —
+    /// gravitational focusing, and the reason the two numbers in this project's
+    /// keyhole notes are not the same number.
+    ///
+    /// **The Δv below is written to ten decimals on purpose.** `ζ₂` moves 5.4e8 km
+    /// per m/s, so rounding it to six — as this test did until 2026-09-06 — is a
+    /// ±271 km smear in the very coordinate the test exists to bound, and the
+    /// rounded `0.216550` reads ζ₂ ≈ 891 km against this shot's 26.6 km. That is
+    /// not a frame difference or an integrator difference; it is a different shot.
     ///
     /// The full four-minute solve lives in `examples/probe_keyhole_return.rs`.
     /// This is the 30-second regression that keeps the answer pinned.
@@ -1341,8 +1376,9 @@ mod tests {
         let Some(_) = crate::kernels::resolve_for_test("the flown 3:4 keyhole floor") else {
             return;
         };
-        /// The Δv `probe_keyhole_return` refined the 3:4 return down to.
-        const KEYHOLE_DV_RETROGRADE_M_S: f64 = 0.216_550;
+        /// The Δv `probe_keyhole_return` refined the 3:4 return down to, at 20
+        /// golden-section iterations. **Do not round this.**
+        const KEYHOLE_DV_RETROGRADE_M_S: f64 = 0.216_548_309_6;
 
         let sc = RealFieldScenario::build(&ImpactorConfig::default()).expect("build");
         let ds = sc.deflection().expect("deflection");
@@ -1440,9 +1476,9 @@ mod tests {
         // THE check. A converged floor is spatial: the timing component must be
         // the smaller half of it, not the larger.
         assert!(
-            ret.timing_share().expect("both components") < 0.5,
+            ret.timing_share().expect("both components") < 0.05,
             "the floor is {:.3} timing (ζ₂ {:.0} km) against spatial (ξ₂ {:.0} km), where \
-             0.222 was measured — a share this large is an unconverged search, not the \
+             0.007 was measured — the gate is 0.05, an order of magnitude of slack and              still 4× tighter than the 0.196 a *rounded* Δv reads, so re-rounding the              constant above fails here instead of quietly passing. A share this large              is an unconverged search, not the \
              orbit-to-orbit offset the module claims, and the scalar {:.0} km return \
              distance cannot tell the two apart",
             ret.timing_share().unwrap(),

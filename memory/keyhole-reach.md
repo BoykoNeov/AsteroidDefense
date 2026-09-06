@@ -100,7 +100,9 @@ inversion `r_p = −c + √(c²+b²)`. **The ξ,ζ frame is now pinned** — `B`
 from Earth's centre toward the incoming asymptote, gravity bends toward `−B̂`,
 with a no-tolerance-games test in `geometry.rs` that walks the inbound branch.
 Headline flown result: **Δv 0.216550 m/s → return to 1 130 km from Earth's
-centre on 2042-12-31T14:33 TDB** on the 3:4; grazing keyhole 0.18 km wide, far
+centre on 2042-12-31T14:33 TDB** on the 3:4 (superseded 2026-09-06 — that was the
+12-iteration stop; the real floor is Δv **0.2165483096 → 1 087 km**, see
+[[keyhole-targeting]], and never round a keyhole Δv); grazing keyhole 0.18 km wide, far
 end 24.92 km. Core suite 211 → 225 tests, and the whole workspace passes with
 `ASTEROID_REQUIRE_KERNELS=1` — see [[kernel-resolver]].
 

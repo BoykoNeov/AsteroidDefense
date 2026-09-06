@@ -65,8 +65,13 @@ along. Three consequences:
    cadence still stays 1 day — the frontend draws the arc.
 
 **Every keyhole conclusion is converged** ([[keyhole-targeting]] is safe). At fixed
-Δv = 0.216550 the timing coordinate `ζ₂` moves **365 m out of 891 km** (0.04 %),
-`ξ₂` 3 m out of 4 014 km, and `|ζ₂/ξ₂|` = 0.2219 at every rung. The column
+Δv = 0.216550 the timing coordinate `ζ₂` moves **365 m** — 1.5 % of the ~25 km
+keyhole width, the honest denominator — `ξ₂` 3 m, and `|ζ₂/ξ₂|` = 0.2219 at every
+rung. **Read the deltas, not the absolutes:** the sweep flies a *rounded* Δv, and
+`ζ₂` responds at 5.4e8 km per m/s, so the 891 km it sits at is the rounding's
+doing, not the floor's timing residual (which is −26.6 km — see
+[[keyhole-targeting]]). 365 m is a derivative at fixed Δv and does not care where
+on the curve the sweep stands. The column
 **scatters rather than converging** (−365, −349, +127, +59 m) — that is *stronger*
 evidence than a monotone fall, because it means the tolerance is not in control at
 1-day cadence.
@@ -95,9 +100,9 @@ available oracle is dop853-at-tighter-tolerance — which says dop853 is converg
   a real trajectory difference; doing so needs a re-integration to the CA epoch and
   was not done. Changes no conclusion.
 
-**One unresolved inconsistency found:** `ζ₂` reproduces as **891 km** (matching
-[[keyhole-targeting]]) while `core/src/keyhole_target.rs`'s module-doc table says
-**786 km** for the same refined shot. Two spellings of one measurement disagreeing
-inside the repo. Not chased.
+**The 891-vs-786 inconsistency this batch found is SETTLED (2026-09-06):** they are
+two different shots 1.9e-7 m/s apart in Δv, not two spellings — and neither was the
+floor. `DV_FLOOR_M_S` here stays rounded on purpose and is now documented as such.
+Full story in [[keyhole-targeting]].
 
 Run with kernels — see [[kernel-resolver]].

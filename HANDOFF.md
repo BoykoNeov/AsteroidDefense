@@ -77,8 +77,8 @@ Read this table first, then the session that owns the layer you are touching.
    wrong: it leaned on the 15.1 km residual vs JPL, which is *unmodelled forces*
    (planetary GR, radial `A1`), and no integrator fixes a missing force. (b) dop853
    **is** converged where it ships — the encounter perigee moves 0.07 m and the 3:4
-   return's timing coordinate 365 m out of 891 km across four decades of tolerance,
-   so every keyhole conclusion holds. (c) But not for a good reason: the 1-day
+   return's timing coordinate 365 m across four decades of tolerance, against a
+   ~25 km keyhole width, so every keyhole conclusion holds. (c) But not for a good reason: the 1-day
    snapshot cadence **caps the step**, and the same tolerance uncapped is **129 km**
    off over the cruise. So the shipping accuracy is a property of the architecture,
    which is now a named knob (`ImpactorConfig::forward_rtol`) with a guard test.
@@ -87,13 +87,18 @@ Read this table first, then the session that owns the layer you are touching.
    class of flyby, and a resonant return is in no truth table — leaving
    dop853-at-a-tighter-tolerance as the only oracle, which is what was run. See
    *The integrator, measured instead of replaced*.
-6. **One contradiction inside the repo, found 2026-09-06 and not resolved.** The
-   3:4 return's timing coordinate reproduces as **891 km** against a spatial 4 014 km
-   (`probe_integrator_convergence`, and the keyhole-targeting memory says the same),
-   while `core/src/keyhole_target.rs`'s own module-doc table says **786 km** against
-   4 013 km for the same refined shot. Two spellings of one measurement disagreeing —
-   the class of thing this project keeps catching, and cheap to settle by re-running
-   `probe_keyhole_return` and believing whichever the code prints.
+6. ~~**One contradiction inside the repo (891 km vs 786 km).**~~ **RESOLVED
+   2026-09-06 — and the resolution was not the one the item proposed.** Both
+   numbers are right; they are two *different shots*, 1.9e-7 m/s apart in Δv, and
+   the coordinate they disagree in responds at 5.4e8 km per m/s — so a six-decimal
+   Δv print is already a ±271 km smear of it. Re-running the probe and "believing
+   whichever it prints", as this item suggested, would have deleted a correct
+   number. The bigger find underneath: **neither was the floor.** The shipping
+   12-iteration search stops 1.6e-6 m/s short of the minimum; at 20 iterations the
+   floor is Δv 0.2165483096 → 1 087 km, where the timing coordinate is −26.6 km,
+   i.e. essentially zero, which *strengthens* the module's spatial-floor claim.
+   And the search's own reported Δv window is its iteration budget, not a door
+   width. See *The floor that was a stopping distance*.
 7. Phase 3.
 
 ---
@@ -1673,13 +1678,18 @@ encounter 1's), where the axes mean something again: `ζ` is timing, `ξ` is the
 orbit-to-orbit offset. Δv is a timing knob, so a converged search must drive
 `ζ₂ → 0` and leave the floor in `|ξ₂|`.
 
-**Measured at the flown floor: ξ₂ = 4 014 km, ζ₂ = 891 km — 78 % spatial,
-`|ζ₂|/|ξ₂| = 0.222`.** Converged. A floor sitting in `ζ₂` would have been an
+**Measured at the flown floor: ξ₂ = 4 006 km, ζ₂ = −26.6 km — 99.3 % spatial,
+`|ζ₂|/|ξ₂| = 0.007`.** Converged. A floor sitting in `ζ₂` would have been an
 unconverged golden-section wearing a physics costume, and it would have looked
 identical in the one number the old probe printed.
 
+> Those two numbers read 4 014 / 891 km until 2026-09-06, and the ratio 0.222.
+> That was a real flight of a *rounded* Δv at a *12-iteration* stop — see
+> *The floor that was a stopping distance*. The claim is unchanged and the
+> evidence for it got much stronger.
+
 One number to keep straight while reading those: the return's **impact
-parameter** is 4 112 km while its **geocentric closest approach** is 1 141 km.
+parameter** is 4 006 km while its **geocentric closest approach** is 1 087 km.
 The gap is gravitational focusing — the same pair `geometry.rs` documents for the
 first encounter, and the same mix-up that once printed SURFACE IMPACT over a
 working deflection.
@@ -1830,10 +1840,10 @@ strong evidence is what it does *across* a solve — aim versus refined floor:
 
 | 3:4 | ξ₂ (spatial) | ζ₂ (timing) | ratio |
 | --- | --- | --- | --- |
-| closed-form aim, Δv 0.216438 | 3 549 km | −60 185 km | 16.96 |
-| refined floor, Δv 0.216550 | 4 013 km | 786 km | **0.196** |
+| closed-form aim, Δv 0.2164375000 | 3 549 km | −60 185 km | 16.96 |
+| refined floor, Δv 0.2165483096 | 4 006 km | −26.6 km | **0.007** |
 
-Timing falls by a factor of 77; the spatial offset barely moves. That is exactly
+Timing falls by a factor of 2 261; the spatial offset moves 13 %. That is exactly
 the signature "Δv is a timing knob" predicts, and it means the ratio is a real
 convergence gauge rather than a number that happens to be small.
 
@@ -2480,9 +2490,17 @@ tolerance:
 | `1e-9` (shipping) | 146 785.195 km | 1 141.296 km | 4 014.289 km | 890.598 km | 0.2219 |
 | `1e-13` | 146 785.195 km | 1 141.339 km | 4 014.292 km | 890.963 km | 0.2219 |
 
-`ζ₂` moves **365 m out of 891 km** (0.04 %), `ξ₂` moves 3 m out of 4 014 km, and
-the ratio the argument turns on is 0.2219 at every rung. **Every keyhole
+`ζ₂` moves **365 m**, `ξ₂` moves 3 m, and the ratio the argument turns on is
+0.2219 at every rung. Against the ~25 km closed-form keyhole width — the honest
+denominator for "does this change a conclusion" — 365 m is 1.5 %. **Every keyhole
 conclusion is converged at the shipping tolerance.**
+
+> Read the *deltas* in that table, not the absolute `ζ₂`. The sweep flies a
+> six-decimal Δv, and `ζ₂` responds at 5.4e8 km per m/s, so the 891 km is where
+> the rounding put the shot, not the floor's timing residual (which is −26.6 km).
+> The 365 m is a derivative at fixed Δv and does not care where on the curve the
+> sweep stands. This absolute-vs-delta confusion is exactly what produced the
+> repo contradiction below.
 
 And the column does not converge monotonically — it scatters (−365, −349, +127,
 +59 m). That is not a failure of the sweep, it is *stronger* evidence for the
@@ -2532,10 +2550,121 @@ on it. The direct comparison against a converged reference is the metric; this o
 is a free invariant that happens to be a bad one here, and saying so is cheaper
 than letting a reader trust it.
 
-#### One inconsistency found and not resolved
+#### One inconsistency found — chased in the next batch
 
 `ζ₂` reproduces here as **891 km** against `ξ₂` 4 014 km, matching the
 keyhole-targeting memory entry. `core/src/keyhole_target.rs`'s own module-doc
 table says **786 km** against 4 013 km for the same refined shot. Two spellings of
 one measurement disagreeing inside the repo — the class of thing this project
-keeps catching. Not chased in this batch; recorded so it is not lost.
+keeps catching. **Settled 2026-09-06: neither was a spelling and neither was the
+floor.** See *The floor that was a stopping distance*.
+
+---
+
+### The floor that was a stopping distance
+
+*(2026-09-06 — roadmap item 6, and it did not close the way the item said it
+would.)*
+
+The item proposed re-running `probe_keyhole_return` and believing whichever
+number the code printed. That would have been wrong. The re-run reproduces 786 km
+exactly, because the solve is deterministic — and "believing the code" would then
+have deleted 891 km as stale, when 891 km is a perfectly correct measurement of a
+slightly different shot.
+
+#### What the two numbers actually are
+
+`ζ₂` is the return's **arrival-timing** coordinate, and Δv is a timing knob, so
+`ζ₂` responds to Δv about as hard as anything in this project responds to
+anything. Measured on a nine-rung ladder of flights
+(`core/examples/probe_keyhole_floor.rs`):
+
+| | response to Δv |
+|---|---|
+| `ζ₂` (timing) | **5.427e8 km per m/s** |
+| `ξ₂` (spatial) | 4.861e6 km per m/s — **112× less** |
+
+So a Δv printed to six decimals carries ±5e-7 m/s, which is **±271 km of `ζ₂`**.
+The two published numbers differ by 105 km, which is 1.93e-7 m/s of Δv — 0.39× that
+rounding. Solving each backwards:
+
+- `ζ₂` = **786 km** is the flight at Δv `0.2165498072`
+- `ζ₂` = **891 km** is the flight at Δv `0.2165500007` — i.e. the rounded
+  `0.216550` that `probe_integrator_convergence` and the unit test both hard-code
+
+Two shots 1.9e-7 m/s apart. Not two frames, not two integrator settings, not
+two spellings. And the giveaway was in plain sight: a frame difference would move
+*both* coordinates and could not change the scalar return distance, yet the return
+distance travels with the pair too (1 130 km with one, 1 141 km with the other).
+Only Δv moves `ζ₂` alone.
+
+#### The bigger find: the published floor was never the floor
+
+Flying the ladder past the published value found lower returns *below* it. Refined
+properly — `probe_keyhole_return -- 3 4 minus retro 20`, 26 flights in 623 s:
+
+| | Δv (m/s) | return | `ξ₂` | `ζ₂` | `|ζ₂|/|ξ₂|` |
+|---|---|---|---|---|---|
+| shipping default, 12 iterations | 0.2165498080 | 1 130 km | 4 013 km | 786 km | 0.196 |
+| **20 iterations** | **0.2165483096** | **1 087 km** | 4 006 km | **−26.6 km** | **0.007** |
+
+The 12-iteration search stops **1.6e-6 m/s short**. At the real minimum the timing
+coordinate goes to *zero* and the residual is pure spatial offset — which is
+`keyhole_target.rs`'s own thesis, now shown far more sharply than the number that
+was standing in for it. Those several-hundred-km `ζ₂` values were never the orbits'
+timing residual; they were **how far short of the minimum the search stopped**,
+read out in a coordinate that moves 5.4e8 km per metre per second.
+
+The ladder and the solve agree independently, which is what makes this a
+measurement rather than a curve fit. Fitting a parabola through the ladder's three
+lowest rungs puts the minimum at Δv 0.2165482893; the ladder's `ζ₂ = 0` crossing is
+at 0.2165483587; the 20-iteration golden-section landed at 0.2165483096, between
+them. The distance minimum and the timing zero are the **same point** to 7e-8 m/s —
+they have to be, because near the bottom `ζ₂` moves 112× faster than `ξ₂`, so the
+scalar distance is a proxy for `|ζ₂|` and minimising one minimises the other.
+
+#### Why it stopped short, and what else that breaks
+
+Twelve golden-section steps close a 1 % bracket by `0.618¹²`. That is
+`2 · 0.01 · 0.2164375 · 0.618¹² = 1.34e-5` m/s — **exactly** the "Δv window" the
+solve reported. The convergence tolerance (`rel_tol` 1e-7 of Δv ≈ 2.2e-8 m/s)
+would need ~26 iterations and never binds at 12. Confirmed by running 20: the
+window came back **2.86e-7 m/s**, and `1.34e-5 · 0.618⁸ = 2.85e-7`. It tracks the
+iteration count to three digits.
+
+So `KeyholeSolution::dv_window_m_s` **measures how long the search ran**, not how
+wide the door is. Its doc called it "the keyhole in Δv terms: how finely the
+impulse has to be controlled to stay in the door", and `probe_keyhole_return`'s
+header converted it into "~13 km of b-plane — the same order as the closed form's
+24.9 km far-end keyhole width". That agreement was a **coincidence of running 12
+iterations**; at 20 it would have read 0.3 km and the same reasoning would have
+concluded something 47× different. Both docs now say what the number is. For
+contrast, the door the return actually flies through — the Δv span over which it
+stays inside its own focused capture disc, 11 309 km against a 4 006 km spatial
+floor — is ~±2e-5 m/s, about 3× *wider* than the 12-iteration bracket.
+
+#### What was deliberately left alone
+
+- **The 29.09 vs 24.92 km door-width calibration.** It comes from `∂ζ₂/∂ζ₁` along
+  the flown trajectory, not from the floor's `ζ₂`, so a 1.6e-6 m/s shift in where
+  the search stopped does not touch it.
+- **`probe_integrator_convergence`'s `DV_FLOOR_M_S = 0.216550`.** Left rounded and
+  now documented as rounded. That probe measures a *derivative* at a fixed shot
+  (how much `ζ₂` moves with tolerance); moving the constant would change every
+  absolute number and no delta. Only the framing "365 m out of 891 km" was an
+  artefact, and it now reads against the ~25 km keyhole width instead.
+- **The downstream keyhole-targeting and probability numbers** (2.9 widths off 3:4,
+  0.930 m/s at 900 d, P = 0.064). A 1.6e-6 m/s shift is far below what that layer
+  resolves — the probability is set by how well the *orbit* is known, and is flat
+  across the whole door. Re-running them to make the digits match would be
+  churn, so they stand as measured and this note says why.
+
+#### The reusable lesson
+
+Two of this project's recurring traps met in one place. **A search's own bracket is
+not a physical width** — golden-section converges just as hard onto an iteration
+limit as onto a minimum, exactly as it converges onto a wall when unbracketed (the
+7:9 trap). And **a number is only as good as the digits its input was printed
+with**: `ζ₂` at six-decimal Δv is a ±271 km measurement being quoted to three
+significant figures. `probe_keyhole_floor.rs` exists so both are visible as
+arithmetic instead of arguable.

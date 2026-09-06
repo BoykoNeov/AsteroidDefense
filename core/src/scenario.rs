@@ -310,8 +310,12 @@ pub struct ImpactorConfig {
     /// **Measured, 2026-09-06 (`probe_integrator_convergence`): it does not matter
     /// at the shipping cadence, and the reason is not flattering.** Every published
     /// number is converged — the encounter perigee moves 0.07 m and the 3:4 keyhole
-    /// return's timing coordinate 365 m out of 891 km across four decades of
-    /// tolerance. But that is the **snapshot cadence's** doing, not this value's: a
+    /// return's timing coordinate 365 m across four decades of tolerance, against a
+    /// ~25 km keyhole width. (The sweep is run at a six-decimal Δv where that
+    /// coordinate sits ~891 km from zero; the 365 m is a derivative at fixed Δv and
+    /// does not depend on where on the curve the sweep stands — see
+    /// `probe_integrator_convergence`.) But that is the **snapshot cadence's**
+    /// doing, not this value's: a
     /// 1-day snapshot caps the step, and the cap is what holds the error down. Take
     /// the cap away and the same tolerance is **129 km** off over the 12-year cruise
     /// (one uninterrupted `step` call against a converged reference; 719 000 km after

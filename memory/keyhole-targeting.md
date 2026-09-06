@@ -35,10 +35,11 @@ door known to work), with the blink driven by that band and NOT by `inside`.
 residual is claimed to be the orbits' spatial offset. Unfalsifiable from the
 scalar distance, so `FlownReturn` reduces the return in **its OWN Opik frame**
 (Earth's state at the *return* epoch): `ζ` = timing, `ξ` = spatial. Δv is a
-timing knob, so convergence must drive `ζ₂→0`. **Measured: ξ₂ = 4 014 km,
-ζ₂ = 891 km, ratio 0.222 — 78 % spatial, converged.** Keep straight: that
-return's impact parameter is 4 112 km while its geocentric closest approach is
-1 141 km — gravitational focusing, the same pair `geometry.rs` warns about.
+timing knob, so convergence must drive `ζ₂→0`. **Measured at the true floor
+(Δv 0.2165483096, 20 iterations): ξ₂ = 4 006 km, ζ₂ = −26.6 km, ratio 0.007 —
+99.3 % spatial, converged.** Keep straight: that return's impact parameter is
+4 006 km while its geocentric closest approach is 1 087 km — gravitational
+focusing, the same pair `geometry.rs` warns about.
 
 **Reachability is an error, not a NaN.** `points_at_xi` returns `None` when
 `|ξ| > R`; `aim_at_resonance` turns it into `XiOffCircle`, refused in
@@ -94,10 +95,10 @@ three times, none of them loudly.
    aim and the final best must genuinely fly.
 
 **The ξ₂/ζ₂ gauge earned its keep across a solve, not at its end.** 3:4 aim
-(Δv 0.216438): ξ₂ 3 549 / ζ₂ −60 185 km, ratio **16.96**. Refined floor
-(0.216550): ξ₂ 4 013 / ζ₂ 786 km, ratio **0.196**. Timing falls 77×, spatial
-barely moves — exactly what "Δv is a timing knob" predicts, so the ratio is a
-real convergence gauge and not a coincidence.
+(Δv 0.2164375000): ξ₂ 3 549 / ζ₂ −60 185 km, ratio **16.96**. Refined floor
+(0.2165483096): ξ₂ 4 006 / ζ₂ −26.6 km, ratio **0.007**. Timing falls 2 261×,
+spatial moves 13 % — exactly what "Δv is a timing knob" predicts, so the ratio is
+a real convergence gauge and not a coincidence.
 
 **And it caught a false claim, then a real bug.** 7:9 stopped at 3 924 232 km
 made of ξ₂ 129 230 / ζ₂ −3 928 736 km — **30.4× more timing than spatial** — and
@@ -167,3 +168,40 @@ the chained `∂ζ₂/∂ζ₁` on the flown trajectory gives the width *differe
 **29.09 km against the map's 24.92 km, conservative by 1.17×** — immune to the
 map's absolute placement error, but it does **not** replace the placement
 finding. Two different quantities; don't conflate them.
+
+## 2026-09-06 — the floor was a stopping distance (roadmap item 6)
+
+**NEVER round a keyhole Δv.** `ζ₂` responds at **5.427e8 km per m/s**; `ξ₂` at
+4.861e6 (112× less). A six-decimal Δv print therefore carries **±271 km of ζ₂**.
+The repo's "891 vs 786 km" contradiction was exactly this: two flights 1.9e-7 m/s
+apart (786 km at Δv 0.2165498072, 891 km at the rounded 0.2165500007), both
+correct. The item's own proposed fix — "re-run and believe whichever the code
+prints" — would have deleted a correct number, because the solve is deterministic
+and reproduces 786 every time. **Tell a rounding apart from a frame bug this way:**
+a frame difference moves *both* coordinates and cannot change the scalar distance;
+here the distance travelled with the pair, so only Δv had moved.
+
+**And neither was the floor.** The shipping 12-iteration search stops **1.6e-6 m/s
+short**. At 20 iterations: Δv **0.2165483096** → **1 087 km** (not 1 130), ζ₂
+**−26.6 km**. So at the real minimum the timing coordinate is ~zero and the
+residual is pure spatial offset — the module's thesis, shown far more sharply than
+the number that stood in for it. The ladder agrees independently: parabola vertex
+0.2165482893, ζ₂ = 0 crossing 0.2165483587, solve between them. Distance minimum
+and timing zero are the same point *because* ζ₂ moves 112× faster than ξ₂.
+
+**`dv_window_m_s` is the ITERATION BUDGET, not a door width.** `2·0.01·Δv_aim·0.618ⁿ`
+= 1.34e-5 at n=12 (exactly what the solve reported) and 2.86e-7 at n=20 — 47×, from
+nothing but the iteration count; `rel_tol` needs ~26 iterations and never binds.
+The old header converted 1.3e-5 into "~13 km of b-plane, the same order as the
+closed form's 24.9 km keyhole width" — a **coincidence of running 12 iterations**.
+The real door (return inside its own focused capture disc) is ~±2e-5 m/s, ~3×
+wider. This is the same trap as the 7:9 wall above, wearing different clothes:
+golden-section converges just as hard onto its own budget as onto a minimum.
+
+**Deliberately not re-run** (a 1.6e-6 m/s shift is below what they resolve): the
+29.09-vs-24.92 km door-width calibration (it comes from `∂ζ₂/∂ζ₁` on the flown
+trajectory, not the floor's ζ₂), and the downstream 2.9 widths / 0.930 m/s at
+900 d / P = 0.064 in [[keyhole-probability]].
+
+Evidence: `core/examples/probe_keyhole_floor.rs` (new — flies a Δv ladder and
+prints the arithmetic), `probe_keyhole_return -- 3 4 minus retro 20`.

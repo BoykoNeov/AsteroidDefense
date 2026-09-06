@@ -101,6 +101,10 @@
 //! Earth* three years later. So the width here is conservative by about 1.6× on
 //! the one case with an answer. Quote it as "how many keyhole widths away", never
 //! as a yes/no: the binary would say no to a plan that comes back.
+//!
+//! (That 0.216550 is the 12-iteration stop; the sharper floor is `0.2165483096`.
+//! The 1.6× calibration is unaffected — it comes from the flown trajectory's
+//! `∂ζ₂/∂ζ₁`, not from where the search stopped.)
 
 use nalgebra::{Vector2, Vector3};
 
@@ -1409,13 +1413,24 @@ mod tests {
     /// along-track Δv 0.216438 m/s at the campaign start, return 53 841 km) and
     /// refined the Δv against the propagator to the return's floor:
     /// **0.216550 m/s → 1 130 km from Earth's centre on 2042-12-31**, three years
-    /// after the 2040-01-01 flyby, inside the capture disc and inside Earth. This
+    /// after the 2040-01-01 flyby, inside the capture disc and inside Earth.
+    ///
+    /// That Δv is the **12-iteration** stop, rounded to six decimals — a real
+    /// flight, but 1.6e-6 m/s short of the actual minimum (`0.2165483096`
+    /// → 1 087 km, measured 2026-09-06 at 20 iterations). It is kept here on
+    /// purpose: this test's job is that *a* flown Δv still returns inside Earth,
+    /// and re-pinning it to the sharper floor would cost a re-fly for no claim.
+    /// Never round it further — `ζ₂` moves 5.4e8 km per m/s. See
+    /// [`keyhole_target`](crate::keyhole_target). This
     /// re-flies that one Δv — no solve, one deflected 12-year arc plus 3.6 years
     /// onward — and asserts the return is where the probe measured it, so the
     /// flown keyhole is a regression test rather than a session note.
     ///
     /// The tolerance is a few capture radii, deliberately loose: the return miss
-    /// is a V-shaped function of Δv with a ~1e-5 m/s wide floor, and an integrator
+    /// is a V-shaped function of Δv whose bottom the search reaches to ~1e-5 m/s
+    /// at the default iteration budget (that is the budget, **not** a flat floor —
+    /// see [`KeyholeSolution::dv_window_m_s`](crate::keyhole_target::KeyholeSolution::dv_window_m_s)),
+    /// and an integrator
     /// or cadence change that moves the floor by that much still lands a return
     /// within thousands of kilometres, which is the claim. What would fail this
     /// is a frame or sign regression, which moves the return by ~1e6 km.

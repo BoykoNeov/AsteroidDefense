@@ -36,6 +36,24 @@ func _run() -> void:
 		return
 
 	DirAccess.make_dir_recursive_absolute(OUT)
+
+	# 0. THE POST ITSELF, before it is dismissed. It reports the machine's actual
+	#    state, and since the kernel read moved onto a worker it has a third state
+	#    to report: the read is typed as READING and rewritten when it lands. Warm
+	#    the read is ~2 ms, so what this captures is the settled screen — the
+	#    READING branch was photographed separately, by holding the landing, because
+	#    two milliseconds is not photographable.
+	# Wait for the typewriter, not a frame count: the POST types at 220 chars/s and
+	# the ephemeris lines are a second in, so a four-frame settle photographs the
+	# copyright banner and nothing that this screen is here to report.
+	var tb := Time.get_ticks_msec()
+	while is_instance_valid(main.boot) and not main.boot.is_typed() 			and Time.get_ticks_msec() - tb < 8000:
+		await get_tree().process_frame
+	await _settle(2)
+	print("SHOT  boot: field_loading=%s bodies_online=%s at %d ms"
+		% [Sim.field_loading, Sim.bodies_online, Time.get_ticks_msec()])
+	await _shot("boot_1_post")
+
 	main.boot.dismiss()
 	await _settle(6)
 
@@ -50,6 +68,15 @@ func _run() -> void:
 	#     picture, because "the nodes exist" and "the nodes are somewhere real" are
 	#     different claims and only the second one matters. The specific failure being
 	#     looked for: a body at ZERO, which in this heliocentric view is the Sun.
+	# The 3D world builds its planet nodes from the field, which since the kernel
+	# read went threaded can arrive *after* this scene does. When that wiring is
+	# missing the symptom is not a blank screen: `_process` throws a missing-key
+	# error on the first frame `bodies_online` is true and every line below it in
+	# that function stops running, so bodies freeze at the origin and the comet's
+	# span gate silently stops being applied. Count the nodes.
+	if main.solar.body_nodes.size() != Sim.planets.size():
+		print("SHOT  FAIL: %d planet nodes for %d planets - the world was built before the field landed"
+			% [main.solar.body_nodes.size(), Sim.planets.size()])
 	print("SHOT  small_bodies armed=%s mounted=%s count=%d"
 		% [Sim.small_bodies_armed, Sim.mission.small_bodies_mounted(), Sim.asteroids.size()])
 	Sim.paused = true

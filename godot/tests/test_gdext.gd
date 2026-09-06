@@ -216,5 +216,39 @@ func _init() -> void:
 	_check(m.is_clean_miss() != (m.deflected_perigee_m() >= 0.0),
 		"clean-miss and finite-perigee are mutually exclusive with a plan set")
 
+	# --- The threaded read: the frontend's actual entry point ---------------
+	# **Last in the suite, deliberately.** This opens a second Mission with its own
+	# 32 MB almanac, and several assertions above are wall-clock bounds that are
+	# already marginal on this machine: `begin_build_scenario` (a bare
+	# `thread::spawn`) reads 755 ms against a 1000 ms bound with nothing else
+	# resident. Running this block ahead of them pushed it to 1734 ms and failed a
+	# check about threading that this change had nothing to do with.
+	# `load_from` stays for tests and shell runs; the game calls `begin_load` and
+	# drains it, because the read is seconds on a cold cache and it happens before
+	# a single frame is drawn. Pin the three things that path promises.
+	var m2 = Mission.new()
+	_check(not m2.is_loading(), "a fresh Mission is not loading anything")
+	_check(m2.begin_load(k.bsp, k.pca), "begin_load() started (%s)" % m2.last_error())
+	_check(m2.is_loading(), "is_loading() is true while the worker reads")
+	# Refusing a second read is what stops a double-kick from leaving two workers
+	# racing to install a core into the same handle.
+	_check(not m2.begin_load(k.bsp, k.pca), "a second begin_load() is refused while one is in flight")
+	var reads := 0
+	while m2.poll_load():
+		reads += 1
+		OS.delay_msec(1)   # a bare spin would burn a core for the whole cold read
+	_check(m2.is_loaded(), "the threaded read landed a usable core (%s)" % m2.last_error())
+	_check(not m2.is_loading(), "is_loading() is false once it lands")
+	# `poll_load` reports "still reading", so a caller that treats false as success
+	# would call a failed read a good one. `is_loaded` is the success test, and this
+	# is the pair that says so.
+	_check(not m2.poll_load(), "polling a finished read is a no-op, not a hang")
+	print("threaded read drained in %d polls" % reads)
+	# Same kernels, same answer: the worker is not a different code path physically.
+	_check(m2.body_position_ecl_au(399, 0.0).distance_to(m.body_position_ecl_au(399, 0.0)) == 0.0,
+		"the threaded read gives bit-identical Earth positions to load_from()")
+	_check(not m2.begin_load(k.bsp, k.pca), "begin_load() is refused once the kernels are loaded")
+	m2 = null   # release the second almanac rather than hold it to process exit
+
 	print("gdext gate: %s" % ("PASS" if fails == 0 else "FAIL (%d)" % fails))
 	quit(fails)

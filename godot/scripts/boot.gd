@@ -25,6 +25,31 @@ func _ready() -> void:
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 	_font = Sim.mono_font
 	_lines = _post_lines()
+	# The kernel read is on a worker now, so the POST is typed *while* it runs and
+	# the ephemeris lines start as READING. Retype them when the answer arrives —
+	# which is the one thing a real POST does that a snapshot cannot.
+	Sim.field_online.connect(_on_field_settled)
+	Sim.field_load_failed.connect(_on_field_settled)
+
+
+## Rebuild the POST in place now that the kernels have settled, one way or the
+## other.
+##
+## `_chars` is a budget counted across the whole array, so keeping it means every
+## character already on screen stays on screen and only the ephemeris lines change
+## under it — the READING line becomes LOADED where it already sits. The pending
+## and settled branches are written with the *same four line slots* precisely so
+## nothing below them shifts; a rebuild that changed the line count would slide the
+## rest of the screen sideways mid-type.
+##
+## `_done` is cleared because the settled POST is longer than the pending one: if
+## the typewriter had already finished, it has more to type now, and the 5 s idle
+## dismissal restarts from the moment the screen is actually complete.
+func _on_field_settled() -> void:
+	_lines = _post_lines()
+	if _chars < float(_total_chars()):
+		_done = false
+		_idle = 0.0
 
 
 ## The POST, built from what actually came up.
@@ -36,9 +61,18 @@ func _post_lines() -> Array[String]:
 		"MEMORY TEST ................ 65536 KB OK",
 	]
 
-	if Sim.bodies_online:
-		out.append("EPHEMERIS KERNEL ........... %s LOADED" %
-			Sim.kernel_source.get_file().to_upper())
+	# Three states now, not two. The read is on a worker, so "not online yet" no
+	# longer means "not found" — and saying NOT FOUND while a perfectly good kernel
+	# is still being read off the disk is exactly the false self-test this POST
+	# exists to not be. Each branch fills the same four slots, so the lines below
+	# do not move when this one is retyped (see `_on_field_settled`).
+	if Sim.field_loading:
+		out.append("EPHEMERIS KERNEL ........... %s READING ..." % Sim.kernel_file)
+		out.append("PROPAGATOR ................. DOP853 F64 [RUST CORE]")
+		out.append("EPHEMERIS SPAN ............. PENDING KERNEL")
+		out.append("SOLAR FIELD ................ STANDBY - AWAITING FIELD")
+	elif Sim.bodies_online:
+		out.append("EPHEMERIS KERNEL ........... %s LOADED" % Sim.kernel_file)
 		out.append("PROPAGATOR ................. DOP853 F64 [RUST CORE]")
 		out.append("EPHEMERIS SPAN ............. %d - %d" %
 			[Sim.year_at(Sim.T_MIN), Sim.year_at(Sim.T_MAX)])
@@ -71,8 +105,15 @@ func _post_lines() -> Array[String]:
 			for l in Sim.build_error.split("\n"):
 				out.append("! " + l)
 		_:
-			out.append("DEFLECTION SOLVER .......... OFFLINE - NO EPHEMERIS")
-			out.append("MISSION PLANNER ............ OFFLINE")
+			# IDLE covers two different situations now: no kernels at all, and
+			# kernels still being read. The solver is genuinely not up in either,
+			# but only one of them is a fault.
+			if Sim.field_loading:
+				out.append("DEFLECTION SOLVER .......... ARMS ON EPHEMERIS")
+				out.append("MISSION PLANNER ............ ARMS ON SOLUTION - KEY [M]")
+			else:
+				out.append("DEFLECTION SOLVER .......... OFFLINE - NO EPHEMERIS")
+				out.append("MISSION PLANNER ............ OFFLINE")
 
 	# The b-plane view is a separate subsystem and separately dormant (3C-2c) —
 	# reporting it green because the solver is up is exactly the kind of blanket
@@ -80,7 +121,9 @@ func _post_lines() -> Array[String]:
 	out.append("B-PLANE TARGETING .......... OFFLINE - REBUILDING ON CORE")
 
 	out.append("")
-	if not Sim.bodies_online:
+	if Sim.field_loading:
+		out.append("READING EPHEMERIS - STAND BY")
+	elif not Sim.bodies_online:
 		out.append("*** DEGRADED - NO EPHEMERIS ***")
 	elif Sim.build_state == Sim.Build.FAILED:
 		out.append("*** DEGRADED - ORRERY ONLINE, NO THREAT SOLUTION ***")
@@ -102,6 +145,13 @@ func _process(delta: float) -> void:
 			dismiss()
 			return
 	queue_redraw()
+
+
+## Whether the typewriter has reached the end of the POST. The shot harness waits
+## on this: the screen reports the machine's state a second or more in, so a fixed
+## frame count photographs the banner instead of the report.
+func is_typed() -> bool:
+	return _done
 
 
 func dismiss() -> void:

@@ -29,6 +29,7 @@ Read this table first, then the session that owns the layer you are touching.
 | Godot frontend: DE440 orrery, real NEO scenery, planner, b-plane view (with the keyhole map, `[H]`), launch-window map, Tier-2 force menu, tractor bench, threat-orbit knob | done; keyhole overlay **seen on screen 2026-09-05** and its captions budgeted | `godot/`, `godot/rust/` |
 | Godot visual/perf pass: 3D world in its own viewport with 4× MSAA and phosphor persistence (peak-hold trails), per-frame position memo, cached 2D orbit traces, the `_perf.gd` frame-time harness and `run_harness.ps1` | done 2026-09-05; the 2D map went 18.9 → 7.1 ms/frame, native calls/frame 764 → 29; follow-ups in `docs/plans/2026-09-05-visuals-performance-followups.md` | `godot/scripts/main.gd`, `godot/shaders/phosphor_persist.gdshader`, `godot/tests/` |
 | **Frontend speed**: the display comet flown on its own worker instead of the build worker, and every DE440 body served by one batched binding call filled on demand | **done 2026-09-06**; time to a threat solution 34.0 -> 25.2 s, native calls/frame in the 3D views 29 -> 6 | `godot/rust/src/lib.rs`, `godot/scripts/sim.gd` |
+| **Frontend startup**: the DE kernel read moved onto its own worker, the boot POST given a third state to report it, and `_ready` split into timed phases | **done 2026-09-07**; `_ready` 29 -> 2 ms, and the roadmap item's "646 MB DE440" turned out to be a 32 MB file on a fragmented spinning disk | `godot/rust/src/lib.rs`, `godot/scripts/{sim,boot,solar_system,main}.gd` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -112,14 +113,25 @@ Read this table first, then the session that owns the layer you are touching.
    i.e. essentially zero, which *strengthens* the module's spatial-floor claim.
    And the search's own reported Δv window is its iteration budget, not a door
    width. See *The floor that was a stopping distance*.
-7. **The synchronous kernel load in `_ready()`.** `mission.load_from` reads the
-   646 MB DE440 on the **main thread** before the threaded build is even started,
-   and on a cold file cache that is ~11 s — larger than the whole ceiling the
-   comet split just claimed, and outside the worker entirely. Warm it is ~0, which
-   is why it went unseen: it only bites on the first launch after a boot, and every
-   development run is warm. Caught 2026-09-06 as a one-off `test_orrery.gd` failure
-   (`_ready 10927 ms` against a 3 s bound) on the first run after a launch that had
-   died at parse time and so never warmed the kernels. See *Frontend speed*.
+7. ~~**The synchronous kernel load in `_ready()`.**~~ **DONE 2026-09-07 — and the
+   file it named was the wrong one.** `load_from` reads **`de440s.bsp`, 32 MB**, not
+   the 646 MB DE440 this line claimed; the 646 MB file is the *small-body* kernel,
+   which is only stat'd here and mounted on the build worker as it always was. The
+   `_ready 10927 ms` observation was real but had never been split — `test_orrery.gd`
+   timed all of `_ready` and one line inside it was blamed. Split now
+   (`Sim.ready_phase_ms`, printed every run): warm, `load_from` is 26.6 ms of a
+   29 ms `_ready` and nothing else does I/O. The seconds are the **disk** — `M:` is a
+   spinning drive, and `de440s.bsp` reads at 5–13 MB/s against 35 MB/s for a large
+   file on the same platter, i.e. it is fragmented; ANISE reads the whole file to
+   heap, so it is a genuine 32 MB read measured at 2.4–6.4 s off the device. Not
+   antivirus (a scan verdict is cached; both reads were slow). The read now runs on
+   a worker (`begin_load`/`poll_load`) and the boot POST reports it — `_ready` 29 ms
+   → **2 ms**, with no cold before/after claimed because a cold cache cannot be
+   produced on demand. The batch's real find is the regression it caused and the
+   pictures caught: `bodies_online` false at scene load left the 3D world with no
+   planet nodes, which threw in `_process` every frame and silently killed every
+   line below it — including the comet's span gate. See *The kernel read taken off
+   the main thread*.
 8. Phase 3.
 
 ---
@@ -3043,3 +3055,200 @@ clock (`sim.gd`), and the harness scrubs back to t=0 before the trails shot.
 `adopt_orrery_body`, `build_phase_timings`, and the comet test rewritten to the
 new order), `godot/scripts/sim.gd` (`_prime_ephem_positions`, `_poll_catalog`),
 `godot/tests/test_orrery.gd` (84 checks now, not 83).
+
+### The kernel read taken off the main thread — 2026-09-07 session (roadmap item 7: the wait was real, the file it was blamed on was not, and the pictures caught what the tests could not)
+
+*What is next* item 7 said the frontend blocks `_ready` on "the 646 MB DE440 read,
+synchronous, before the build is even started". The wait is real. Almost nothing
+else in that sentence was.
+
+#### The premise, checked before it was acted on
+
+`load_from` never touches 646 MB. It reads **`de440s.bsp`, 32 MB**, plus a 37 KB
+constants file, then walks a span bisection. The 646 MB file is `sb441-n16.bsp`,
+the small-body kernel, and arming it is `p.is_file()` — a path stat. Its mount has
+been on the build worker since the day it was added.
+
+The `_ready 10927 ms` observation the item was built on is real, but
+`test_orrery.gd` timed **all of `_ready`** and one line inside it was blamed.
+Nothing had ever timed the phases separately. So they are timed now, permanently:
+`Sim.ready_phase_ms` is filled every boot and printed by `test_orrery.gd`. Warm:
+
+    font 1.4  tier2_terms 0.0  instantiate 0.1  resolve 0.6  load_from 26.6
+    arm_small_bodies 0.1  epochs_and_span 0.1  build_planets 0.0  build_events 0.0
+    begin_build 0.1                                          (29 ms total)
+
+Two candidates that had to be ruled out rather than assumed away, because both do
+work that can be slow on a cold machine: the `SystemFont` fallback list (1.4 ms —
+Godot resolves those names against the system font set) and `Kernels.resolve()`
+(0.6 ms — `_scan_dir` matches filenames with `FileAccess.file_exists`, a stat, and
+never opens the 646 MB file by a side door). Neither is the story. `load_from` is
+92 % of a `_ready` that does no other I/O worth naming, which is what finally makes
+the original attribution *checkable* — and it names the right line for the wrong
+reason.
+
+#### Why 32 MB takes seconds: the disk, measured rather than blamed
+
+32 MB in 11 s is ~3 MB/s, which is not a plausible cold read of a local file, so
+the arithmetic itself said something else was going on. Read directly from the
+device with `FILE_FLAG_NO_BUFFERING`, so the answer does not depend on what the
+cache happens to hold:
+
+| read | cost | rate |
+|---|---|---|
+| `de440s.bsp` (32 MB), unbuffered | 6 375 ms | 4.9 MB/s |
+| `de440s.bsp` (32 MB), buffered, cache already evicted | 4 598 ms | 6.8 MB/s |
+| `de440s.bsp` (32 MB), unbuffered, second pass | 2 420 ms | 12.9 MB/s |
+| `sb441-n16.bsp`, first 200 MB, unbuffered | 5 656 ms | 35.4 MB/s |
+
+`M:` is a **spinning disk** (Toshiba HDWT380, SATA, `MediaType: HDD`). The last row
+is the control: the same drive streams a large file at 35 MB/s, so 5–13 MB/s on the
+small one is a seek profile, i.e. `de440s.bsp` is **fragmented**. And it is a real
+read of the whole file — ANISE's `Almanac::new` is `std::fs::read` (`almanac/mod.rs`),
+a heap read, not an mmap, so nothing is deferred to page faults.
+
+**It is not antivirus**, which was the first alternative worth eliminating: Defender
+caches its verdict per file, so a scan would have made the *second* read fast. Both
+reads were slow.
+
+None of this is fixable in code. What is fixable is *where the wait is spent*.
+
+#### The change
+
+`Mission::begin_load(bsp, pca)` reads the kernels on a worker and `poll_load()`
+adopts the result — a ninth channel, and the earliest one, because it runs before
+there is a core at all. `load_from` stays for tests and shell runs, which have
+nothing to keep responsive. Arming the small-body kernel deliberately did **not**
+move onto the worker: it is a stat, and leaving it on the main side keeps its
+warn-and-continue branch (a machine without the 646 MB file is a valid machine, not
+a failed mission) working exactly as written instead of being smuggled back through
+the channel.
+
+    _ready   29 ms -> 2 ms
+
+That is the whole deterministic claim. **No cold before/after is offered**, because
+a cold cache cannot be produced on demand here and manufacturing one would be worse
+than not having it: what can be said is that the read measured 2.4–6.4 s off this
+machine's disk and that none of it now lands on the main thread. `poll_load`
+reports *"still reading"*, not *"it worked"* — `is_loaded()` is the success test,
+and `test_gdext.gd` pins that pair along with the refusal of a second `begin_load`
+and the fact that the threaded read returns bit-identical Earth positions to the
+synchronous one.
+
+#### The state the frontend did not used to have
+
+`bodies_online` used to be settled before the first frame. Now there is a third
+state — reading — and the boot POST reports it, which is the one thing a real
+power-on self-test does that a snapshot cannot: `EPHEMERIS KERNEL ... DE440S.BSP
+READING ...`, retyped to `LOADED` in place when the read lands. The pending and
+settled branches fill the **same four line slots** so nothing below them shifts
+mid-type, and `_chars` is a budget counted across the array, so everything already
+on screen stays on screen.
+
+Two details that only appear once you look at it:
+
+- **The line named the wrong thing.** `kernel_source` is the *directory* the
+  resolver answered from, so `kernel_source.get_file()` is the word `KERNELS`.
+  Tolerable while the line only ever read "... LOADED"; beside "... READING" it is
+  nonsense. `Sim.kernel_file` now carries `DE440S.BSP`.
+- **`field_online` is emitted after `_begin_build()`, not before.** Emitting first
+  retyped the POST in the one instant where the kernels were up and the build had
+  not been kicked, and printed `DEFLECTION SOLVER ... OFFLINE - NO EPHEMERIS`
+  directly under `DE440S.BSP LOADED`, over `ALL SYSTEMS NOMINAL`. Kicking first
+  restores exactly what the synchronous path showed.
+
+The READING screen was photographed by **holding the landing for 25 s** and taking
+the shot, because warm the state lasts about two milliseconds and is otherwise not
+photographable. The hold was removed afterwards; `boot_1_post` is a permanent shot
+of whatever the screen actually reaches, and it waits on the typewriter rather than
+a frame count — a four-frame settle photographs the copyright banner and nothing
+this screen exists to report.
+
+#### The regression the pictures caught, and the tests did not
+
+Both headless suites were green — 85 checks in `test_orrery.gd`, 53 in
+`test_gdext.gd` — and the frontend was broken.
+
+`SolarSystem._ready()` builds its planet nodes inside `if Sim.bodies_online:`. That
+flag was *always* true by then, because the load finished inside `Sim._ready()`.
+Threaded, it is false, so the world built itself with no planet nodes; then
+`bodies_online` went true and `_process` hit
+
+    Invalid access to property or key 'MERCURY' on a base object of type 'Dictionary'
+
+on every frame from then on. **The failure is not the error.** A GDScript error in
+`_process` skips the rest of the function, so every line below it stopped running —
+the sixteen belt asteroids froze at the origin (which in this heliocentric view is
+the Sun, the exact failure this project has shipped three times and guards
+everywhere), and the comet's span gate silently stopped being applied.
+
+That last one is how it was found. `_shot.gd` prints `comet past span: ...
+node_visible=true (must be false)`, and the previous session had recorded `false`.
+It was confirmed as a regression rather than a flake by stashing the GDScript
+changes and re-running against the same DLL: `node_visible=false` on unmodified
+scripts, `true` with the change. The errors themselves went to **stderr**, which the
+windowed run's output filter was not reading — the picture and one printed flag were
+the only things that told the truth.
+
+Fixed by building the things that read the field *when the field arrives*, matching
+the `mission_ready` wiring already beside it: `SolarSystem` connects `_build_planets`
+to `field_online` when the field is not up at scene load, and `main.gd`'s camera
+focus ring — the other `_ready`-time snapshot of `bodies_online`, which would
+otherwise have offered the Sun and nothing else for the rest of the session —
+rebuilds the same way, clamping the focus index rather than resetting it.
+
+`_shot.gd` now counts planet nodes against `Sim.planets` and prints a FAIL, so the
+next thing that builds too early says so in one line instead of through a frozen
+belt.
+
+#### The check that was quietly deleted, and put back
+
+`test_orrery.gd` asserts `date_string() == "2028-01-01"` and `T_IMPACT ≈ 4383`
+straight after `_ready()`. Threaded, those read the **placeholders** — and
+`EPOCH0_TDB` defaults to `883569600.0`, which is exactly what
+`default_epoch0_tdb_seconds()` returns, while `T_IMPACT` defaults to `4383.0`
+against a 2.0-day tolerance. Both would have passed whether the loader landed or
+not, on values the core never supplied. The test now pumps `_poll_load()` to
+completion and gates on `bodies_online` before that block.
+
+The build-worker check moved for the same reason: `ready_ms` no longer covers the
+build kick, and `load_ms` is the wrong replacement because it contains the disk
+read, which is seconds on a cold cache and says nothing about whether the build
+blocked. It reads `ready_phase_ms["adopt_field"]` — the landing frame, which is
+where the kick now lives (0.2 ms).
+
+#### A pre-existing flaky bound, found on the way past and deliberately left alone
+
+`test_gdext.gd` asserts `begin_build_scenario()` returns in **< 1000 ms** — the
+guard that says the ~10 s build is not on the calling thread. On this machine, in
+one hour, that call measured **755, 2015 and 3551 ms**. It does nothing but clone
+two `Arc`s and `std::thread::spawn`; everything expensive is inside the closure.
+The spread is the machine committing a thread stack while the file cache is full of
+646 MB kernels from a session of repeated runs.
+
+It is **not this batch's doing**, and that was checked rather than assumed: with the
+GDScript stashed and the same DLL, the **unmodified** test failed *harder* (3551 ms)
+than the modified one (2015 ms) minutes apart. Two things were also ruled out along
+the way — the new threaded-read block leaves a second 32 MB almanac resident, so it
+is freed (`m2 = null`) and moved to the **end** of the suite, after every wall-clock
+assertion; that fixed a companion `set_plan()` failure and did not move this one.
+
+The bound is left at 1000 ms. It has ~10x of headroom against the failure it exists
+to catch (a blocking build is 10-30 s, not 3.5), and loosening a real guard on the
+evidence of one thrashing afternoon is the wrong trade. Recorded so the next person
+who sees it red knows to check the machine first.
+
+#### One lever that is the operator's, not the code's
+
+`de440s.bsp` reads at 5–13 MB/s while the same disk streams 35 MB/s. Re-copying the
+file would lay it out contiguously and cut the cold read substantially. That is a
+machine-local action on a machine-local file, so it is recorded here rather than
+done.
+
+**Files touched:** `godot/rust/src/lib.rs` (`field_load`, `begin_load`,
+`is_loading`, `poll_load`), `godot/scripts/sim.gd` (`ready_phase_ms`, `_phase`,
+`field_loading`, `kernel_file`, `_pending_kernels`, `field_online` /
+`field_load_failed`, `_poll_load`), `godot/scripts/boot.gd` (the third POST state,
+`_on_field_settled`, `is_typed`), `godot/scripts/solar_system.gd` and
+`godot/scripts/main.gd` (build on `field_online`), `godot/tests/test_orrery.gd`,
+`godot/tests/test_gdext.gd`, `godot/tests/_shot.gd`.

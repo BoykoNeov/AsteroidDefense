@@ -100,7 +100,45 @@ var encounter_online := false
 var mission = null
 var bodies_online := false
 var kernel_source := ""                # where the kernels were found (for the HUD)
+## The DE kernel's own filename, e.g. "DE440S.BSP" — what the boot POST names on
+## its ephemeris line. Distinct from `kernel_source`, which is the *directory* (or
+## the env var) the resolver answered from: printing `kernel_source.get_file()` on
+## a line about a kernel gets you the word "KERNELS", which was tolerable while it
+## only ever read "... LOADED" and stops being so next to "... READING".
+var kernel_file := ""
 var kernel_error := ""                 # why they were not (for the HUD)
+
+## The kernel read is in flight on its own thread — see `_load_field`.
+##
+## `bodies_online` and `kernel_error` are both still false/empty while this is
+## true, which is a third state the frontend did not used to have: the read used
+## to finish inside `_ready`, so by the first frame the answer was always known.
+## It is threaded because on a cold file cache the read is seconds, and it is the
+## *first* thing the game does — before a frame is drawn — so paying it inline
+## means a black window rather than a display that says what it is waiting for.
+var field_loading := false
+
+## What `Kernels.resolve()` found, held across the threaded read.
+##
+## The worker takes two paths and gives back a loaded core; everything else the
+## resolver learned — the source string the HUD prints, the small-body path still
+## to be armed — has to survive on this side until the read lands.
+var _pending_kernels := {}
+
+## The DE field is up: kernels read, clock anchored on the real campaign, span
+## clamped to the mounted kernel. Fired once per boot, from `_poll_load`.
+##
+## Deliberately **not** `mission_ready`, which is about a built scenario, fires
+## more than once, and whose handlers clear phosphor trails and cached 2D traces.
+## Kernels landing is a different event with a different consumer (the boot POST),
+## and folding it into the other signal would fire all of that before there is a
+## scenario to draw.
+signal field_online
+
+## The kernel read finished and failed — `kernel_error` says why. Same one-shot
+## shape as `field_online`, so a consumer can wait on the pair and know the
+## question is settled either way rather than waiting forever on the good news.
+signal field_load_failed
 ## A small-body kernel was found and handed to the core. NOT the same as mounted:
 ## the mount happens on the build worker, and `Mission.small_bodies_mounted()` is
 ## the only flag an asteroid draw may gate on. This one is for the HUD, so a
@@ -449,19 +487,50 @@ signal plan_changed
 
 var _events: Array[Dictionary] = []
 
+## Wall-clock cost of each phase of `_ready`, in milliseconds, in call order.
+##
+## Filled on every boot (one `Time.get_ticks_usec()` per phase costs nothing) and
+## read only by `test_orrery.gd`, which prints it beside its `_ready` bound.
+##
+## It exists because a one-off `_ready 10927 ms` was attributed to
+## `mission.load_from` reading "the 646 MB DE440", and **both halves of that were
+## wrong**: the DE kernel this loads is `de440s.bsp` at 32 MB, and the 646 MB file
+## is the small-body kernel, which is only *named* here (`set_small_body_kernel`
+## stats a path) and mounted later on the build worker. Nothing had ever timed the
+## phases separately — the whole of `_ready` was timed and one line inside it was
+## blamed. Keep this filled so the next slow boot is attributed, not guessed at.
+var ready_phase_ms: Dictionary = {}
+
+
+## Record `now - t0` under `phase` and return the new mark, so phases chain:
+## `var t := _phase("font", t)`.
+func _phase(phase: String, t0: int) -> int:
+	var now := Time.get_ticks_usec()
+	ready_phase_ms[phase] = (now - t0) / 1000.0
+	return now
+
 
 func _ready() -> void:
+	var t := Time.get_ticks_usec()
 	mono_font = SystemFont.new()
 	mono_font.font_names = PackedStringArray(
 		["Consolas", "Cascadia Mono", "Courier New", "Lucida Console"])
+	t = _phase("font", t)
 
 	for term: Array in TIER2_TERMS:
 		tier2_on[term[1]] = false
+	t = _phase("tier2_terms", t)
 
 	_load_field()
+	t = Time.get_ticks_usec()   # _load_field timed its own phases
 	_build_planets()
+	t = _phase("build_planets", t)
 	_build_events()
-	_begin_build()
+	t = _phase("build_events", t)
+	# `_begin_build()` is NOT called here any more: there are no kernels yet to
+	# build against. `_poll_load` kicks it the moment the field lands, so the
+	# scenario still starts as soon as it can — the two were always serial, and this
+	# only moves the seam off the main thread.
 
 
 ## Bring up the real DE440 field: find the kernels, load them, and adopt the
@@ -472,28 +541,68 @@ func _ready() -> void:
 ## the HUD says so. What must NOT happen is a silent fallback to fabricated
 ## bodies: this build draws the real field or admits it cannot.
 func _load_field() -> void:
+	var t := Time.get_ticks_usec()
 	if not ClassDB.class_exists("Mission"):
 		kernel_error = "GDExtension not loaded (build it: cargo build -p asteroid_gdext --release)"
 		return
 	mission = ClassDB.instantiate("Mission")
+	t = _phase("instantiate", t)
 
 	var k := Kernels.resolve()
+	t = _phase("resolve", t)
 	if not k.ok:
 		kernel_error = k.error
 		return
-	if not mission.load_from(k.bsp, k.pca):
-		kernel_error = "kernel load failed (%s): %s" % [k.source, mission.last_error()]
+
+	# The read runs on a worker; `_poll_load` finishes the job. Everything the
+	# resolver found is kept because the landing needs it — the source string for
+	# the HUD, the small-body path to arm — and none of it survives inside the
+	# worker, which is handed two paths and returns a loaded core.
+	_pending_kernels = k
+	# Set here rather than on landing: this is what the *resolver* found, which is
+	# known before a byte is read, and the boot POST needs it to name the file it is
+	# waiting on. A failed read does not make it untrue — `kernel_error` is what
+	# says the read failed.
+	kernel_source = k.source
+	kernel_file = String(k.bsp).get_file().to_upper()
+	if not mission.begin_load(k.bsp, k.pca):
+		kernel_error = "kernel read not started (%s): %s" % [k.source, mission.last_error()]
+		t = _phase("begin_load", t)
+		return
+	field_loading = true
+	t = _phase("begin_load", t)
+
+
+## Adopt the kernels once the worker has read them. Called every frame from
+## `_process`; a no-op unless a read is in flight.
+##
+## **Order matters here and is the whole reason this is not four lines.**
+## `bodies_online` is what every drawing consumer gates on, and it is set *last* —
+## after the epochs and the span. A frame that saw it true with the placeholder
+## span would draw a real field against clock bounds that were never the mounted
+## kernel's, which is the same class of quiet wrongness the flag exists to prevent.
+func _poll_load() -> void:
+	if not field_loading:
+		return
+	if mission.poll_load():
+		return
+	# `poll_load` going false means finished, not succeeded.
+	field_loading = false
+	var t := Time.get_ticks_usec()
+	if not mission.is_loaded():
+		kernel_error = "kernel load failed (%s): %s" % [
+			_pending_kernels.source, mission.last_error()]
+		_phase("adopt_field", t)
+		field_load_failed.emit()
 		return
 
-	kernel_source = k.source
-	bodies_online = true
-
 	# Arm the small-body kernel if this machine has one. Records a path only — the
-	# ~5.7 s mount happens on the build worker, so the load stays fast and the
+	# ~0.6 s mount happens on the build worker, so this stays a stat and the
 	# asteroids appear when the build lands. Absent (or unreadable) is fine: the
 	# mission is complete without them, so this warns rather than failing the load.
-	if not k.small_bodies.is_empty():
-		if mission.set_small_body_kernel(k.small_bodies):
+	# It is a stat, which is why it stayed on this side of the worker.
+	if not _pending_kernels.small_bodies.is_empty():
+		if mission.set_small_body_kernel(_pending_kernels.small_bodies):
 			small_bodies_armed = true
 		else:
 			push_warning("small-body kernel not armed: %s" % mission.last_error())
@@ -508,6 +617,18 @@ func _load_field() -> void:
 	if span.size() == 2:
 		T_MIN = (span[0] - EPOCH0_TDB) / DAY_S
 		T_MAX = (span[1] - EPOCH0_TDB) / DAY_S
+
+	bodies_online = true
+	_phase("adopt_field", t)
+	# **The build is started before the signal, not after.** `field_online`'s
+	# consumer is the boot POST, which reports `build_state` on the same screen as
+	# the ephemeris line: emitting first meant it retyped in the one instant where
+	# the kernels were up and the build had not been kicked, and printed
+	# "DEFLECTION SOLVER ... OFFLINE - NO EPHEMERIS" underneath "DE440S.BSP LOADED".
+	# Kicking first restores exactly what the synchronous path showed, where
+	# `_ready` had already started the build before the POST was ever built.
+	_begin_build()
+	field_online.emit()
 
 
 ## Seconds past J2000 for a mission-elapsed time in days — the frame every
@@ -524,6 +645,9 @@ func _process(delta: float) -> void:
 	# These all run while paused: a paused clock does not mean a paused build, an
 	# operator who pauses mid-edit still wants their verdict solved, and the Tier-2
 	# measurement (kicked from the menu) must land whatever the clock is doing.
+	# `_poll_load` is first because every one of the others is downstream of it —
+	# there is no build, catalog or grid to drain until the kernels are up.
+	_poll_load()
 	_poll_build()
 	_poll_catalog()
 	_poll_tier2_preview()

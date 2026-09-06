@@ -86,6 +86,17 @@ impl AsteroidCore {
 #[class(base = RefCounted, init)]
 struct Mission {
     core: Option<MissionCore>,
+    /// The in-flight kernel read, if any — see [`begin_load`](Mission::begin_load).
+    /// A **ninth** channel, and the earliest one: it runs before there is a core at
+    /// all, which is what makes it different from every other worker here.
+    ///
+    /// It exists because the read is not free on a spinning disk. Warm it is 27 ms
+    /// and nobody would thread it; cold, the 32 MB `de440s.bsp` measured 2.4–6.4 s
+    /// off this machine's drive (unbuffered, 5–13 MB/s — the same disk streams a
+    /// 200 MB file at 35 MB/s, so the small kernel is seek-bound), and every
+    /// millisecond of it used to be main-thread time before the window drew
+    /// anything at all.
+    field_load: Option<mpsc::Receiver<Result<MissionCore, String>>>,
     /// The in-flight background scenario build, if any — see
     /// [`begin_build_scenario`](Mission::begin_build_scenario). `Some` exactly while
     /// a worker is running, so it doubles as the "is building" flag.
@@ -228,6 +239,105 @@ impl Mission {
     fn load_from(&mut self, bsp_path: GString, pca_path: GString) -> bool {
         let r = MissionCore::load_from(&bsp_path.to_string(), &pca_path.to_string());
         self.finish_load(r)
+    }
+
+    /// Read the DE kernels **on a worker thread** and return immediately. The
+    /// frontend's real entry point; [`load_from`](Self::load_from) remains for
+    /// tests and shell runs, which have nothing to keep responsive.
+    ///
+    /// Reads the DE pair and nothing else. Arming the small-body kernel stays a
+    /// main-thread call *after* this lands ([`set_small_body_kernel`] is a path
+    /// stat, not a read), so its warn-and-continue branch — a missing small-body
+    /// kernel is a valid machine, not a failed mission — keeps working exactly as
+    /// written instead of being smuggled back through this channel.
+    ///
+    /// Returns `false` + [`last_error`](Self::last_error) if a load is already in
+    /// flight or the kernels are already loaded. Drive it with
+    /// [`poll_load`](Self::poll_load).
+    ///
+    /// # Why this is threaded when `load_from` is 27 ms warm
+    /// Because warm is not the case that hurts. This is the **first** thing the
+    /// frontend does, before a single frame is drawn, so on a cold file cache the
+    /// window does not exist yet — the operator gets a black rectangle for the
+    /// duration rather than a display that says what it is waiting for. The read
+    /// was measured at 2.4–6.4 s off this machine's disk. Nothing here makes the
+    /// disk faster; it moves the wait somewhere the display can narrate it.
+    ///
+    /// The worker returns the whole [`MissionCore`] by value rather than filling
+    /// this one in place: a half-loaded core reachable from the main thread is
+    /// exactly the state every other accessor here is written to assume cannot
+    /// exist, and `core` staying `None` until the worker lands preserves that.
+    #[func]
+    fn begin_load(&mut self, bsp_path: GString, pca_path: GString) -> bool {
+        if self.field_load.is_some() {
+            self.error = "a kernel load is already in flight".into();
+            return false;
+        }
+        if self.core.is_some() {
+            self.error = "the kernels are already loaded".into();
+            return false;
+        }
+        let (bsp, pca) = (bsp_path.to_string(), pca_path.to_string());
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = MissionCore::load_from(&bsp, &pca).map_err(|e| e.to_string());
+            // A closed channel means the game quit mid-read: drop it, never panic on
+            // a detached thread. Same contract as every other worker here.
+            let _ = tx.send(result);
+        });
+        self.error = GString::new();
+        self.field_load = Some(rx);
+        true
+    }
+
+    /// Whether the kernel read is still running.
+    #[func]
+    fn is_loading(&self) -> bool {
+        self.field_load.is_some()
+    }
+
+
+    /// Pump the kernel read: adopt the core if it has landed. Returns `true` while
+    /// it is **still reading**, `false` once it has finished or was never started —
+    /// the same shape as [`poll_catalog`](Self::poll_catalog), so the frontend
+    /// drives it with the polling loop it already has.
+    ///
+    /// `false` means *finished*, not *succeeded*: ask
+    /// [`is_loaded`](Self::is_loaded) for that, and
+    /// [`last_error`](Self::last_error) for why not.
+    ///
+    /// On failure the core stays `None` and the reason lands in
+    /// [`last_error`](Self::last_error), which is the contract
+    /// [`finish_load`](Self::finish_load) already pins for the synchronous path: a
+    /// failed load never leaves a half-usable core behind.
+    ///
+    /// Non-blocking, so it is safe to call every frame.
+    #[func]
+    fn poll_load(&mut self) -> bool {
+        let Some(rx) = self.field_load.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Ok(Ok(core)) => {
+                self.field_load = None;
+                self.core = Some(core);
+                self.error = GString::new();
+                false
+            }
+            Ok(Err(message)) => {
+                self.field_load = None;
+                self.core = None;
+                self.error = GString::from(&message);
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.field_load = None;
+                self.core = None;
+                self.error = "the kernel read thread died without reporting".into();
+                false
+            }
+        }
     }
 
     /// Arm the small-body kernel (`sb441-n16.bsp`) at an explicit path. Returns

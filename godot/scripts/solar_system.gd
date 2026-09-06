@@ -45,6 +45,14 @@ func _ready() -> void:
 	_build_sun()
 	if Sim.bodies_online:
 		_build_planets()
+	else:
+		# The kernels are read on a worker now, so the field can come up *after* this
+		# scene does — and `bodies_online` going true with no `body_nodes` behind it
+		# is not a blank screen, it is a missing-key error in `_process` on every
+		# frame from then on, which kills every line below it (the comet's span gate
+		# among them). Same shape as the `mission_ready` wiring below: build when the
+		# thing you draw actually exists.
+		Sim.field_online.connect(_build_planets)
 	_build_belt()
 	# The threat cannot be built here: the scenario is ~10 s of integration on a
 	# worker thread and does not exist yet at scene load. `mission_ready` fires when

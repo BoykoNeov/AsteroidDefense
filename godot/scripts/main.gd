@@ -188,13 +188,12 @@ func _ready() -> void:
 	# other target is a real ephemeris body, so the list is built only when the
 	# field is up; the threat/comet/interceptor targets return in 3C-2b with the
 	# bodies themselves.
-	_focus_targets = [["SUN", func() -> Vector3: return Vector3.ZERO, 32.0]]
-	if Sim.bodies_online:
-		for el in Sim.planets:
-			var body: Dictionary = el
-			var dist: float = 3.0 if body.name == "EARTH" else maxf(2.0, float(body.vis_r) * 24.0)
-			_focus_targets.append([body.name,
-				func() -> Vector3: return Sim.pos3d(body, Sim.t), dist])
+	_build_focus_targets()
+	if not Sim.bodies_online:
+		# Built once more when the threaded kernel read lands: at scene load the
+		# field may not be up yet, and a focus list frozen at that moment offers the
+		# Sun and nothing else for the rest of the session.
+		Sim.field_online.connect(_build_focus_targets)
 	_apply_focus()
 
 
@@ -478,6 +477,23 @@ func _jump_to_closest_approach() -> void:
 	Sim.paused = true
 	Sim.jump(day)
 	Sim.event_logged.emit("CLOCK HOLD AT CLOSEST APPROACH - CA %+.2f D" % (day - Sim.T_IMPACT))
+
+
+## The camera's focus ring: the Sun, then every ephemeris body.
+##
+## Rebuildable rather than built inline, because the field it reads can arrive
+## after this scene. `_focus_idx` is clamped rather than reset — the operator may
+## have moved the ring before the planets landed, and snapping their camera back
+## to the Sun at that moment would look like the app losing its place.
+func _build_focus_targets() -> void:
+	_focus_targets = [["SUN", func() -> Vector3: return Vector3.ZERO, 32.0]]
+	if Sim.bodies_online:
+		for el in Sim.planets:
+			var body: Dictionary = el
+			var dist: float = 3.0 if body.name == "EARTH" else maxf(2.0, float(body.vis_r) * 24.0)
+			_focus_targets.append([body.name,
+				func() -> Vector3: return Sim.pos3d(body, Sim.t), dist])
+	_focus_idx = clampi(_focus_idx, 0, _focus_targets.size() - 1)
 
 
 func _apply_focus() -> void:

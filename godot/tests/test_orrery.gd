@@ -34,16 +34,47 @@ func _init() -> void:
 	# How long the caller was held while the scenario build was kicked off. The
 	# build itself is ~10-30 s of integration; a blocking build would show here.
 	var ready_ms := Time.get_ticks_msec() - t_ready0
+	# The split, not just the total. When this bound last failed (10927 ms on a
+	# cold cache) the cost was attributed to one line inside `_ready` that had
+	# never been timed on its own; print the phases so the next one is read, not
+	# guessed. Ordered as they run, so a fat phase is obvious at a glance.
+	var phases := PackedStringArray()
+	for k: String in sim.ready_phase_ms:
+		phases.append("%s %.1f" % [k, sim.ready_phase_ms[k]])
+	print("_ready phases (ms): " + ", ".join(phases))
+
+	# --- The kernel read is off the caller too, not just the build ----------
+	# `_ready` no longer loads the kernels; it starts a worker that does, and
+	# `_poll_load` adopts it. Nothing below this point is answerable until that
+	# lands, so drain it first.
+	#
+	# **This pump is load-bearing, not ceremony.** Every clock assertion below has
+	# a placeholder that would satisfy it: `EPOCH0_TDB` defaults to 883569600.0,
+	# which is exactly what `default_epoch0_tdb_seconds()` returns, and `T_IMPACT`
+	# defaults to 4383.0 against a 2.0-day tolerance. So a loader that never landed
+	# would leave those two checks passing on values the core never supplied. The
+	# `bodies_online` gate below is what makes them mean something again.
+	var t_load0 := Time.get_ticks_msec()
+	var load_polls := 0
+	while sim.field_loading:
+		sim._poll_load()
+		load_polls += 1
+		OS.delay_msec(1)   # as the game does it: a frame apart, not a busy spin
+	var load_ms := Time.get_ticks_msec() - t_load0
 
 	if not sim.bodies_online:
 		print("SKIP  no ephemeris on this machine:\n%s" % sim.kernel_error)
 		quit(0)
 		return
 	print("kernels via %s" % sim.kernel_source)
+	_check(ready_ms < 250,
+		"the kernel read ran on a worker, not the caller (_ready %d ms; read landed after %d ms, %d polls)"
+		% [ready_ms, load_ms, load_polls])
 
 	# --- The clock is real, and anchored on the core's own campaign ---------
 	# Not a fabricated 2031 epoch: these come from ImpactorConfig::default()
 	# (impact 2040-01-01 TDB, lead 12 yr), read without the expensive build.
+	# Reachable only past the `bodies_online` gate above — see the pump.
 	_check(sim.date_string() == "2028-01-01",
 		"t=0 is the real campaign start 2028-01-01 (got %s)" % sim.date_string())
 	sim.t = sim.T_IMPACT
@@ -121,10 +152,13 @@ func _init() -> void:
 		% ((pts[0] - pts[pts.size() - 1]).length() / sim.AU))
 
 	# --- The threat builds off-thread and comes online ----------------------
-	# Driven exactly as the game drives it: _ready() started the build, _process
-	# polls it. ~10 s of real integration; the display stays live throughout, which
-	# is the whole reason it is threaded.
-	_check(sim.build_state == sim.Build.RUNNING, "_ready() started the scenario build")
+	# Driven exactly as the game drives it: the kernel read starts the build as the
+	# last thing it does, and _process polls it. ~10 s of real integration; the
+	# display stays live throughout, which is the whole reason it is threaded.
+	# The build kick moved out of _ready with the read it depends on — there is no
+	# field to build against until the read lands — so it is the pump above, not
+	# _ready, that has left the build running by this point.
+	_check(sim.build_state == sim.Build.RUNNING, "the landing kernel read started the scenario build")
 	_check(not sim.mission_online, "the threat is not online before the build lands")
 	_check(sim.ast_el.is_empty(), "no threat dict exists before the build lands")
 	var t0 := Time.get_ticks_msec()
@@ -139,8 +173,15 @@ func _init() -> void:
 	# build in flight: `polls > 1` was the old check, and it raced — on a loaded
 	# machine the checks above take longer than the worker, the first poll finds
 	# the build already landed, and a correct build "fails" as blocking.
-	_check(ready_ms < 3000, "the build ran on a worker, not the caller (_ready %d ms; %d polls, %d ms to land)"
-		% [ready_ms, polls, Time.get_ticks_msec() - t0])
+	# `ready_ms` no longer covers the build kick, and `load_ms` is the wrong
+	# replacement: it includes the disk read, which is seconds on a cold cache and
+	# has nothing to do with whether the build blocked. `adopt_field` is the frame
+	# that lands the kernels and kicks the build, so it is what the caller actually
+	# paid for the kick.
+	var adopt_ms: float = sim.ready_phase_ms.get("adopt_field", 1.0e9)
+	_check(adopt_ms < 3000.0,
+		"the build ran on a worker, not the caller (landing frame %.1f ms; %d polls, %d ms to land)"
+		% [adopt_ms, polls, Time.get_ticks_msec() - t0])
 	_check(sim.mission_online, "the threat is online once the build lands")
 
 	# The b-plane view lights WITH the threat (3C-2c): its geometry is the same

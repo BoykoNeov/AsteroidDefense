@@ -20,7 +20,8 @@ Read this table first, then the session that owns the layer you are touching.
 | The thesis: `required_dv` curve, kinetic / nuclear-standoff / gravity-tractor spectrum | done; curve slope −1.05 measured | `core/src/deflection.rs`, `forces/tractor.rs`, `viewer/` |
 | Tier 2: 1PN, Yarkovsky, SRP, J2, 16 sb441 perturbers, Pluto toggle | done; per-term closed forms + Apophis vs Horizons capstone | `core/src/forces/*`, `core/tests/capstone_neo_vs_horizons.rs` |
 | Mission design: Lambert (multi-rev), porkchop, launch vehicles, required impactor mass, cell verify | done | `core/src/{lambert,mission,launch_vehicle}.rs` |
-| Tier 3a: covariance → b-plane Jacobian → P(impact), linearity shell | done (covariance invented, labelled) | `core/src/uncertainty.rs` |
+| Tier 3a: covariance → b-plane Jacobian → P(impact), linearity shell | done (the synthetic rock's covariance is invented, labelled) | `core/src/uncertainty.rs` |
+| **Tier 3e: real covariances** — JPL SBDB cometary elements + 8×8 matrix at their own epoch, marginalised, unit-scaled, mapped through a measured element→state Jacobian, and gated three ways against JPL's own numbers | **done 2026-09-06**; Apophis' 2029 ellipse is 18.2 km — the same size as our own dynamical error over the arc | `core/src/{sbdb,frames}.rs`, `pyref/fetch_sbdb_covariance.py`, `core/tests/fixtures/apophis.sbdb` |
 | **Tier 3b: keyholes** — Öpik (ξ, ζ) frame and b-vector sign pinned, resonant circles in closed form, keyhole widths, the keyhole map, **the 3:4 keyhole flown to a return impact** | **done 2026-09-02** | `core/src/keyhole.rs`, `examples/probe_keyhole_{map,return}.rs`, `docs/keyhole_map.*` |
 | **Tier 3c: keyhole targeting** — aim at any resonance on either branch, fly it, refine to the floor, and read the return in **its own** Öpik frame; the planner's `KEYHOLE` row | **done 2026-09-05** | `core/src/keyhole_target.rs`, `godot/scripts/{sim,planner}.gd` |
 | **Tier 3d: P(impact) at the resonant return** — the covariance flown through *both* encounters (the chaining is in the propagation, not a matrix product), finite-difference steps re-measured on the return, the chained gain checked against the closed form to 14 % | **done 2026-09-06**; the answer is set by how well the orbit is known, not how well the impulse is aimed | `core/src/keyhole_target.rs`, `core/examples/probe_keyhole_probability.rs` |
@@ -30,9 +31,22 @@ Read this table first, then the session that owns the layer you are touching.
 
 ### What is next, in order
 
-1. **Real covariances from the SBDB** (equinoctial or Keplerian elements at their
-   own epoch, mixed units; validate the conversion by round-trip). This makes
-   P(impact) real for Apophis/Bennu and retires the "invented" label.
+1. ~~**Real covariances from the SBDB.**~~ **DONE 2026-09-06** — and three of
+   that line's clauses were wrong: the elements are **cometary** (`e, q, tp,
+   node, peri, i`), the matrix is **8×8** (the non-grav parameters are estimated
+   alongside the orbit and marginalise out), and a **round-trip cannot validate
+   it** — the same unit convention runs both ways, so a degrees-for-radians error
+   cancels exactly. Three external gates instead: JPL's published per-element σ
+   against `sqrt(diag)` (exact), JPL's own Cartesian state at the covariance epoch
+   (1.4 m), and a Monte Carlo in element space against `J Σ Jᵀ` (< 5 %). The
+   payoff: Apophis' real covariance flown to its 2029 flyby gives a **18.2 km ×
+   0.48 km** ellipse and **P = 0** at 19 571 σ — the correct answer — beside a
+   **15.1 km** residual of our own dynamics over the same arc. *The two are the
+   same size*, which is the batch's real finding. The invented label is retired
+   for Apophis; the shipping campaign's rock is designed and keeps it. Bennu is
+   deliberately left: its solution estimates SRP parameters, not `A2`, so its
+   covariance describes a propagation we do not reproduce. See *Real SBDB
+   covariances*.
 2. ~~**P(impact) rising near a keyhole.**~~ **DONE 2026-09-06** — and it does
    not rise, at the shipping uncertainty: the return's 1σ ellipse is a needle
    131 334 km long lying in the same coordinate Δv moves, so P is 0.064 flat
@@ -380,7 +394,7 @@ That MVP delivers the whole lesson *and* an honest hit→miss flip. Everything b
 - Real NEOs from the JPL Small-Body Database (§9): Apophis, Bennu, Didymos/Dimorphos
 - Nuclear standoff + gravity-tractor methods — **DONE 2026-07-27**: the standoff term as an impulse sibling of the kinetic model, the **gravity tractor** as a windowed `forces/` term with its own duration solve. §5's spectrum is closed. The tractor also has a **frontend** — the `[K]` bench, six live knobs over a cheap model scored against the real field, with an on-demand full-field probe on `[E]`. The nuclear half remains core-only. And since **2026-07-28** the *rock* is dialable too: `[N]` rebuilds the campaign with the threat on a different heliocentric orbit, so the bench compares rather than merely reports — the same 200 t plan scores **0.372× on the shipping orbit and 1.096× on a long-period one**. See *The deflection spectrum, nuclear half*, *…tractor half*, *The tractor on the frontend*, and *The threat orbit became a knob*.
 - Lambert / porkchop mission design (makes the impulse *deliverable*, not assumed)
-- **Tier 3 uncertainty**: orbit covariance → b-plane → impact probability; keyholes; covariance ellipse shrinking with observations — **first half DONE 2026-07-28**: `core/src/uncertainty.rs` maps a 6×6 state covariance through a measured 2×6 b-plane Jacobian and integrates the result over the focused capture disc, with the linearisation it rests on probed by a deterministic ±3σ shell. The covariance is *invented and labelled as such* (the shipping rock is synthetic and has no observation arc). ~~**Still open:** keyholes and resonant returns, the ξ,ζ pinning they force~~ — **both DONE 2026-09-02**, see *Keyholes, closed*: the frame is pinned, the circles are closed-form, and the 3:4 keyhole is flown to a return impact. Still open: real SBDB covariance ingestion, and the ellipse on the frontend. See *Tier 3 begins* and *Keyholes, closed*.
+- **Tier 3 uncertainty**: orbit covariance → b-plane → impact probability; keyholes; covariance ellipse shrinking with observations — **first half DONE 2026-07-28**: `core/src/uncertainty.rs` maps a 6×6 state covariance through a measured 2×6 b-plane Jacobian and integrates the result over the focused capture disc, with the linearisation it rests on probed by a deterministic ±3σ shell. The covariance is *invented and labelled as such* (the shipping rock is synthetic and has no observation arc). ~~**Still open:** keyholes and resonant returns, the ξ,ζ pinning they force~~ — **both DONE 2026-09-02**, see *Keyholes, closed*: the frame is pinned, the circles are closed-form, and the 3:4 keyhole is flown to a return impact. ~~Still open: real SBDB covariance ingestion~~ — **DONE 2026-09-06**, see *Real SBDB covariances*. Still open: the ellipse on the frontend. See *Tier 3 begins* and *Keyholes, closed*.
 
 ### Phase 3 (future)
 
@@ -2163,3 +2177,175 @@ Still open:
 - **`synthetic_along_track`'s "velocity dominates" doc claim**, which this
   measurement contradicts at the return and which has not been re-checked at the
   first encounter.
+
+### Real SBDB covariances — 2026-09-06 session (JPL's own uncertainty for a real object, and the finding that our dynamics are the same size as it)
+
+Roadmap item 1 from the *What is next* list: *"Real covariances from the SBDB
+(equinoctial or Keplerian elements at their own epoch, mixed units; validate the
+conversion by round-trip). This makes P(impact) real for Apophis/Bennu and
+retires the 'invented' label."* Three of that sentence's clauses turned out to be
+wrong, including the validation it asked for.
+
+New: `pyref/fetch_sbdb_covariance.py`, the committed fixture
+`core/tests/fixtures/apophis.sbdb` (1.8 KB), `core/src/sbdb.rs`,
+`core/src/frames.rs`, and two probes — `probe_sbdb_covariance` (kernel-free) and
+`probe_sbdb_apophis_2029` (the payoff).
+
+#### What JPL actually publishes, none of which was the guess
+
+- **Cometary elements, not equinoctial or Keplerian.** The covariance is over
+  `(e, q, tp, node, peri, i)` — perihelion *distance* and time of perihelion
+  *passage*, no `a` and no `M`. All four NEOs sampled (Apophis, Bennu, Didymos,
+  Eros) use this set. The reader refuses any other rather than converting with
+  the wrong partial derivatives.
+- **The matrix is 8×8, not 6×6.** Apophis' carries the non-gravitational `A1`/`A2`
+  as estimated parameters; Bennu's carries `RHO`/`AMRAT` instead. Dropping the
+  trailing rows and columns *is* marginalisation for a Gaussian, so the leading
+  6×6 block is the orbit's covariance with the non-grav uncertainty already
+  folded in — but that is a fact worth stating, not a trim to do quietly. The
+  file records what it dropped.
+- **The covariance has its own epoch.** Apophis' is JD 2459215.5 (2020-12-17);
+  its osculating elements are published at JD 2461200.5, **5.43 years later**.
+  Moving a covariance between epochs needs a state-transition matrix we do not
+  have, so everything here works at the covariance's epoch and the file carries
+  the element values *there* (the API supplies them under
+  `orbit.covariance.elements`).
+- **Ecliptic, not ICRF**, and in mixed units: dimensionless, au, **days** (`tp`
+  is a Julian date, so its variance is in days²), and **degrees**.
+
+#### "Validate by round-trip" could not have validated anything
+
+The roadmap line asked for a round-trip. A round-trip (elements → Cartesian →
+elements) runs the same unit convention in both directions, so a consistent
+degrees-for-radians error, or a `tp` scaled by the wrong number of seconds,
+cancels *exactly* and the test passes. It is the quantised-argmin trap in
+different clothes: a plausible answer that no structural check rejects. Three
+independent gates went in instead, each able to fail on its own.
+
+- **JPL's published per-element σ against `sqrt(diag)`.** They agree to every
+  digit published — measured, ratio `1.000000` on all six. This pins the ordering
+  and the native units before any physics happens, and it is enforced **at parse
+  time** (`SbdbError::SigmaMismatch`), not only in a test. Free, external, and it
+  catches the entire first half of the conversion.
+- **JPL's own Cartesian state at the covariance epoch**, fetched from Horizons in
+  *both* frames the conversion passes through and carried in the fixture.
+  Reconstructing from the elements and comparing pins the element conversion;
+  comparing the rotated result pins the obliquity rotation separately. Neither is
+  a round-trip — the right-hand side is JPL's. Measured: **22.75 m** with the
+  hardcoded `μ_sun`, and **1.4 m** when `μ` comes from the loaded DE440 kernel,
+  which is the ~30 m `μ`-sensitivity the module documents, confirmed rather than
+  asserted. A degrees-for-radians slip here would be ~1e10 m.
+- **Monte Carlo in element space against `J Σ Jᵀ`.** 20 000 deterministic draws
+  (fixed-seed xorshift + Box–Muller, no new dependency, the pattern
+  `uncertainty`'s needle test already uses), agreeing with the linear map to
+  better than 5 % of the ellipse — a tolerance set by the Monte Carlo's own
+  `1/√N`, not by the Jacobian. This is the discriminating gate: it is the only
+  one that can fail on a wrong Jacobian *and* a wrong unit scaling *and* an
+  inadequate linearisation.
+
+The finite-difference step got the treatment this crate's other steps got, and
+the map being **closed form** is why it is easier: no integrator, so no noise
+floor, and the only competition is truncation against round-off. Measured per
+column over six decades, every column is flat to better than **4e-8** relative
+across `u ∈ [1e-7, 1e-4]`, degrading to 1e-2 at `u = 1e-2` and 1e-5 at `u = 1e-9`.
+`FD_RELATIVE_STEP = 1e-6` sits in the middle of that plateau. The steps are
+relative to each element's own *scale of variation* — 1 for `e` and the angles,
+`q` for `q`, and the **orbital period** for `tp`, which is the one that is not
+the element's own magnitude.
+
+#### The cigar is tilted, and the tilt is the physics
+
+The fourth check is free and physical: a real NEO covariance is an along-track
+cigar, so the mapped position ellipsoid's long axis should lie near the velocity.
+Measured: **655 m × 38 m, aspect 17:1, long axis 9.8° off velocity** — near, but
+not along, and the first instinct was that 9.8° meant a bug.
+
+It does not. Taken one element at a time the contributions are far *larger* than
+the total: `node` alone 8 379 m, `peri` alone 9 022 m, `tp` alone 1 518 m, against
+a six-element answer of 655 m. The estimated element errors are strongly
+correlated and **cancel by 14×** in position space, and what survives the
+cancellation is the node/peri residual, which sits 7.85° off the velocity. That is
+what tilts the cigar. Only the pure-timing term is exactly along-track, and the
+probe measures it at **0.00°** — which doubles as an independent check on the `tp`
+column of the Jacobian, since a timing error can only move a body along its own
+path. The test's tolerance is 20°, argued from that measurement rather than
+tightened until the number passed.
+
+This is also the concrete reason a marginal covariance is not a list of sigmas,
+which is easy to say and easier to forget.
+
+#### The sphere-of-influence trap, which looked exactly like a dynamical error
+
+`probe_sbdb_apophis_2029` flies the real covariance to the 2029 flyby. The first
+version fixed the reduction epoch three days before closest approach — reasoning
+only about the fixed-epoch requirement, which is numerical — and reported a
+perigee of 33 875 km against JPL's published ~38 000 km. A 4 125 km miss on a
+famous encounter reads as a broken seed or a broken field.
+
+It was neither. Three days out puts Apophis **1.5 million km** from Earth,
+outside the ~924 000 km sphere of influence, where the osculating geocentric
+hyperbola is not the encounter at all and the two-body extrapolation is really
+measuring the Sun. `UNCERTAINTY_REDUCTION_LEAD_SECONDS` is 12 hours and its doc
+says why — *inside* the sphere, *outside* the well — and that is a **physical**
+constant, not a numerical preference. Reducing there (253 000 km out) gives
+**37 984 km against JPL's ~38 000 km, 16 km off**. The close approach is now
+*found* on the nominal run rather than assumed from a hardcoded epoch.
+
+The b-plane Jacobian's shipping steps were re-measured here rather than reused on
+faith, since `uncertainty`'s own docs say that criterion does not travel: on this
+encounter they do travel, the columns moving by 1e-4 across a 16× range of step.
+
+#### The headline is not the probability
+
+| quantity | measured |
+|---|---|
+| 1σ b-plane ellipse at the 2029 encounter | **18.2 km × 0.48 km** (aspect 38:1) |
+| our own position residual vs JPL over the same arc | **15.1 km** |
+| nominal crossing, in σ from the capture disc | 19 571 |
+| P(impact in 2029) | **0** |
+
+The ellipse and our own dynamical error are **the same size**. So the ellipse is
+an honest statement about JPL's astrometry and says nothing about the physics we
+do not model — every planet's relativity, and the radial `A1` — which displaces
+the nominal by just as much. A real covariance does not make a prediction real on
+its own. What it does is make the *other* error term visible, because now there is
+something to compare it against. That is the actual result of this batch.
+
+The residual is measured a year *short* of the flyby, against JPL's raw held-out
+samples. Measuring it at the reduction epoch gives 14 391 km, which is not our
+error at all: `horizons.rs` already documents that a 1-day state table cannot
+resolve this particular hours-long flyby and measures its own interpolation error
+there at 18 885 km. Reading that as a dynamical residual would have been reading
+the truth table's error and calling it ours.
+
+P = 0 at 19 571 σ is the **correct** answer — Apophis' 2029 approach is
+well-determined and it misses — and this layer producing a real zero on real data
+is the result, not a disappointment.
+
+#### One obliquity in the project
+
+The ecliptic↔ICRF rotation lived only in the Godot binding, and core now needs it
+(SBDB elements are ecliptic). Rather than spell the constant out a second time —
+the same trap this crate already refuses for `μ_sun`, two spellings of one number
+that agree until one is edited — it moved to `core/src/frames.rs` and the
+binding's three helpers delegate to it. The constant is `84381.448″`, IAU 1976 and
+**not** IAU 2006's `84381.406″`, because that is the value defining SPICE's
+`ECLIPJ2000`; the 42 mas difference is a ~30 km cross-track offset at 1 au.
+
+#### What this leaves open
+
+- **The `synthetic_along_track` path is untouched and stays.** The shipping
+  campaign's rock is designed and will never have an observation arc, so its
+  probability stays invented and labelled. Nothing in the keyhole or frontend
+  numbers moves as a result of this batch.
+- **Bennu is a follow-on, deliberately.** Its solution estimates `RHO`/`AMRAT` —
+  solar radiation pressure — where Apophis estimates `A1`/`A2`. Its published
+  covariance therefore describes a propagation we do not reproduce unless SRP is
+  configured to match its area/mass ratio. Doing it anyway would buy a roadmap
+  checkmark and a wrong number.
+- **The covariance epoch is where the propagation must start.** Carrying it to an
+  arbitrary epoch — the campaign start, say — needs a state-transition matrix,
+  which is the same object as a 6×6 variational solve and is not built.
+- **Nothing of this is on the frontend.** The Tier-3 ellipse on the Godot b-plane
+  view (roadmap item 3) is still the next visible thing, and it now has two
+  ellipses worth drawing rather than one.

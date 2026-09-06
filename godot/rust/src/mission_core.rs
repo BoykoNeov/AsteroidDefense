@@ -68,21 +68,16 @@ const AU_KM: f64 = 1.495_978_707e8;
 /// Metres per kilometre — the integrated `Clock` stores SSB positions in metres,
 /// but [`icrf_km_to_ecliptic_au`] takes kilometres, so we scale down first.
 const M_PER_KM: f64 = 1.0e3;
-/// Mean obliquity of the ecliptic at J2000, arcseconds — the exact value that
-/// defines SPICE's `ECLIPJ2000` frame, so our ecliptic matches the kernel's.
-const OBLIQUITY_ARCSEC: f64 = 84_381.448;
 
 /// Rotate an ICRF (equatorial-J2000) position in **km** into ecliptic-J2000 and
-/// scale to **AU**. A rotation by the mean obliquity about the shared X axis
-/// (vernal equinox): the ecliptic north pole sits at ICRF `(0, −sinε, cosε)`.
+/// scale to **AU**.
+///
+/// The rotation itself lives in `asteroid_core::frames`, which owns the project's
+/// single obliquity constant; this adds only the unit scale. It used to spell the
+/// constant out here as well — two copies of one physical number, which is the
+/// same trap the crate already refuses for `μ_sun`.
 pub fn icrf_km_to_ecliptic_au(v_km: Vector3<f64>) -> Vector3<f64> {
-    let eps = OBLIQUITY_ARCSEC / 3600.0 * std::f64::consts::PI / 180.0;
-    let (s, c) = eps.sin_cos();
-    Vector3::new(
-        v_km.x / AU_KM,
-        (c * v_km.y + s * v_km.z) / AU_KM,
-        (-s * v_km.y + c * v_km.z) / AU_KM,
-    )
+    asteroid_core::icrf_to_ecliptic(v_km) / AU_KM
 }
 
 /// Rotate an **ecliptic-J2000** vector into ICRF (equatorial-J2000) — the exact
@@ -93,9 +88,7 @@ pub fn icrf_km_to_ecliptic_au(v_km: Vector3<f64>) -> Vector3<f64> {
 /// the display and a human designer think in), but the integrator runs in ICRF,
 /// so the element→state result is rotated here before it is seeded.
 fn ecliptic_to_icrf(v: Vector3<f64>) -> Vector3<f64> {
-    let eps = OBLIQUITY_ARCSEC / 3600.0 * std::f64::consts::PI / 180.0;
-    let (s, c) = eps.sin_cos();
-    Vector3::new(v.x, c * v.y - s * v.z, s * v.y + c * v.z)
+    asteroid_core::ecliptic_to_icrf(v)
 }
 
 /// The ecliptic north pole **expressed in ICRF** — `(0, −sin ε, cos ε)`.
@@ -105,9 +98,7 @@ fn ecliptic_to_icrf(v: Vector3<f64>) -> Vector3<f64> {
 /// This is [`icrf_km_to_ecliptic_au`]'s rotation read backwards: that function maps
 /// ICRF `(0, −sin ε, cos ε)` onto ecliptic `(0, 0, 1)`.
 fn ecliptic_north_icrf() -> Vector3<f64> {
-    let eps = OBLIQUITY_ARCSEC / 3600.0 * std::f64::consts::PI / 180.0;
-    let (s, c) = eps.sin_cos();
-    Vector3::new(0.0, -s, c)
+    asteroid_core::ecliptic_north_icrf()
 }
 
 /// The b-plane display basis `(ξ̂, ζ̂, Ŝ)` — three ICRF unit vectors.
@@ -3912,7 +3903,7 @@ mod tests {
         // The ICRF celestial pole (0,0,1) tilts to ecliptic latitude 90°−ε: its
         // ecliptic y is +sinε, z is +cosε (pole leans toward +Y in ecliptic).
         let pole = icrf_km_to_ecliptic_au(Vector3::new(0.0, 0.0, AU_KM));
-        let eps = OBLIQUITY_ARCSEC / 3600.0 * std::f64::consts::PI / 180.0;
+        let eps = asteroid_core::obliquity_rad();
         assert!((pole.x).abs() < 1e-12);
         assert!((pole.y - eps.sin()).abs() < 1e-12);
         assert!((pole.z - eps.cos()).abs() < 1e-12);

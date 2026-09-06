@@ -29,6 +29,17 @@ Lambert/porkchop mission design with launch vehicles, the threat orbit as a live
 knob, and Tier 3 — orbit covariance mapped to the b-plane as an impact
 *probability*, and now **keyholes**.
 
+Since 2026-09-06 the uncertainty layer can also be driven by a **real** orbit
+solution: `core/src/sbdb.rs` ingests JPL's published covariance for an actual
+asteroid — cometary elements at their own epoch, in mixed units, with the
+non-gravitational parameters marginalised out — and maps it to the b-plane.
+Flown to Apophis' 2029 Earth flyby it gives a 1σ ellipse of **18.2 km × 0.48 km**
+and an impact probability of **zero**, which is the correct answer. The number
+worth reading beside it is our own: over the same arc our trajectory sits
+**15.1 km** from JPL's. Real astrometric uncertainty and our own dynamical error
+are the same size here, and the point of ingesting the first is that it makes the
+second visible.
+
 The keyhole work (2026-09) settled the last open physics question in the spec:
 the b-plane's Öpik `(ξ, ζ)` frame and the b-vector sign are pinned by derivation
 and by measurement, the resonant-return circles come out in closed form (proved
@@ -47,10 +58,11 @@ sub-kilometre and along ζ, because along-track uncertainty is timing
 uncertainty. An interactive version is generated at `docs/keyhole_map.html`.*
 
 **What is next** (in order, spelled out in `HANDOFF.md` → *Where things stand*):
-keyhole targeting as a core API and a frontend readout; real orbit covariances
-from the JPL Small-Body Database; the impact probability *rising* near a keyhole;
-the Tier-3 ellipse on the Godot b-plane view; the dop853→IAS15 crossover for the
-multi-revolution returns; then Phase 3.
+the Tier-3 ellipse on the Godot b-plane view; more flown resonances to calibrate
+the keyhole width's placement slack; the dop853→IAS15 crossover for the
+multi-revolution returns; then Phase 3. Keyhole targeting, the impact probability
+near a keyhole, and real orbit covariances from the JPL Small-Body Database all
+landed in 2026-09.
 
 If you're reading the code: **`HANDOFF.md` is the source of truth** for *why*
 things are the way they are, and **`DEVELOPING.md`** for how to build, test and
@@ -140,7 +152,10 @@ validated *in isolation* (the GR term alone reproduces Mercury's 42.98″/centur
 perihelion precession; J2 the closed-form nodal regression), not just the sum.
 The Tier-3 machinery is validated against exact maps and closed forms
 (a Rayleigh integral, the Valsecchi resonant-circle formula) and then against
-flown trajectories in the real field.
+flown trajectories in the real field. The SBDB covariance conversion is gated
+three ways against JPL's own numbers rather than by a round-trip — a round-trip
+runs one unit convention in both directions, so a degrees-for-radians error
+cancels exactly and it passes.
 
 The physics tests need the JPL kernels and **skip green without them** — run
 `python tools/fetch_kernels.py` once and `ASTEROID_REQUIRE_KERNELS=1 cargo test
@@ -175,9 +190,9 @@ workspace/
   flip, the Δv-vs-lead-time curve, kinetic impactor.
 - **Phase 2** — ✅ Godot 3D frontend; Tier-2 realism; real NEOs (Apophis, Bennu,
   Didymos as Horizons scenery, Apophis as the validation capstone); nuclear +
-  gravity-tractor methods; Lambert/porkchop mission design; Tier-3 uncertainty
-  and keyholes. Remaining inside Phase 2: keyhole targeting API, SBDB
-  covariances, the Tier-3 ellipse on screen.
+  gravity-tractor methods; Lambert/porkchop mission design; Tier-3 uncertainty,
+  keyholes, keyhole targeting, and real JPL orbit covariances. Remaining inside
+  Phase 2: the Tier-3 ellipse on screen.
 - **Phase 3** — launch vehicles & payload budgets (the vehicles and mass solves
   exist; the budgets and orbital assembly do not), standing defense systems,
   multi-mission campaigns.

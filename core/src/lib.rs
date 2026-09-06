@@ -27,6 +27,7 @@ pub mod elements;
 pub mod ephemeris;
 pub mod epoch;
 pub mod forces;
+pub mod frames;
 pub mod geometry;
 pub mod horizons;
 pub mod integrator;
@@ -38,6 +39,7 @@ pub mod launch_vehicle;
 pub mod mission;
 pub mod perturber_field;
 pub mod propagator;
+pub mod sbdb;
 pub mod scenario;
 pub mod state;
 pub mod uncertainty;
@@ -60,6 +62,9 @@ pub use forces::srp::SolarRadiationPressure;
 pub use forces::tractor::{GravityTractor, HoverGeometry, TowDirection, TowWindow};
 pub use forces::yarkovsky::YarkovskyA2;
 pub use forces::{CompositeForce, ForceError, ForceModel, ForceSum, GRAVITATIONAL_CONSTANT};
+pub use frames::{
+    ecliptic_north_icrf, ecliptic_to_icrf, icrf_to_ecliptic, obliquity_rad, OBLIQUITY_ARCSEC,
+};
 pub use geometry::{
     BPlaneEncounter, GeometryError, EARTH_EQUATORIAL_RADIUS_M, EARTH_MEAN_RADIUS_M,
 };
@@ -86,6 +91,9 @@ pub use perturber_field::{
     TIER1_PERTURBER_FRAMES,
 };
 pub use propagator::{KeplerPropagator, Propagator, PropagatorError};
+pub use sbdb::{
+    state_from_elements_si, MappedCovariance, SbdbError, SbdbOrbit, COM_LABELS, FD_RELATIVE_STEP,
+};
 pub use scenario::{
     DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError, SweepPoint,
     Tier2Config, ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES, SAFE_PERIGEE_TARGET_M,

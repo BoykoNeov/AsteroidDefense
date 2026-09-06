@@ -159,3 +159,11 @@ along-track impulse cannot close that — ξ follows the deflection **direction*
 so it would take an out-of-plane component. First honest negative result for a
 resonance other than the 3:4 (31 flights, 814 s), and it means 7:9 does **not**
 help calibrate the 1.6× width slack: there is no flown door to measure against.
+
+**2026-09-06 — [[keyhole-probability]] builds on this layer** and sharpens one
+number here. The keyhole width measured "1.6× conservative" was a *placement*
+statement (the flown b-point sits 1.64 half-widths from its circle). Measuring
+the chained `∂ζ₂/∂ζ₁` on the flown trajectory gives the width *differentially*:
+**29.09 km against the map's 24.92 km, conservative by 1.17×** — immune to the
+map's absolute placement error, but it does **not** replace the placement
+finding. Two different quantities; don't conflate them.

@@ -70,3 +70,21 @@ Asymptotic invariance holds to about a day; the shipping 12 h has ~2.5× margin.
 Probes: `probe_tier3_cost` (the cadence/step-size study) and
 `probe_tier3_uncertainty` (three cross-checks + the σ sweep). See also
 [[kernel-resolver]] — run these with `ASTEROID_REQUIRE_KERNELS=1`.
+
+**2026-09-06 — the second half arrived, see [[keyhole-probability]].** The
+covariance now maps through *both* encounters to a resonant return. Three things
+that change how this file should be read:
+
+- **`synthetic_along_track`'s "velocity dominates" claim is false** at the
+  shipping numbers, at both encounters. The 1 km position σ contributes ~153 km
+  of the 168.7 km first-encounter ellipse; the whole velocity block gives ≤32 km.
+  This probe's own σ-ladder had shown it since July. To ask "how well is the
+  orbit known", scale **both** arguments.
+- **The 10-day `SAMPLE_CADENCE_DAYS` does not travel past a flyby.** Its
+  cancellation argument was measured at one encounter; downstream of the 778×
+  gain the nominal moves 2.97 % and the weakest column 17.7 %.
+- **`impact_probability` is now checked at a 2.6e5 aspect ratio** against 4M
+  Monte Carlo draws, and pinned to *refuse* past 2.6e7 where f64 loses the
+  covariance. The `sigma_distance` oddity this file records (8 196 σ with P = 1)
+  recurs at the return and is the *tell* for a mean moving along the covariance's
+  own long axis.

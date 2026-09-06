@@ -2085,10 +2085,26 @@ At the crossover the keyhole finally appears as a *peak*; in the deterministic
 limit it is a yes/no door about 2×10⁻⁵ m/s wide, and the unrefined closed-form
 aim scores exactly 0 in both of the smaller columns while scoring 0.058 in the
 largest. **So the honest statement is that the impact probability at a keyhole is
-set by how well the orbit is known, not by how well the impulse is aimed** —
-steering inside the door buys nothing until the uncertainty is already smaller
-than the door. Which is why real planetary defence spends its money on
-observation arcs.
+set by how well the orbit is known, not by how well the impulse is aimed — for as
+long as the uncertainty is larger than the door.** Steering inside the door buys
+nothing until that stops being true, which is why real planetary defence spends
+its money on observation arcs.
+
+**State that conditionally or it becomes false.** It is not a fact about keyholes;
+it is a fact about *this needle*, whose length is dominated by the 1 km isotropic
+position σ — the most arbitrary number in an already-invented covariance, and one
+`synthetic_along_track` sets independently of the velocity block by construction.
+A real SBDB covariance could land in any of the three rows. What travels is the
+*mechanism* (the uncertainty and the impulse push along the same coordinate, so
+they cannot trade against each other), not the row this rock happens to sit in.
+
+**One thing the sweep does not have to assume: that `J` is constant across the
+door.** It is measured. A Δv change applied at the campaign start *is* a velocity
+perturbation of the seed, and the step study drove exactly that: at scale 1.0 the
+velocity column used a step of 1.25×10⁻⁴ m/s — larger than the entire ±5×10⁻⁵
+door — and the column held to 0.003 % down to 3.75×10⁻⁷. The whole door lives
+inside a range over which the Jacobian was directly measured constant, so
+re-flying thirteen columns at the door's edge would buy nothing.
 
 **Two things had to be deleted before the data could be read.**
 

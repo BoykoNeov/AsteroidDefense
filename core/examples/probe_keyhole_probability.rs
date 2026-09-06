@@ -20,10 +20,14 @@
 //!   observation arc, so it has no orbit-determination covariance. The one used
 //!   here borrows the *shape* of a real NEO's (dominantly along-track) and says
 //!   so; see `StateCovariance::synthetic_along_track`.
-//! - **Δv is held fixed.** Every number below is *orbit* uncertainty. It is not
-//!   delivery uncertainty: a real impulse arrives with its own error, and at a
-//!   keyhole that error dominates — the `sweep` mode below shows the whole
-//!   probability swinging over a Δv window of ~10⁻⁵ m/s.
+//! - **Δv is held fixed.** Every number below is *orbit* uncertainty, never
+//!   delivery uncertainty: a real impulse arrives with its own error, and this
+//!   probe models none of it. Whether that error would matter is itself one of
+//!   the things the `sweep` measures rather than assumes — at the shipping
+//!   covariance the answer is **no** (P moves 1.02× across the whole door,
+//!   because the uncertainty already dwarfs it), and it becomes yes only once
+//!   the orbit is known ~12× better. An earlier version of this doc asserted the
+//!   swing unconditionally; the measurement did not support it.
 //!
 //! # Modes
 //!
@@ -42,8 +46,10 @@
 //!   `P(impact)` at the floor.
 //! - `cadence` (13 flights, ~30 s) — the same Jacobian at a 10-day cadence, to
 //!   see whether the cadence bias still cancels once a flyby has multiplied it.
-//! - `sweep` (21 flights, ~5 min) — `P(impact)` across the Δv door: the picture
-//!   the whole batch exists to produce.
+//! - `sweep` (13 + 22 flights, ~10 min) — `P(impact)` across the Δv door at
+//!   **three** sizes of orbit uncertainty: the picture the whole batch exists to
+//!   produce. Mapping a covariance through a fixed Jacobian is free, so the three
+//!   regimes cost one set of flights between them.
 //!
 //! `dv` defaults to **0.216550 m/s**, the refined floor of the shipping rock's
 //! 3:4 keyhole measured by `probe_keyhole_return` (2026-09-06). Re-solving it

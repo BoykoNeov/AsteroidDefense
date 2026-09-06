@@ -145,6 +145,11 @@ var ffi_calls := 0
 ## free. A hit requires the exact `t_days` requested, so a caller sampling other
 ## epochs (the impact point, an orbit walk) can never be handed the clock's value.
 var _pos_memo := {}
+## Epoch the batch fill has already run for this frame, or INF for "not yet".
+## Cleared with the memo, not compared against the clock: a paused clock holds
+## `t` still across frames, so testing `_primed_t == t` alone would fill once and
+## then believe itself primed forever while the memo underneath it kept emptying.
+var _primed_t := INF
 ## Where Earth is at the impact epoch, ecliptic AU — the "PREDICTED IMPACT" mark
 ## two views draw every frame. Fixed for the life of a threat solution, so it is
 ## read once on install rather than looked up sixty times a second.
@@ -510,6 +515,7 @@ func tdb(t_days: float = INF) -> float:
 func _process(delta: float) -> void:
 	ffi_calls = 0
 	_pos_memo.clear()
+	_primed_t = INF
 	# These all run while paused: a paused clock does not mean a paused build, an
 	# operator who pauses mid-edit still wants their verdict solved, and the Tier-2
 	# measurement (kicked from the menu) must land whatever the clock is doing.
@@ -539,31 +545,35 @@ func _process(delta: float) -> void:
 				event_logged.emit(_stamp(ev.t) + "  " + ev.msg)
 			ev.fired = passed
 
-	# Last, because it needs the settled clock: priming at the top would fill the
-	# memo at the *previous* epoch and every consumer would miss it.
-	_prime_ephem_positions()
-
 
 ## Fill the per-frame memo for every DE440-sourced body in one binding crossing.
 ##
-## `Sim` is an autoload, so this runs before any view's `_process` and long before
-## any `_draw` — by the time a layer asks `pos_ecl` for a planet at the clock, the
-## answer is already sitting in `_pos_memo`.
+## Called on demand, from the first `pos_ecl` miss for an ephemeris body at the
+## live clock — never on a schedule. An eager version ran here first, at the end
+## of `_process`, and the cost of that shows up in a counter that cannot be argued
+## with: in the porkchop view, which asks for no ephemeris body at all, `ffi/frame`
+## went from 0 to 1. It paid a crossing for answers nobody wanted, on every frame
+## of every view, including the thirty-plus seconds of build wait before anything
+## is drawn. Demand-driven, a frame that asks for nothing costs nothing.
 ##
 ## This is not a second cache. It fills the *existing* one (`name -> [t, pos]`,
 ## same keys, same exact-epoch rule) through `body_positions_ecl_au`, so a caller
-## asking any other epoch still falls through to its own lookup and an unprimed
+## asking any other epoch still falls through to its own lookup and an unfilled
 ## body is served exactly as it was before. What changes is the count: the twenty-
 ## four ephemeris bodies the 3D view, the tag layer and the HUD all range every
 ## frame cost **one** crossing between them instead of twenty-four.
 ##
 ## ZERO stays ZERO. The binding returns it for a body outside the kernel span, and
-## in this heliocentric frame that is the Sun's position, not a blank — priming
-## does not make that safe and does not pretend to. Callers gate on
+## in this heliocentric frame that is the Sun's position, not a blank — filling the
+## memo does not make that safe and does not pretend to. Callers gate on
 ## `bodies_online` and the clock clamp exactly as they always did.
-func _prime_ephem_positions() -> void:
+func _prime_ephem_positions(t_days: float) -> void:
 	if not bodies_online:
 		return
+	# Claimed BEFORE the call, not after: the short-answer path below returns
+	# without filling anything, and an unclaimed epoch would send each of the
+	# remaining twenty-three bodies back in here for a batch of its own.
+	_primed_t = t_days
 	var ids := PackedInt64Array()
 	var names: Array[String] = []
 	for el in planets:
@@ -575,7 +585,7 @@ func _prime_ephem_positions() -> void:
 	if ids.is_empty():
 		return
 	ffi_calls += 1
-	var out := mission.body_positions_ecl_au(ids, tdb(t))
+	var out: PackedVector3Array = mission.body_positions_ecl_au(ids, tdb(t_days))
 	# A short answer would slide every body past the gap onto its neighbour's
 	# position — say so rather than draw it. The binding's contract is one slot per
 	# id, misses included, and it has a test.
@@ -583,7 +593,7 @@ func _prime_ephem_positions() -> void:
 		push_error("body_positions_ecl_au returned %d for %d ids" % [out.size(), names.size()])
 		return
 	for i in names.size():
-		_pos_memo[names[i]] = [t, out[i]]
+		_pos_memo[names[i]] = [t_days, out[i]]
 
 
 ## Console timestamp. "E-nnnn" is days-to-impact — meaningful only when there is
@@ -2127,6 +2137,16 @@ func pos_ecl(el: Dictionary, t_days: float) -> Vector3:
 	var hit: Array = _pos_memo.get(key, [])
 	if not hit.is_empty() and hit[0] == t_days:
 		return hit[1]
+	# A miss on a DE440 body at the live clock is the first of twenty-four that are
+	# about to arrive this frame, so answer all of them at once. Only at the live
+	# clock: an orbit walk or a trail asking one arbitrary epoch would otherwise
+	# drag twenty-three bodies it has no use for across the binding with it.
+	if (el.get("source", "") == "ephem" and t_days == t
+			and bodies_online and _primed_t != t_days):
+		_prime_ephem_positions(t_days)
+		hit = _pos_memo.get(key, [])
+		if not hit.is_empty() and hit[0] == t_days:
+			return hit[1]
 	var p := _lookup_ecl(el, t_days)
 	_pos_memo[key] = [t_days, p]
 	return p

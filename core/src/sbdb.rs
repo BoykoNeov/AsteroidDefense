@@ -683,6 +683,13 @@ impl SbdbOrbit {
     /// orbit-determination covariance in mixed units is ill-conditioned enough
     /// that the f64 product is not exactly symmetric, and
     /// [`StateCovariance::new`] would refuse it.
+    ///
+    /// On Apophis the absorbed asymmetry measures `1.4e-15` relative — but that
+    /// is *one measurement on one well-conditioned solution*, not a bound. It is
+    /// returned on every call for exactly that reason: an object with a shorter
+    /// observation arc has a worse-conditioned covariance, and a caller that
+    /// assumed the Apophis figure would be assuming the thing this field exists
+    /// to let them check.
     pub fn state_covariance_icrf(&self, mu: f64) -> Result<MappedCovariance, SbdbError> {
         let j = self.jacobian_ecliptic(mu)?;
         let sigma_ecl = j * self.covariance_si() * j.transpose();
@@ -1023,6 +1030,40 @@ mod tests {
         match err {
             SbdbError::SigmaMismatch { label, .. } => assert_eq!(label, "e"),
             other => panic!("wrong error: {other}"),
+        }
+    }
+
+    /// A covariance that maps to something [`StateCovariance`] cannot certify
+    /// must come back as [`SbdbError::Covariance`], not as a plausible ellipse.
+    ///
+    /// This arm is the one most likely to fire on the *next* object someone
+    /// points this at: Apophis has an 18-year arc and a beautifully conditioned
+    /// solution, and the only evidence the arm behaves would otherwise be that
+    /// Apophis never reaches it. A shorter-arc object with a near-degenerate
+    /// solution is exactly the case that does.
+    ///
+    /// The fixture is corrupted at an **off-diagonal**, deliberately: the
+    /// diagonal is what the parse-time σ gate checks, so leaving it alone means
+    /// this test exercises the mapping rather than tripping the earlier guard.
+    /// `Σ_e,q` is set to −1.0e−17, past the `√(Σ_ee·Σ_qq) = 4.14e−18` that
+    /// positive-definiteness allows — a correlation of −2.4, which no covariance
+    /// has.
+    #[test]
+    fn a_covariance_that_cannot_be_certified_is_refused_not_approximated() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/apophis.sbdb"
+        ))
+        .unwrap();
+        // The entry appears twice, at (0,1) and (1,0), so the matrix stays
+        // symmetric and it is positive-definiteness alone that fails.
+        let broken = text.replace("-3.913592780937238e-18", "-1.0e-17");
+        assert_ne!(broken, text, "the off-diagonal entry moved");
+        let orbit = SbdbOrbit::parse(&broken).expect("the σ gate still passes");
+        match orbit.state_covariance_icrf(MU_SUN) {
+            Err(SbdbError::Covariance(UncertaintyError::NotPositiveDefinite)) => {}
+            Err(other) => panic!("wrong error: {other}"),
+            Ok(_) => panic!("certified a covariance with a correlation of −2.4"),
         }
     }
 

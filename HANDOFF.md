@@ -2195,9 +2195,11 @@ New: `pyref/fetch_sbdb_covariance.py`, the committed fixture
 
 - **Cometary elements, not equinoctial or Keplerian.** The covariance is over
   `(e, q, tp, node, peri, i)` — perihelion *distance* and time of perihelion
-  *passage*, no `a` and no `M`. All four NEOs sampled (Apophis, Bennu, Didymos,
-  Eros) use this set. The reader refuses any other rather than converting with
-  the wrong partial derivatives.
+  *passage*, no `a` and no `M`. Four NEOs were sampled while writing this —
+  Apophis, Bennu, Didymos, Eros — and all four use it; that is an observation on
+  four well-observed objects, **not** a claim about the database. What is actually
+  guaranteed is the refusal: the reader rejects any other element set rather than
+  converting it with the wrong partial derivatives (`a_different_element_set_is_refused`).
 - **The matrix is 8×8, not 6×6.** Apophis' carries the non-gravitational `A1`/`A2`
   as estimated parameters; Bennu's carries `RHO`/`AMRAT` instead. Dropping the
   trailing rows and columns *is* marginalisation for a Gaussian, so the leading
@@ -2291,9 +2293,13 @@ constant, not a numerical preference. Reducing there (253 000 km out) gives
 **37 984 km against JPL's ~38 000 km, 16 km off**. The close approach is now
 *found* on the nominal run rather than assumed from a hardcoded epoch.
 
-The b-plane Jacobian's shipping steps were re-measured here rather than reused on
+The b-plane Jacobian's shipping steps were checked here rather than reused on
 faith, since `uncertainty`'s own docs say that criterion does not travel: on this
-encounter they do travel, the columns moving by 1e-4 across a 16× range of step.
+encounter they do, the columns moving by at most 1.4e-4 across ×0.25…×4. That is
+"the shipping steps are safe here" and **not** "the plateau was located here" —
+the sweep is one-sided, `×0.25` is already the largest deviation, and nothing
+above `×4` was tried. The element→state Jacobian's plateau, by contrast, really
+was mapped, over six decades and per column.
 
 #### The headline is not the probability
 

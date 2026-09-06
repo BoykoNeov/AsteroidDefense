@@ -10,9 +10,10 @@
 //!
 //! # The headline, and it is not the probability
 //!
-//! Measured: the 1σ b-plane ellipse is **18.2 km × 0.48 km**, and our own
-//! position residual against JPL over the same arc is **15.1 km**. They are the
-//! same size. So the ellipse is an honest statement about JPL's astrometry and
+//! Measured 2026-09-06: the 1σ b-plane ellipse is **18.2 km × 0.48 km**, and our
+//! own position residual against JPL over the same arc is **15.1 km**. They are
+//! the same size — and the probe *computes* that comparison rather than printing
+//! it, so improving the dynamics changes what it says. So the ellipse is an honest statement about JPL's astrometry and
 //! says nothing about the physics we do not model — every planet's relativity,
 //! and the radial `A1` — which displaces the nominal by just as much. A real
 //! covariance does not make a prediction real on its own; it makes the *other*
@@ -28,10 +29,15 @@
 //!   1. The nominal encounter: Apophis' 2029 approach is famously ~38 000 km from
 //!      Earth's centre. A perigee far from that means the seed or the field is
 //!      wrong, and nothing downstream is worth reading. Measured here: 37 984 km.
-//!   2. The b-plane Jacobian's step plateau, re-measured. `uncertainty`'s shipping
-//!      steps were tuned for the campaign's own encounter and its docs say the
-//!      criterion does not travel; this checks rather than assumes. (It travels:
-//!      the columns move by 1e-4 across a 16× range of step.)
+//!   2. The b-plane Jacobian's sensitivity to its step. `uncertainty`'s shipping
+//!      steps were tuned for the campaign's own encounter and its docs say that
+//!      criterion does not travel; this checks rather than assumes. It travels:
+//!      the columns move by at most 1.4e-4 across ×0.25…×4. Note what that is
+//!      **not** — the sweep is one-sided, `×0.25` is already the largest
+//!      deviation (against 2.7e-5 at `×0.5`), and nothing above `×4` was tried,
+//!      so this is "the shipping steps are safe here", not "the plateau was
+//!      located here". Contrast the element→state Jacobian, whose plateau
+//!      genuinely was mapped over six decades in `probe_sbdb_covariance`.
 //!   3. The ellipse and the probability.
 //!   4. Our own dynamical error, measured a year short of the flyby — the number
 //!      block 3 has to be read against.
@@ -83,7 +89,9 @@ const APOPHIS_A2_SI: f64 = -2.902e-14 * AU_M / (DAY_S * DAY_S);
 const CADENCE_S: f64 = 10.0 * DAY_S;
 
 /// TDB seconds past J2000 of an epoch comfortably after the 2029 encounter — the
-/// end of the finding run. 2029-05-13.
+/// end of the finding run, 2029-05-12, about a month past it. Nothing depends on
+/// the exact instant; it only has to leave closest approach as an interior
+/// minimum of the scan rather than the end of the arc.
 const FIND_UNTIL_TDB: f64 = 926_596_000.0;
 
 fn main() {
@@ -328,12 +336,34 @@ fn main() {
                         long / 1000.0,
                         d / 1000.0
                     );
-                    println!(
-                        "  They are the same size. The ellipse is an honest statement \
-                         about JPL's astrometry\n  and says nothing about the physics we \
-                         do not model — every planet's relativity and\n  the radial A1 — \
-                         which moves the nominal by just as much."
-                    );
+                    // The conclusion is computed, not frozen prose: when the
+                    // dynamics improve (the dop853→IAS15 crossover, a planetary
+                    // relativity term, the radial A1) this residual falls and the
+                    // reading changes. A hardcoded "they are the same size" would
+                    // still be printed under a residual ten times smaller.
+                    let ratio = long / d.max(f64::MIN_POSITIVE);
+                    if (0.33..3.0).contains(&ratio) {
+                        println!(
+                            "  They are the same size (ratio {ratio:.2}). The ellipse is \
+                             an honest statement\n  about JPL's astrometry and says \
+                             nothing about the physics we do not model —\n  every \
+                             planet's relativity, and the radial A1 — which moves the \
+                             nominal by\n  just as much."
+                        );
+                    } else if ratio >= 3.0 {
+                        println!(
+                            "  The ellipse is {ratio:.1}× the residual, so the answer \
+                             above is dominated by\n  JPL's real orbit uncertainty, and \
+                             our own dynamics are no longer the limit."
+                        );
+                    } else {
+                        println!(
+                            "  Our residual is {:.1}× the ellipse, so the answer above is \
+                             OUR dynamical error\n  wearing an uncertainty's clothes, and \
+                             must be read as such.",
+                            1.0 / ratio
+                        );
+                    }
                 }
                 None => println!("  the .neo table has no sample a year before the flyby"),
             }

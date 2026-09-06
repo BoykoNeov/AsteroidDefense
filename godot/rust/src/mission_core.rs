@@ -42,7 +42,7 @@ use std::sync::Arc;
 use anise::constants::frames::{EARTH_J2000, SSB_J2000, SUN_J2000};
 use anise::prelude::Frame;
 use godot::global::godot_warn;
-use nalgebra::{Vector2, Vector3};
+use nalgebra::{Matrix2, Vector2, Vector3};
 
 use asteroid_core::deflection::DeflectionError;
 use asteroid_core::ephemeris::Ephemeris;
@@ -58,9 +58,9 @@ use asteroid_core::scenario::{
     Tier2Config, ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES, SAFE_PERIGEE_TARGET_M,
 };
 use asteroid_core::{
-    along_track_unit, Clock, DvSolveTol, EphemerisPerturber, Epoch, GravityTractor, HoverGeometry,
-    KeyholeProximity, OpikFrame, OrbitalElements, ResonantCircle, StateVector, TowDirection,
-    TowSolveTol, TowWindow, AU_M as CORE_AU_M,
+    along_track_unit, BPlaneSensitivity, Clock, DvSolveTol, EphemerisPerturber, Epoch,
+    GravityTractor, HoverGeometry, KeyholeProximity, OpikFrame, OrbitalElements, ResonantCircle,
+    StateCovariance, StateVector, TowDirection, TowSolveTol, TowWindow, AU_M as CORE_AU_M,
 };
 
 /// Kilometres per astronomical unit — the display scale positions cross into.
@@ -1663,6 +1663,26 @@ impl MissionCore {
         self.opik.is_some()
     }
 
+    /// The `(ξ̂, ζ̂, η̂)` the b-plane view draws in — [`encounter_basis`] made
+    /// reachable so a **worker** can be handed the axes the picture will actually
+    /// use, instead of rebuilding its own and hoping they match.
+    ///
+    /// That distinction is the whole reason this exists: the Tier-3 worker holds a
+    /// cloned scenario, and a frame it derived itself would be the *right* frame
+    /// only as long as nothing about the encounter had moved underneath it. Passing
+    /// the live one in makes "the ellipse is on the same axes as the tracks" a fact
+    /// about the call rather than a coincidence.
+    ///
+    /// `None` before a build. Not the same thing as
+    /// [`bplane_frame_pinned`](Self::bplane_frame_pinned) being false — that says
+    /// the axes are the ecliptic-pole *fallback*, which is still a usable frame and
+    /// still what is on screen.
+    ///
+    /// [`encounter_basis`]: Self::encounter_basis
+    pub fn display_basis(&self) -> Option<(Vector3<f64>, Vector3<f64>, Vector3<f64>)> {
+        self.encounter_basis()
+    }
+
     /// The resonant-return circles of the nominal encounter with returns of at
     /// most `max_years`, within 60 capture radii, sorted by `a'` — the keyhole map
     /// in the same `(ξ, ζ)` km frame the tracks and b-points are drawn in. Empty
@@ -3152,6 +3172,212 @@ pub fn required_cell_mass(
         MASS_SOLVE_TOL,
     )
     .map_err(|e| ScenarioError::Integration(format!("required impactor mass: {e}")))
+}
+
+// --- The Tier-3 uncertainty ellipse (HANDOFF §7) ------------------------------
+//
+// Same shape as the porkchop above: everything expensive happens once on a worker
+// and everything the frontend reads is free. Here that split is not merely
+// convenient, it is the layer's whole point. `Σ_b = J Σ Jᵀ` costs 13 propagations
+// in `J` — which describes the *trajectory* — and nothing at all in `Σ`, which is
+// a statement about how well the orbit is known. Hold `J` and "the same rock,
+// better observed" becomes a keypress instead of a second fourteen seconds, and
+// that comparison is the entire Tier-3 lesson.
+
+/// The invented covariance's 1σ along-track velocity, m/s.
+///
+/// **This and the two below are `probe_tier3_uncertainty`'s numbers verbatim**, so
+/// the panel and the probe are two readings of one covariance rather than two
+/// plausible pictures of two. The rock is synthetic, so this is a *shape borrowed
+/// from reality* — a real NEO's along-track error dominating the rest — and not a
+/// measurement of anything. The frontend has to say the word "synthetic": an
+/// ellipse drawn without it is a claim about how well this asteroid is tracked,
+/// and nobody tracks it.
+const TIER3_ALONG_TRACK_SIGMA_MS: f64 = 5.0e-5;
+/// How many times larger the along-track velocity σ is than the other two axes'.
+const TIER3_VELOCITY_ANISOTROPY: f64 = 20.0;
+/// Isotropic 1σ on the initial position, metres.
+const TIER3_POSITION_SIGMA_M: f64 = 1.0e3;
+
+/// How far the σ-scale knob reaches in each direction, as a power of ten.
+///
+/// The knob multiplies **both** σ blocks, which is what
+/// [`StateCovariance::synthetic_along_track`] says to do when the question is "how
+/// well is the orbit known" — its own doc records that scaling the along-track
+/// velocity alone barely moves the answer, because at the shipping numbers the
+/// *position* block contributes ~153 km of the ~169 km ellipse. A knob wired to
+/// the velocity term alone would look like a knob and do nothing.
+const TIER3_SCALE_DECADES: f64 = 3.0;
+
+/// The covariance-independent half of a Tier-3 answer, with the rotation that puts
+/// it on the b-plane view's own axes — the unit of work that crosses back from the
+/// Tier-3 worker.
+///
+/// **Two b-plane frames meet here, and they are not the same frame.**
+/// [`BPlaneSensitivity`] carries `BPlaneBasis::from_encounter`, which is
+/// arbitrary-but-deterministic by design: it seeds off whichever coordinate axis is
+/// least aligned with `Ŝ`. Every *scalar* the uncertainty module reports is
+/// invariant under that choice and its tests pin the invariance — but an
+/// **ellipse's orientation is not a scalar**. Drawing an angle computed in
+/// `(e1, e2)` onto the view's pinned Öpik axes would give correct axis lengths at
+/// an arbitrary rotation: a picture that is wrong in exactly the way that looks
+/// right. So the covariance is rotated into `(ξ̂, ζ̂)` here, once, in the core —
+/// the same discipline that left `encounter.gd` owning no geometry.
+///
+/// The rotation is `R = [[ξ̂·e1, ξ̂·e2], [ζ̂·e1, ζ̂·e2]]`, `Σ_display = R Σ Rᵀ`, and
+/// it is only orthonormal to the extent the two frames span the same plane. They
+/// nearly do and not exactly: the Öpik frame is built on the **closest-approach**
+/// reduction while the sensitivity's nominal is the **fixed-epoch** one, so the two
+/// `Ŝ` differ by the tiny angle between two reductions of one hyperbola.
+/// [`frame_residual`](Self::frame_residual) measures that rather than assuming it
+/// away, and `the_tier3_ellipse_is_drawn_in_the_views_own_frame` asserts it stays
+/// small. **Measured (2026-09-06): `1.95e-10`** — the two b-planes are the same
+/// plane to a part in five billion, and the nominal's out-of-plane component is
+/// 0.106 km against a `|B|` of 7 074 km. So the rotation is a rotation, and the
+/// worry it was built for turns out to cost nothing to satisfy.
+///
+/// **What it draws, measured on the shipping rock at the shipping covariance:** a
+/// 1σ ellipse of **168.71 × 0.82 km** — 205:1 — lying **0.3° off `ζ̂`**. That
+/// orientation is the whole reason the rotation had to be done: the spread is
+/// almost purely in the *timing* coordinate, which is the same coordinate
+/// `keyhole_target` found a Δv nudge moves. Drawn in the sensitivity's own
+/// arbitrary frame it would have pointed somewhere with no meaning at all.
+pub struct Tier3View {
+    /// The 13-propagation Jacobian, the fixed-epoch nominal, and the frame the
+    /// Jacobian's rows are expressed in.
+    sensitivity: BPlaneSensitivity,
+    /// The seed the Jacobian was built about. Kept so a rescaled covariance is
+    /// rebuilt about the **same** state the columns were differenced around —
+    /// re-deriving it from a scenario handed in later is how the mean and the
+    /// spread start belonging to different trajectories.
+    seed: StateVector,
+    /// `R`: display `(ξ, ζ)` components from sensitivity `(e1, e2)` components.
+    rot: Matrix2<f64>,
+    /// `‖R Rᵀ − I‖∞` — how far from orthonormal the rotation is, and therefore how
+    /// far the two b-planes are from coplanar. Dimensionless; a rotation between
+    /// two frames of the same plane gives zero.
+    frame_residual: f64,
+    /// The out-of-plane component of the fixed-epoch nominal's b-vector when
+    /// projected on the *display* frame, km — the same coplanarity question in
+    /// kilometres instead of in units of nothing, and the one a reader can weigh
+    /// against the ellipse it is drawn beside.
+    out_of_plane_km: f64,
+    /// The nominal crossing in display coordinates, `(ξ, ζ)` km.
+    ///
+    /// Projected straight through [`project_bplane`] rather than by rotating the
+    /// sensitivity's own 2-vector: the b-vector is a 3-D quantity and the display
+    /// basis is a 3-D frame, so going through the 2×2 would launder an exact
+    /// operation through the approximate one for no gain.
+    mean_km: (f64, f64),
+}
+
+/// One mapped covariance, ready to draw — the free half of a Tier-3 answer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tier3Ellipse {
+    /// Centre of the ellipse in the view's `(ξ, ζ)` km — the **fixed-epoch**
+    /// nominal crossing, which is not the same reduction
+    /// [`nominal_b_point_km`](MissionCore::nominal_b_point_km) draws.
+    pub mean_km: (f64, f64),
+    /// 1σ semi-major axis, km.
+    pub major_km: f64,
+    /// 1σ semi-minor axis, km.
+    pub minor_km: f64,
+    /// Position angle of the major axis, radians, measured from `+ξ̂` toward `+ζ̂`.
+    pub angle_rad: f64,
+    /// The gravitationally-focused capture radius at this encounter, km — the disc
+    /// the probability is integrated over. Reported *with* the ellipse because
+    /// neither number means anything alone.
+    pub capture_km: f64,
+    /// The fraction of this Gaussian that lands on the capture disc.
+    pub impact_probability: f64,
+    /// The multiplier applied to both σ blocks to produce it.
+    pub sigma_scale: f64,
+}
+
+impl Tier3View {
+    /// Solve the sensitivity and pin the rotation — **13 propagations, measured
+    /// 34.6 s** by `the_tier3_ellipse_is_drawn_in_the_views_own_frame` on the
+    /// shipping campaign, which is why this is a worker entry point and never
+    /// touched from a frame. (The core module quotes ~14 s for the same 13
+    /// propagations; this is the same work measured end to end inside the binding's
+    /// release suite. Either way it is tens of seconds, and the design consequence
+    /// — pay it once, off the build path — is the same.)
+    ///
+    /// `display_basis` is the view's own `(ξ̂, ζ̂, η̂)` from
+    /// [`encounter_basis`](MissionCore::encounter_basis), passed in rather than
+    /// re-derived: a worker holding a cloned scenario could build its own Öpik
+    /// frame, and then the ellipse would be drawn on axes that are only *probably*
+    /// the ones on screen.
+    pub fn build(
+        scenario: &RealFieldScenario,
+        display_basis: (Vector3<f64>, Vector3<f64>, Vector3<f64>),
+    ) -> Result<Self, ScenarioError> {
+        let sensitivity = scenario
+            .bplane_sensitivity()
+            .map_err(|e| ScenarioError::Integration(format!("Tier-3 sensitivity: {e}")))?;
+        let (xi_hat, zeta_hat, _) = display_basis;
+        // The core owns this rotation — `probe_keyhole_map` draws the same ellipse
+        // into the published b-plane map through the same call, which is why the
+        // two agree to six figures instead of merely looking similar.
+        let (rot, frame_residual) = sensitivity.basis.rotation_to(xi_hat, zeta_hat);
+        let projected = project_bplane(sensitivity.nominal.b_vector, display_basis);
+        Ok(Self {
+            sensitivity,
+            seed: scenario.seed(),
+            rot,
+            frame_residual,
+            out_of_plane_km: projected.z,
+            mean_km: (projected.x, projected.y),
+        })
+    }
+
+    /// Map the synthetic covariance, scaled by `sigma_scale`, onto the b-plane —
+    /// free, and the reason the expensive half is held rather than re-solved.
+    ///
+    /// `sigma_scale` multiplies **both** σ blocks (see [`TIER3_SCALE_DECADES`]).
+    /// `None` only if the seed is degenerate or the capture radius is not positive,
+    /// neither of which a built scenario produces.
+    pub fn map(&self, sigma_scale: f64) -> Option<Tier3Ellipse> {
+        let s = sigma_scale.clamp(
+            10.0_f64.powf(-TIER3_SCALE_DECADES),
+            10.0_f64.powf(TIER3_SCALE_DECADES),
+        );
+        let cov = StateCovariance::synthetic_along_track(
+            self.seed,
+            TIER3_ALONG_TRACK_SIGMA_MS * s,
+            TIER3_VELOCITY_ANISOTROPY,
+            TIER3_POSITION_SIGMA_M * s,
+        )?;
+        let mapped = self.sensitivity.map(&cov);
+        // Axis *lengths* are invariant under the rotation and are taken from the
+        // module's own accessor; only the orientation needs the display frame. Both
+        // are computed, and the test asserts they agree — a rotation that changed
+        // the eigenvalues would be a bug this would otherwise draw.
+        let (major, minor) = mapped.sigma_axes();
+        let display_cov = self.rot * mapped.covariance * self.rot.transpose();
+        let eig = display_cov.symmetric_eigen();
+        let major_i = usize::from(eig.eigenvalues[1] > eig.eigenvalues[0]);
+        let v = eig.eigenvectors.column(major_i);
+        Some(Tier3Ellipse {
+            mean_km: self.mean_km,
+            major_km: major / M_PER_KM,
+            minor_km: minor / M_PER_KM,
+            angle_rad: v[1].atan2(v[0]),
+            capture_km: mapped.capture_radius / M_PER_KM,
+            impact_probability: mapped.impact_probability().unwrap_or(f64::NAN),
+            sigma_scale: s,
+        })
+    }
+
+    /// `‖R Rᵀ − I‖∞` for the rotation onto the view's axes — see the type doc.
+    pub fn frame_residual(&self) -> f64 {
+        self.frame_residual
+    }
+
+    /// The nominal crossing's out-of-plane component in the display frame, km.
+    pub fn out_of_plane_km(&self) -> f64 {
+        self.out_of_plane_km
+    }
 }
 
 #[cfg(test)]
@@ -6262,6 +6488,159 @@ mod tests {
         assert!(
             equivalent_ratio < naive_ratio,
             "the equivalent must be the more conservative of the two by construction"
+        );
+    }
+
+    // --- The Tier-3 uncertainty ellipse -------------------------------------
+
+    /// Kernel-gated (release-run, ~20 s). **The ellipse is drawn on the view's own
+    /// axes, and every number that claim rests on is measured here rather than
+    /// argued.**
+    ///
+    /// The hazard this exists for is specific and quiet. `BPlaneSensitivity`
+    /// carries an *arbitrary-but-deterministic* b-plane frame — `uncertainty.rs`
+    /// says so, and pins the invariance of every scalar it reports under that
+    /// choice. An ellipse's **orientation** is not one of those scalars. Take the
+    /// angle out of that frame, draw it on the pinned Öpik axes, and the picture
+    /// has the right axis lengths at a rotation nobody chose: wrong in exactly the
+    /// way that looks right, on the one screen whose entire job is that the picture
+    /// and the numbers cannot disagree.
+    ///
+    /// So four things are checked:
+    ///
+    ///   1. The rotation really is one — `‖R Rᵀ − I‖∞` at the noise floor. It can
+    ///      only be exactly orthonormal if the two frames span the same plane, and
+    ///      they do not *exactly*: the Öpik frame is built on the closest-approach
+    ///      reduction, the sensitivity's nominal on the fixed-epoch one. The gate
+    ///      is the size of that disagreement, and it is loose enough to pass and
+    ///      tight enough that a genuinely non-coplanar frame fails.
+    ///   2. Rotating does not change the axis *lengths*. Eigenvalues are invariant
+    ///      under an orthogonal similarity, so the display frame's eigenvalues must
+    ///      reproduce `sigma_axes` — which is the cheapest possible check that `R`
+    ///      is being applied as `R Σ Rᵀ` and not, say, `Rᵀ Σ R` on a non-symmetric
+    ///      product, or to the wrong operand.
+    ///   3. The ellipse is elongated. A 20:1 along-track cigar that maps to
+    ///      something near-circular would mean the along-track direction is not the
+    ///      sensitive one, contradicting every number the deflection curve rests on.
+    ///   4. The σ knob moves the answer. Shrinking the covariance has to shrink the
+    ///      ellipse, or the knob is decoration — and the knob is the layer's whole
+    ///      pedagogical payload.
+    ///
+    /// It also **prints the gap between the ellipse's centre and the cross the view
+    /// draws**, because those are two different reductions of one hyperbola and the
+    /// frontend has to know whether pairing them is honest at this scale. That
+    /// number decides where the ellipse gets drawn; it is measured, not assumed,
+    /// and the assertion below only pins that it stays far under the capture disc.
+    #[test]
+    fn the_tier3_ellipse_is_drawn_in_the_views_own_frame() {
+        if !have_kernels() {
+            eprintln!("skipping the_tier3_ellipse_is_drawn_in_the_views_own_frame: no DE kernel");
+            return;
+        }
+        let mut mc = MissionCore::load().expect("load kernels");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("scenario");
+        let basis = mc.display_basis().expect("display basis");
+
+        let t = std::time::Instant::now();
+        let view = Tier3View::build(&scenario, basis).expect("sensitivity solves");
+        let solve_s = t.elapsed().as_secs_f64();
+
+        // 1. The rotation is orthonormal to within the two reductions' disagreement.
+        let b = mc.nominal_b_point_km().expect("nominal b-point");
+        println!(
+            "tier3: solve {solve_s:.1} s, frame residual {:.3e}, out-of-plane {:.4} km of |B| {:.1} km",
+            view.frame_residual(),
+            view.out_of_plane_km(),
+            b.norm(),
+        );
+        assert!(
+            view.frame_residual() < 1.0e-6,
+            "the sensitivity's b-plane and the view's are not the same plane: \
+             ‖R Rᵀ − I‖∞ = {:.3e}. Either the Öpik frame stopped being built on the \
+             same asymptote or the rotation is being assembled wrongly; an ellipse \
+             drawn through it would be at an angle nobody chose.",
+            view.frame_residual()
+        );
+
+        let e = view.map(1.0).expect("shipping covariance maps");
+
+        // 2. The rotation moved the orientation and left the lengths alone.
+        let cov = StateCovariance::synthetic_along_track(
+            scenario.seed(),
+            TIER3_ALONG_TRACK_SIGMA_MS,
+            TIER3_VELOCITY_ANISOTROPY,
+            TIER3_POSITION_SIGMA_M,
+        )
+        .expect("non-degenerate seed");
+        let display_cov = view.rot * view.sensitivity.map(&cov).covariance * view.rot.transpose();
+        let eig = display_cov.symmetric_eigen();
+        let mut l = [eig.eigenvalues[0].max(0.0), eig.eigenvalues[1].max(0.0)];
+        if l[1] > l[0] {
+            l.swap(0, 1);
+        }
+        for (rotated, reported) in [(l[0].sqrt(), e.major_km), (l[1].sqrt(), e.minor_km)] {
+            let rel = (rotated / M_PER_KM - reported).abs() / reported.max(1.0e-9);
+            assert!(
+                rel < 1.0e-9,
+                "rotating the covariance changed an axis length by {rel:.3e} relative \
+                 — an orthogonal similarity cannot do that, so `R Σ Rᵀ` is not what \
+                 is being computed"
+            );
+        }
+
+        // 3. A 20:1 cigar must map to an elongated ellipse.
+        let gap = ((b.x - e.mean_km.0).powi(2) + (b.y - e.mean_km.1).powi(2)).sqrt();
+        println!(
+            "tier3 ellipse (σ×1): 1σ {:.2} × {:.2} km at {:.1}° from ξ̂, \
+             centre ({:.1}, {:.1}) km, {gap:.2} km from the drawn cross; \
+             P = {:.6} over a {:.0} km disc",
+            e.major_km,
+            e.minor_km,
+            e.angle_rad.to_degrees(),
+            e.mean_km.0,
+            e.mean_km.1,
+            e.impact_probability,
+            e.capture_km,
+        );
+        assert!(
+            e.major_km / e.minor_km > 3.0,
+            "a 20:1 along-track covariance mapped to a {:.2}:1 b-plane ellipse — \
+             the along-track direction is supposed to be the sensitive one",
+            e.major_km / e.minor_km
+        );
+
+        // The centre gap decides whether the frontend may draw this on the cross.
+        // Pinned only against the disc: this is a measurement the drawing reads,
+        // not a tolerance anything physical depends on.
+        assert!(
+            gap < 0.05 * e.capture_km,
+            "the fixed-epoch and closest-approach reductions are {gap:.1} km apart, \
+             which is no longer a rounding against a {:.0} km capture disc",
+            e.capture_km
+        );
+
+        // 4. The σ knob has to move the ellipse and the probability.
+        let tight = view.map(0.01).expect("shrunk covariance maps");
+        let loose = view.map(100.0).expect("widened covariance maps");
+        println!(
+            "tier3 σ knob: ×0.01 -> {:.3} km major, P {:.6};  ×100 -> {:.1} km major, P {:.6}",
+            tight.major_km, tight.impact_probability, loose.major_km, loose.impact_probability,
+        );
+        assert!(
+            tight.major_km < e.major_km && e.major_km < loose.major_km,
+            "the σ knob does not order the ellipses: {:.3} / {:.3} / {:.3} km",
+            tight.major_km,
+            e.major_km,
+            loose.major_km
+        );
+        // The clamp is a real boundary, not a suggestion — a frontend that runs the
+        // knob to its stop must get the stop, not an unbounded covariance.
+        assert_eq!(
+            view.map(1.0e9).expect("clamped").sigma_scale,
+            10.0_f64.powf(TIER3_SCALE_DECADES),
+            "the σ scale must clamp at its documented reach"
         );
     }
 }

@@ -46,6 +46,13 @@ extends Control
 ## that reaches ~10^6 km down-range still sits within ~|B| of the origin here.
 const DEFAULT_HALF_LD := 0.15
 const MARGIN := 18.0
+## Where the Tier-3 readout block starts, px from the top.
+##
+## An empty band: below the view header and above the HUD's target card, which
+## begins around y = 260. Chosen from a screenshot rather than from the layout
+## code, because the pieces that share this screen are drawn by three different
+## nodes and only the picture knows where they all land.
+const UNCERTAINTY_READOUT_Y := 108.0
 
 var _font: Font
 var _fs := 13
@@ -74,6 +81,21 @@ const KEYHOLE_LABELS := 7
 var _circles: Array = []
 var _keyholes := true
 
+## The Tier-3 uncertainty overlay: the 1-sigma b-plane ellipse the orbit's own
+## covariance implies, and the fraction of it that lands on the capture disc.
+##
+## Off by default and **paid for on demand** — the sensitivity behind it is 13
+## propagations, ~17 s on a worker — so [U] both opens it and orders it. Unlike
+## the keyhole map, whose circles are closed-form and free, this one cannot be
+## drawn the frame it is asked for, and the view says so while it waits rather
+## than showing an empty overlay that reads as "no uncertainty".
+##
+## Everything drawn here belongs to the **nominal** track. The Jacobian is taken
+## about the undeflected seed, so there is no deflected ellipse and the legend has
+## to say so: a spread on the cross with a bare diamond beside it would read as
+## "the deflection is certain", which is the opposite of §1's whole caveat.
+var _uncertainty := false
+
 ## Whether the live-asteroid contact went on screen this frame. Set by
 ## _draw_marker, read by _draw_legend a few calls later — draw order, not cached
 ## state, so it cannot go stale.
@@ -90,6 +112,10 @@ func _ready() -> void:
 	# The threat itself is ~10 s away at scene load; nothing exists to read before
 	# the scenario lands.
 	Sim.mission_ready.connect(func() -> void: _built = false)
+	# The ellipse is not part of `_fetch`: it is refetched by Sim on the events that
+	# can change it (the solve landing, the sigma knob), and read from there. A
+	# `_built = false` here would re-pull the tracks every time the knob moved.
+	Sim.tier3_changed.connect(func() -> void: queue_redraw())
 
 
 func _process(_delta: float) -> void:
@@ -128,6 +154,16 @@ func _fetch() -> void:
 func toggle_keyholes() -> void:
 	_keyholes = not _keyholes
 	Sim.event_logged.emit("KEYHOLE MAP %s" % ("ON" if _keyholes else "OFF"))
+
+
+## [U]: show or hide the Tier-3 uncertainty ellipse, ordering the solve the first
+## time it is asked for. Sim's request is a no-op once solved or in flight, so
+## toggling repeatedly costs nothing.
+func toggle_uncertainty() -> void:
+	_uncertainty = not _uncertainty
+	if _uncertainty:
+		Sim.request_tier3()
+	Sim.event_logged.emit("UNCERTAINTY OVERLAY %s" % ("ON" if _uncertainty else "OFF"))
 
 
 # ------------------------------------------------------------------ draw ---
@@ -171,7 +207,18 @@ func _draw() -> void:
 		var a: float = 0.3 if Sim.plan_solving else 0.75
 		_draw_track(_defl, center, ppl, Color(0.62, 0.62, 0.62, a))
 
+	# Top-left, well above the encounter solution — NOT under it. The first
+	# screenshot of this overlay had it printed below the verdict, where the HUD's
+	# event log lands on top of it and both became unreadable. That column belongs
+	# to the HUD from ~0.7 h down; this block gets the empty band above the target
+	# card instead.
+	_draw_uncertainty_readout(MARGIN, UNCERTAINTY_READOUT_Y, _fs + 5.0, mid, dim)
 	_draw_b_points(center, ppl, bright, mid, dim)
+	# Over the b-points, under the live marker: the ellipse is about where the
+	# nominal crossing *is not* pinned down, so it has to be readable against the
+	# cross it surrounds.
+	if _uncertainty:
+		_draw_uncertainty(center, ppl, bright, mid, dim)
 	_draw_marker(center, ppl, bright, mid)
 	_draw_legend(w, mid, dim)
 
@@ -179,8 +226,10 @@ func _draw() -> void:
 	_centered("EARTH ENCOUNTER - B-PLANE VIEW", Vector2(w * 0.5, 40), dim, _fs)
 	_readout(w, h, mid, bright, dim)
 
-	var foot := "SPAN +/-%s LD   [WHEEL] ZOOM   [H] KEYHOLES %s" % [
-		String.num(_half_ld, 3), "ON" if _keyholes else "OFF"]
+	var foot := "SPAN +/-%s LD   [WHEEL] ZOOM   [H] KEYHOLES %s   [U] UNCERTAINTY %s%s" % [
+		String.num(_half_ld, 3), "ON" if _keyholes else "OFF",
+		"ON" if _uncertainty else "OFF",
+		"   [Z]/[X] SIGMA" if _uncertainty and Sim.tier3_online else ""]
 	_centered(foot, Vector2(w * 0.5, h - MARGIN - 4), dim, _fs - 2)
 
 
@@ -315,9 +364,18 @@ func _draw_legend(w: float, mid: Color, dim: Color) -> void:
 	draw_string(_font, Vector2(x, y + (row + 1.0) * lh),
 		"LINES = TRACK (BENDS - CONTEXT ONLY)",
 		HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, dim)
+	var extra := 2.0
 	if _keyholes and not _circles.is_empty():
-		draw_string(_font, Vector2(x, y + (row + 2.0) * lh),
+		draw_string(_font, Vector2(x, y + (row + extra) * lh),
 			"CIRCLES = RESONANT RETURNS H:K (KEYHOLE MAP)",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, dim)
+		extra += 1.0
+	# Named as the nominal's, always — an ellipse on the cross beside a bare diamond
+	# is a picture saying the deflection is certain, which is the exact thing §1's
+	# determinism caveat exists to deny.
+	if _uncertainty and Sim.tier3_online:
+		draw_string(_font, Vector2(x, y + (row + extra) * lh),
+			"ELLIPSE = 1-SIGMA, NOMINAL TRACK ONLY",
 			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, dim)
 
 
@@ -478,6 +536,140 @@ func _readout(w: float, h: float, mid: Color, bright: Color, dim: Color) -> void
 	draw_string(_font, Vector2(MARGIN, vy + lh),
 		"HIT WHEN |B| <= CAPTURE - EARTH'S GRAVITY WIDENS ITS OWN TARGET",
 		HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, dim)
+
+
+## The Tier-3 uncertainty ellipse, in the same `(xi, zeta)` km this whole view is
+## drawn in — the core rotates it there, because an ellipse's *orientation* is the
+## one thing about it that is not invariant under the b-plane frame the
+## sensitivity happens to be solved in.
+##
+## **The ellipse is normally far smaller than a pixel, and that is the finding,
+## not a bug.** At the default span (0.15 LD, ~58 000 km across) a ~170 km
+## 1-sigma major axis is about a pixel and the minor axis is a hundredth of one.
+## Fattening it to something visible would be drawing a spread the orbit does not
+## have; instead the axes are printed in kilometres unconditionally and the
+## overlay says outright when the shape is below the resolution of the screen.
+## Zooming in with the wheel is what makes it appear, which teaches the right
+## thing: this rock's crossing is known to a few hundred kilometres inside a
+## capture disc eleven thousand kilometres wide.
+##
+## Centred on the sensitivity's **own** mean, which is not the cross the view
+## draws. Both are honest reductions of one hyperbola — the cross at closest
+## approach, the ellipse at the fixed epoch its Jacobian was differenced around —
+## and pairing them would be centring one instrument's spread on another
+## instrument's position. **Measured: they are 5.43 km apart, against a 0.82 km
+## minor axis** — so that is not a rounding, it is six and a half ellipse-widths,
+## and the readout prints it rather than leaving the reader to assume the cross is
+## the centre.
+func _draw_uncertainty(center: Vector2, ppl: float, bright: Color, mid: Color,
+		dim: Color) -> void:
+	if Sim.tier3_solving:
+		_centered("SOLVING B-PLANE SENSITIVITY - 13 PROPAGATIONS",
+			Vector2(size.x * 0.5, 60.0), dim, _fs - 2)
+		return
+	if not Sim.tier3_online or Sim.tier3.is_empty():
+		return
+
+	var e: Dictionary = Sim.tier3
+	var mean := Vector3(float(e["mean_xi_km"]), float(e["mean_zeta_km"]), 0.0)
+	var at := _plot(center, ppl, mean)
+	var major_px: float = float(e["major_km"]) / Sim.LD_KM * ppl
+	var minor_px: float = float(e["minor_km"]) / Sim.LD_KM * ppl
+	var a: float = float(e["angle_rad"])
+
+	# Below a pixel there is no shape to draw. A ring marks where it is and the
+	# caption says why nothing is inside it, rather than leaving the operator to
+	# conclude the overlay is broken.
+	if major_px < 1.5:
+		draw_arc(at, 5.0, 0.0, TAU, 24, Color(mid, 0.7), 1.0)
+		draw_string(_font, at + Vector2(9, -6), "1-SIGMA < 1 PX - ZOOM IN",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 3, dim)
+		return
+
+	# The ellipse. Built in screen space from the two semi-axes: xi is +x and zeta
+	# is +y here (see `_plot`), so the core's angle-from-xi is the screen angle too.
+	var u := Vector2(cos(a), sin(a))
+	var v := Vector2(-u.y, u.x)
+	var pts := PackedVector2Array()
+	for k in 65:
+		var th: float = TAU * float(k) / 64.0
+		pts.push_back(at + u * (major_px * cos(th)) + v * (minor_px * sin(th)))
+	draw_polyline(pts, Color(bright, 0.85), 1.2)
+	# Captioned at the end of the major axis, always. This ellipse is 205:1, so at
+	# any zoom where it fits on screen it is a *line* — and an unlabelled short line
+	# in a picture full of tracks and circles reads as an artifact, not as the thing
+	# the overlay was opened to see. The label goes on the end rather than beside
+	# the centre because the centre is inside the capture disc's fill.
+	# Under the LOWER end of the needle, not through `_label_at`. That helper places
+	# a caption radially outward from Earth, which is right for a mark on its own
+	# and wrong here: the ellipse's centre and the nominal cross are 5.43 km apart —
+	# a fifth of a pixel — so both captions would be pushed to the same spot and
+	# the first screenshot of this had them printed on top of each other. The
+	# b-point labels go radially out; this one goes down.
+	var tip_a := at + u * major_px
+	var tip_b := at - u * major_px
+	var tip: Vector2 = tip_a if tip_a.y > tip_b.y else tip_b
+	var txt := "1-SIGMA %s KM" % String.num(float(e["major_km"]), 1)
+	draw_string(_font, _clamp_to_plot(tip + Vector2(8, 14)), txt,
+		HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 3, Color(mid, 0.9))
+	# The centre, only once it is distinguishable from the ellipse around it.
+	if major_px > 8.0:
+		draw_line(at + Vector2(-3, 0), at + Vector2(3, 0), Color(mid, 0.8), 1.0)
+		draw_line(at + Vector2(0, -3), at + Vector2(0, 3), Color(mid, 0.8), 1.0)
+
+
+## The uncertainty readout — printed whenever the overlay is on, whether or not
+## the ellipse is large enough to see, because the numbers are the part that
+## survives the zoom level.
+##
+## `P(IMPACT)` and the capture radius are printed **together and never apart**.
+## The Mahalanobis distance the core can also report is deliberately absent: on
+## its own it reads as "how many sigma from a hit" and inverts the answer — the
+## designed hit sits thousands of ellipse-widths from Earth's centre and still has
+## P = 1, because all of that is inside an 11 000 km disc.
+func _draw_uncertainty_readout(x: float, y: float, lh: float, mid: Color,
+		dim: Color) -> float:
+	if not _uncertainty:
+		return y
+	draw_string(_font, Vector2(x, y), "-- ORBIT UNCERTAINTY (TIER 3) " + "-".repeat(6),
+		HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 1, Color(0.25, 0.25, 0.25))
+	var row := y + lh
+	if Sim.tier3_solving:
+		draw_string(_font, Vector2(x, row), "%-9s %s" % ["STATUS", "SOLVING - 13 PROPAGATIONS"],
+			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 1, mid)
+		return row + lh
+	if not Sim.tier3_online or Sim.tier3.is_empty():
+		draw_string(_font, Vector2(x, row), "%-9s %s" % ["STATUS", "NOT SOLVED - PRESS [U]"],
+			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 1, dim)
+		return row + lh
+
+	var e: Dictionary = Sim.tier3
+	var lines := [
+		# The word "synthetic" is not decoration. This rock is invented, so its
+		# covariance is a shape borrowed from real NEOs and not a measurement of
+		# anything; an ellipse drawn without saying so is a claim about how well this
+		# asteroid is tracked, and nobody tracks it.
+		["COVAR", "SYNTHETIC - ALONG-TRACK 20:1 (INVENTED ROCK)"],
+		["1-SIGMA", "%s x %s KM AT %s DEG FROM XI" % [
+			String.num(float(e["major_km"]), 1), String.num(float(e["minor_km"]), 2),
+			String.num(rad_to_deg(float(e["angle_rad"])), 1)]],
+		["P(IMPACT)", "%s  OVER THE %s KM CAPTURE DISC" % [
+			String.num(float(e["p_impact"]), 6), String.num(float(e["capture_km"]), 0)]],
+		["KNOWN TO", "x%s OF NOMINAL   [Z] BETTER / [X] WORSE" %
+			String.num(float(e["sigma_scale"]), 4)],
+		["SCOPE", "NOMINAL TRACK ONLY - NO DEFLECTED SPREAD"],
+	]
+	# Where the ellipse sits relative to the cross. Printed because the two are
+	# different reductions of one hyperbola and the gap between them is several
+	# minor axes wide — small on screen, and not small compared to the shape it is
+	# next to. Omitted when the core could not report it (no nominal b-point).
+	if e.has("mean_gap_km"):
+		lines.append(["CENTRE", "%s KM FROM THE NOMINAL CROSS (FIXED-EPOCH REDUCTION)" %
+			String.num(float(e["mean_gap_km"]), 2)])
+	for k in lines.size():
+		draw_string(_font, Vector2(x, row + k * lh), "%-9s %s" % [lines[k][0], lines[k][1]],
+			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 1, mid)
+	return row + lines.size() * lh
 
 
 # --------------------------------------------------------------- helpers ---

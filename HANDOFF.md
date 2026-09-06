@@ -55,8 +55,20 @@ Read this table first, then the session that owns the layer you are touching.
    the door appears as a 12× peak; 100× and it is a hard 0→1→0. See *P(impact) at
    the resonant return*. `uncertainty_sampling_plan` is unchanged — the return
    does not exist on the nominal, so its refusal never applied.
-3. **The Tier-3 ellipse on the Godot b-plane view** (the sensitivity solve is
-   ~17 s: an on-demand worker like the porkchop grid, not a build-path cost).
+3. ~~**The Tier-3 ellipse on the Godot b-plane view.**~~ **DONE 2026-09-06** —
+   `[U]` orders the solve on a worker (measured **34.6 s**, not the ~17 s this line
+   guessed) and holds it, so the σ knob on `[Z]`/`[X]` costs nothing. Two things
+   the item did not anticipate. The **frame** had to be settled first: the
+   sensitivity's b-plane basis is arbitrary-but-deterministic, so every *scalar*
+   is invariant under it but an **ellipse's orientation is not** — drawn in that
+   frame the picture would have had the right axis lengths at a rotation nobody
+   chose. The covariance is rotated into the view's pinned Öpik axes in the core,
+   and the two planes agree to `1.95e-10`. And the result points somewhere: the
+   1σ ellipse is **168.71 × 0.82 km lying 0.3° off `ζ̂`** — the *timing* axis,
+   which is the same direction a Δv nudge moves and the same direction the
+   resonant return's needle lies along. At the default zoom it is about **one
+   pixel**, and the view says so rather than fattening it. See *The uncertainty
+   ellipse on the b-plane*.
 4. **The keyhole width's order-unity slack, measured on more than one case.**
    The flown 3:4 sits 1.64 half-widths from its own circle and still returns
    inside Earth, so the linearised width is conservative by ~1.6× — on a sample
@@ -2668,3 +2680,178 @@ limit as onto a minimum, exactly as it converges onto a wall when unbracketed (t
 with**: `ζ₂` at six-decimal Δv is a ±271 km measurement being quoted to three
 significant figures. `probe_keyhole_floor.rs` exists so both are visible as
 arithmetic instead of arguable.
+
+---
+
+### The uncertainty ellipse on the b-plane — 2026-09-06 session (roadmap item 3: the deterministic picture given a spread, and the axis it turned out to lie on)
+
+`[U]` on the encounter view draws the Tier-3 1σ ellipse; `[Z]` / `[X]` turn a knob
+that asks the same question at a better- or worse-known orbit. The layer already
+existed in the core (`core/src/uncertainty.rs`, since July); what was missing was
+a way to *look* at it, and looking at it is what the whole §1 determinism caveat
+promises.
+
+**Shape of the thing.** `Σ_b = J Σ Jᵀ` splits into an expensive half and a free
+one: the Jacobian `J` is 13 propagations and describes the trajectory; the
+covariance `Σ` costs nothing and describes how well the orbit is known. So the
+solve rides a worker (an **eighth** independent channel beside the build, the
+Tier-2 preview, the grid, the verify, the mass solve, the tow probe and the
+anchor), lands once, and is then held — after which every press of the σ knob is
+a 2×2 matrix product. Measured **34.6 s** for the solve; the knob is free.
+
+#### The trap this was designed around, and the number that closed it
+
+`BPlaneSensitivity` carries a b-plane frame that `uncertainty.rs` calls
+*arbitrary-but-deterministic*: it seeds off whichever coordinate axis is least
+aligned with `Ŝ`. Every **scalar** that module reports is invariant under that
+choice, and its tests pin the invariance. **An ellipse's orientation is not a
+scalar.** Taking the angle out of that frame and drawing it on the view's pinned
+Öpik axes would give correct axis lengths at a rotation nobody chose — wrong in
+precisely the way that looks right, on the one screen whose entire job is that the
+picture and the numbers cannot disagree.
+
+So the covariance is rotated into `(ξ̂, ζ̂)` in the core, where the frame is
+already owned, and the rotation is *measured* rather than assumed:
+
+| | measured |
+|---|---|
+| `‖R Rᵀ − I‖∞` | **1.95e-10** |
+| nominal's out-of-plane component | **0.106 km**, against `\|B\|` 7 074 km |
+
+The two b-planes are the same plane to a part in five billion. They are not
+*identical* frames — the Öpik one is built on the closest-approach reduction and
+the sensitivity's nominal on the fixed-epoch one — but the disagreement is
+nowhere near enough to bend an ellipse. The worry was real and cost nothing to
+satisfy, which is the good outcome: it is now asserted in a test instead of
+believed.
+
+#### What it draws, and why the orientation is the interesting part
+
+At the shipping (synthetic) covariance:
+
+    1σ  168.71 × 0.82 km  —  205:1  —  lying 0.3° off ζ̂
+    P(impact) = 1.000000 over the 11 312 km capture disc
+
+**The spread is essentially pure `ζ`: the timing coordinate.** That is the same
+axis the keyhole work found a Δv nudge moves, and the same axis
+`probe_keyhole_probability` found the resonant return's needle lying along. Three
+independent measurements now say the same thing about this rock — what is
+uncertain about it, and what is controllable about it, are the *same direction* —
+and the ellipse is the first place it is visible rather than tabulated.
+
+#### Three drawing decisions, each settled by a measurement rather than a preference
+
+- **It is centred on its own mean, not on the drawn cross.** The cross is the
+  closest-approach reduction; the ellipse's centre is the fixed-epoch one its
+  Jacobian was differenced around. Measured **5.43 km apart — 6.6 minor axes**.
+  That is invisible on screen and enormous next to the shape it would have been
+  pinned to, so pairing them would have been centring one instrument's spread on
+  another instrument's position. The gap is printed in the readout.
+- **At the default zoom it is about one pixel, and the view says so instead of
+  drawing it.** 168.71 km against a 0.15 LD half-span (~58 000 km) is ~1 px; the
+  minor axis is a hundredth of that. Fattening it to something visible would be
+  drawing a spread the orbit does not have. A ring marks where it is, the caption
+  says `1-SIGMA < 1 PX - ZOOM IN`, and the axes are printed in kilometres
+  unconditionally. **The smallness is the finding**: this crossing is known to a
+  couple of hundred kilometres inside a disc eleven thousand kilometres wide —
+  the same shape of result as Apophis' real 18.2 × 0.48 km ellipse.
+- **The σ knob only bites upward, and that is the honest answer.** ×0.01 still
+  reads P = 1.000000; ×100 is the first setting where P leaves 1, at **0.407**
+  with a 16 871 km major axis. This rock is *designed* to hit, so a better-known
+  orbit cannot make it miss — what improves is the sharpness of a certainty, not
+  the certainty. The knob is still the layer's point: the same rock, the same
+  trajectory, an impact probability that moves because of how long anyone has been
+  watching.
+
+#### What was deliberately not put on screen
+
+- **`sigma_distance` (the Mahalanobis distance from Earth's centre).** Its own doc
+  warns it is "not 'how many σ from a hit', and reading it that way inverts the
+  answer" — the designed hit reads ~8 200 σ *with* P = 1. Printed beside P = 1 and
+  without the capture radius in the comparison, the panel would contradict itself,
+  which is the exact failure the b-plane view exists to end. `p_impact` and
+  `capture_km` are printed together and never apart.
+- **A 3σ ring.** `Σ_b = J Σ Jᵀ` is exact only for a linear map, and whether the
+  linearisation still describes the encounter at the edge of the covariance is
+  what `bplane_uncertainty_checked` measures — 25 propagations, ~28 s, not paid
+  here. A 3σ ring drawn off the bare Jacobian is a shape the code will not vouch
+  for, so only 1σ is drawn. **Open:** run the shell once and record whether the
+  ellipse is still an ellipse out there or the truth is a banana.
+- **A deflected ellipse.** The Jacobian is about the *nominal* seed, so there is
+  no spread for the planned track and the legend says so outright
+  (`ELLIPSE = 1-SIGMA, NOMINAL TRACK ONLY`). An ellipse on the cross beside a bare
+  diamond would read as "the deflection is certain" — the opposite of the caveat
+  this feature exists to honour.
+- **The word "synthetic" is on the panel, and is not decoration.** The rock is
+  invented, so its covariance is a shape borrowed from real NEOs
+  (`synthetic_along_track`, the same three constants `probe_tier3_uncertainty`
+  uses, so the panel and the probe cross-check) and not a measurement of anything.
+  An ellipse drawn without that word is a claim about how well this asteroid is
+  tracked, and nobody tracks it.
+
+#### The rotation already existed, and now there is one of it
+
+`probe_keyhole_map.rs` has computed exactly this rotation since July — same four
+dot products, same orthonormality guard — to draw the ellipse into the published
+b-plane map (`docs/keyhole_map.svg`). The binding was written with its own copy
+before that was noticed. Two hand-rolled copies of one rotation, feeding two
+pictures that must agree, with no way to check them against each other, is the
+shape of every frame bug this crate has found; so it is now one method,
+[`BPlaneBasis::rotation_to`], living with the arbitrariness that makes it
+necessary and taking plain axis vectors so nothing new is coupled. It returns the
+residual instead of gating on it, because what counts as coplanar-enough belongs
+to the caller.
+
+The payoff is a real cross-check rather than a tidiness argument. The published
+map records `sigma_axes_km: [168.709999, 0.818223]` at `89.736°`; the live view
+measures **168.710343 × 0.818218 at 89.737°**. Two entry points, two reductions of
+the nominal 0.05 km apart, one ellipse.
+
+#### Three faults the picture and the reviewer found that the tests did not
+
+- **`tier3_online` was never reset on a rebuild.** The Rust side drops the
+  Jacobian in `poll_build` — but the GDScript flag is set exactly once, inside
+  `_poll_tier3`, which returns early unless a solve is running. So after `[N]`
+  rebuilt the threat, `has_tier3()` was false while the flag stayed lit, the
+  cached dictionary kept handing the **old rock's** ellipse to the view to draw on
+  the **new rock's** b-plane, and `request_tier3` refused to re-solve because it
+  believed one was already in hand. Three failures from one missing line, and the
+  middle one is a picture quietly asserting something untrue about a different
+  asteroid. Fixed in `_invalidate_derived_views`, beside the `pork_online` reset
+  that exists for the identical reason. **No test could have caught it** — the
+  screenshot harness never rebuilds the threat.
+- **The readout was drawn on top of the HUD's event log.** Only a screenshot says
+  so: the pieces sharing that screen are drawn by three different nodes, and the
+  layout is not derivable from any one of them. Moved to the empty band above the
+  target card, with the reason recorded next to the constant.
+- **The three new keys had never been pressed.** The harness called
+  `toggle_uncertainty()` and `tier3_sigma_step()` directly, so the hand-written
+  action blocks in `project.godot` and the three dispatch branches in `main.gd` —
+  the whole path between the footer's promise and the method — were unexercised.
+  The harness now drives them through `InputMap` / `Input.parse_input_event`, the
+  way a player does, and prints whether each action is registered.
+
+[`BPlaneBasis::rotation_to`]: core/src/uncertainty.rs
+
+#### Where it lives
+
+- `godot/rust/src/mission_core.rs` — `Tier3View` (the held sensitivity plus the
+  rotation), `Tier3Ellipse`, and the kernel-gated
+  `the_tier3_ellipse_is_drawn_in_the_views_own_frame`, which is where every number
+  above is printed and four of them are asserted.
+- `godot/rust/src/lib.rs` — `begin_tier3` / `is_solving_tier3` / `poll_tier3` /
+  `has_tier3` / `tier3_set_sigma_log10` / `tier3_ellipse`, and the invalidation:
+  the sensitivity is dropped whenever a scenario is installed, because a Jacobian
+  is about one rock's trajectory and `[N]` can put a different rock on a different
+  orbit between one frame and the next. The σ knob is deliberately *not* reset —
+  "how well is the orbit known" is a question about the layer, not a property of
+  any one threat.
+- `godot/scripts/sim.gd` — `request_tier3`, `_poll_tier3`, `tier3_sigma_step`.
+- `godot/scripts/encounter.gd` — `_draw_uncertainty` and
+  `_draw_uncertainty_readout`.
+- `godot/tests/_shot.gd` — three shots (sub-pixel at the default zoom, the ellipse
+  zoomed to where it is a shape, the σ knob two decades wide), driven through the
+  real keybindings.
+- `core/src/uncertainty.rs` — `BPlaneBasis::rotation_to`, shared with
+  `core/examples/probe_keyhole_map.rs`, plus the kernel-free
+  `a_rotation_between_two_frames_of_one_plane_moves_the_angle_and_not_the_axes`.

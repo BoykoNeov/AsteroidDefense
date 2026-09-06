@@ -31,8 +31,8 @@ use mission_core::{
     measure_tier2_shifts, mount_small_bodies, probe_tow_plan, required_cell_mass, seed_orrery_body,
     solve_required_dv_anchor, tractor_readout as score_tractor_plan, verify_porkchop_cell,
     BuiltScenario, CellVerdict, KeyholePlanRow, MissionCore, OrreryBody, PorkchopView,
-    ThreatOrbitKnobs, Tier2Shifts, TractorPlan, REQUIRED_DV_LAW_MIN_PERIODS, SB441_BODIES,
-    THREAT_RADIUS_M, TRACTOR_HOVER_RADII,
+    ThreatOrbitKnobs, Tier2Shifts, Tier3View, TractorPlan, REQUIRED_DV_LAW_MIN_PERIODS,
+    SB441_BODIES, THREAT_RADIUS_M, TRACTOR_HOVER_RADII,
 };
 
 /// The launcher at a GDScript-supplied index, or `None` for a negative or
@@ -161,6 +161,29 @@ struct Mission {
     /// for is necessarily still the installed one when it lands. The pairing the
     /// other workers need is enforced here by exclusion instead.
     anchor_build: Option<mpsc::Receiver<Result<f64, String>>>,
+    /// The in-flight Tier-3 sensitivity solve — an **eighth** independent channel,
+    /// for the reason every one before it got its own: the b-plane's uncertainty
+    /// layer is asked for from a different screen than the grid, the verify and the
+    /// tow probe, and none of them should be able to block or cancel another.
+    tier3_build: Option<mpsc::Receiver<Result<Tier3View, String>>>,
+    /// The solved sensitivity — 13 propagations' worth of `∂(b-plane)/∂(state)`,
+    /// plus the rotation onto the view's axes.
+    ///
+    /// Held rather than re-solved because holding it is the point: mapping a
+    /// covariance through it is free, so the σ knob below costs nothing per press.
+    /// Dropped whenever a new scenario is installed, on exactly the reasoning
+    /// `porkchop` is dropped there — a Jacobian is about *one* rock's trajectory,
+    /// and `[N]` can put a different rock on a different orbit between one frame
+    /// and the next.
+    tier3: Option<Tier3View>,
+    /// How far the σ knob is turned, in **decades** — the covariance is the
+    /// probe's, with both blocks multiplied by `10^this`.
+    ///
+    /// Stored as the exponent rather than the multiplier so gdext's derived `init`
+    /// gives the right default for free: `0.0` is `10^0 = 1`, the shipping
+    /// covariance exactly. A multiplier field would default to `0.0`, i.e. an
+    /// orbit known perfectly, which is both wrong and the flattering direction.
+    tier3_sigma_log10: f64,
     /// Whether the **most recent** build attempt failed.
     ///
     /// Distinct from `!is_ready()`, and the distinction only started existing when
@@ -569,6 +592,15 @@ impl Mission {
                         // probe stopped being unreachable and became one keypress
                         // away.
                         self.tow_probe = None;
+                        // …and the Tier-3 sensitivity, for the sharpest version of
+                        // the same reason. It is a Jacobian about one seed state:
+                        // against a rebuilt threat it would keep drawing the old
+                        // rock's ellipse on the new rock's b-plane, at axis lengths
+                        // and an angle that are individually plausible and jointly
+                        // about nothing. The σ knob is deliberately *not* reset —
+                        // "how well is the orbit known" is an operator's question
+                        // about the layer, not a property of any one threat.
+                        self.tier3 = None;
                         self.error = GString::new();
                     }
                     // The kernels were dropped (a failed re-load) while the build
@@ -766,6 +798,154 @@ impl Mission {
     #[func]
     fn has_porkchop(&self) -> bool {
         self.porkchop.is_some()
+    }
+
+    // --- The Tier-3 uncertainty ellipse (HANDOFF §7) ------------------------
+
+    /// Solve the b-plane sensitivity on a worker — the expensive half of the
+    /// uncertainty layer, paid once.
+    ///
+    /// **13 propagations, ~17 s.** Everything after it is free: the ellipse for any
+    /// covariance is a 2×2 matrix product, which is why the σ knob can be on the
+    /// arrow keys. Needs a built scenario, not merely kernels.
+    ///
+    /// Returns `false` — with a reason in [`last_error`](Self::last_error) — if a
+    /// solve is already running or there is nothing to solve against.
+    #[func]
+    fn begin_tier3(&mut self) -> bool {
+        if self.tier3_build.is_some() {
+            return false; // already solving — not an error
+        }
+        let Some(core) = self.core.as_ref() else {
+            self.error = "load() must succeed before begin_tier3()".into();
+            return false;
+        };
+        let Some(scenario) = core.scenario_arc() else {
+            self.error = "build the scenario before solving the Tier-3 ellipse".into();
+            return false;
+        };
+        // The axes the picture will use, captured now and carried to the worker —
+        // see `MissionCore::display_basis` for why they are not re-derived there.
+        let Some(basis) = core.display_basis() else {
+            self.error = "the encounter has no b-plane frame to draw an ellipse in".into();
+            return false;
+        };
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = Tier3View::build(&scenario, basis).map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+        self.tier3_build = Some(rx);
+        self.error = GString::new();
+        true
+    }
+
+    /// Whether the Tier-3 sensitivity solve is in flight.
+    #[func]
+    fn is_solving_tier3(&self) -> bool {
+        self.tier3_build.is_some()
+    }
+
+    /// Pump the Tier-3 worker. `true` while **still running**, `false` once
+    /// finished (or none in flight) — then [`has_tier3`](Self::has_tier3) says
+    /// whether it succeeded. Non-blocking; safe every frame.
+    #[func]
+    fn poll_tier3(&mut self) -> bool {
+        let Some(rx) = self.tier3_build.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Ok(Ok(view)) => {
+                self.tier3_build = None;
+                self.tier3 = Some(view);
+                self.error = GString::new();
+                false
+            }
+            Ok(Err(message)) => {
+                self.tier3_build = None;
+                self.error = message.as_str().into();
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.tier3_build = None;
+                self.error = "the Tier-3 solve thread died without reporting".into();
+                false
+            }
+        }
+    }
+
+    /// Whether a solved sensitivity is available to map covariances through.
+    #[func]
+    fn has_tier3(&self) -> bool {
+        self.tier3.is_some()
+    }
+
+    /// Turn the σ knob to `decades` — the synthetic covariance with both blocks
+    /// multiplied by `10^decades`. `0.0` is the shipping covariance.
+    ///
+    /// Free: no propagation, and the next
+    /// [`tier3_ellipse`](Self::tier3_ellipse) read reflects it. That is the whole
+    /// argument for holding the Jacobian, and the comparison it buys — the same
+    /// rock, the same trajectory, an impact probability that moves orders of
+    /// magnitude purely on how long anyone has been watching — is the Tier-3
+    /// lesson the deterministic view cannot show.
+    #[func]
+    fn tier3_set_sigma_log10(&mut self, decades: f64) {
+        if decades.is_finite() {
+            self.tier3_sigma_log10 = decades;
+        }
+    }
+
+    /// Where the σ knob is, in decades.
+    #[func]
+    fn tier3_sigma_log10(&self) -> f64 {
+        self.tier3_sigma_log10
+    }
+
+    /// The 1σ b-plane ellipse at the current σ knob, in the **view's own** `(ξ, ζ)`
+    /// kilometres — or an empty dictionary before the sensitivity is solved.
+    ///
+    /// `mean_xi_km` / `mean_zeta_km` centre it. **That centre is the fixed-epoch
+    /// reduction, which is not the reduction the drawn nominal cross uses** — the
+    /// two differ by `mean_gap_km`, reported here so a caller can decide rather
+    /// than discover. `frame_residual` and `out_of_plane_km` are the coplanarity
+    /// checks on the rotation (see `Tier3View`).
+    ///
+    /// `p_impact` is over the disc of `capture_km`, and the pair has to be read
+    /// together: the campaign's designed hit is thousands of ellipse-widths from
+    /// Earth's *centre* and still `p_impact = 1`, because all of that sits inside a
+    /// disc 11 000 km wide. `sigma_distance` is deliberately **not** exposed —
+    /// on its own it reads as "how many σ from a hit" and inverts the answer.
+    #[func]
+    fn tier3_ellipse(&self) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        let (Some(view), Some(core)) = (self.tier3.as_ref(), self.core.as_ref()) else {
+            return d;
+        };
+        let Some(e) = view.map(10.0_f64.powf(self.tier3_sigma_log10)) else {
+            return d;
+        };
+        d.set("mean_xi_km", e.mean_km.0);
+        d.set("mean_zeta_km", e.mean_km.1);
+        d.set("major_km", e.major_km);
+        d.set("minor_km", e.minor_km);
+        d.set("angle_rad", e.angle_rad);
+        d.set("capture_km", e.capture_km);
+        d.set("p_impact", e.impact_probability);
+        d.set("sigma_scale", e.sigma_scale);
+        d.set("frame_residual", view.frame_residual());
+        d.set("out_of_plane_km", view.out_of_plane_km());
+        // How far the ellipse's own centre sits from the cross the view draws.
+        // Both are honest reductions of one hyperbola; they are not one number, and
+        // a picture that silently pairs them is a picture pairing two instruments.
+        if let Some(b) = core.nominal_b_point_km() {
+            d.set(
+                "mean_gap_km",
+                ((b.x - e.mean_km.0).powi(2) + (b.y - e.mean_km.1).powi(2)).sqrt(),
+            );
+        }
+        d
     }
 
     /// Rows in the grid (launch epochs); `0` if none is built.

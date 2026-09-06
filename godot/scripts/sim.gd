@@ -520,6 +520,7 @@ func _process(delta: float) -> void:
 	_poll_required_mass()
 	_poll_tow_probe()
 	_poll_anchor_solve()
+	_poll_tier3()
 	_tick_plan_debounce(delta)
 
 	if paused:
@@ -793,6 +794,19 @@ func _invalidate_derived_views() -> void:
 
 	# The tractor probe result is dropped in Rust; this is the flag beside it.
 	tractor_probing = false
+
+	# The Tier-3 sensitivity, and it is the sharpest case of this whole function's
+	# argument. Rust drops the Jacobian in `poll_build`, but `tier3_online` is set
+	# from `has_tier3()` exactly once — inside `_poll_tier3`, which returns early
+	# unless a solve is running — so without this the flag stays lit over a
+	# sensitivity that no longer exists, `tier3` keeps handing out the OLD rock's
+	# ellipse for the view to draw on the NEW rock's b-plane, and `request_tier3`
+	# refuses to re-solve because it thinks one is already in hand. Three failures
+	# from one missing line, and the middle one is a picture quietly asserting
+	# something untrue about a different asteroid.
+	tier3_online = false
+	tier3_solving = false
+	tier3 = {}
 
 
 ## Adopt the core's threat orbit as the panel's starting point — the knobs read
@@ -2339,6 +2353,105 @@ func perigee_ld(deflected: bool) -> float:
 		return -1.0
 	var m: float = mission.deflected_perigee_m() if deflected else mission.nominal_perigee_m()
 	return -1.0 if m < 0.0 else m / 1000.0 / LD_KM
+
+
+
+# ------------------------------------ Tier-3 uncertainty ([U], HANDOFF §7) ---
+# The b-plane view's honest answer: not "does this rock hit" but "given what is
+# actually known about where it is, how much of that spread lands on Earth".
+#
+# **Two halves, and the split is the whole design.** `Sigma_b = J Sigma J^T` — the
+# Jacobian J describes the trajectory and costs 13 propagations (~17 s, worker
+# only); the covariance Sigma describes how well the orbit is known and costs
+# nothing. Solve J once, hold it, and "the same rock, better observed" is a
+# keypress. That comparison is what Tier 3 exists to teach, and it is the one
+# thing the deterministic hit/miss picture structurally cannot show.
+#
+# `tier3_online` is its own flag beside `mission_online` and `pork_online`, for
+# the reason those two are separate: a threat solution does not imply a solved
+# sensitivity, and a view that gated on the wrong one would draw a blank overlay
+# as though the uncertainty had been measured and found to be nothing.
+
+## How far one [Z]/[X] press turns the sigma knob, in decades. A tenth-decade step
+## would need thirty presses to cross the interesting range; a whole decade is the
+## granularity the lesson actually has.
+const TIER3_SIGMA_STEP := 0.5
+## The knob's reach in each direction, matching the core's own clamp
+## (`TIER3_SCALE_DECADES`). Kept here as well so the readout can say when the knob
+## is against its stop rather than silently doing nothing.
+const TIER3_SIGMA_MAX := 3.0
+
+var tier3_online := false          # a solved sensitivity is readable
+var tier3_solving := false         # the ~17 s worker is running
+## The mapped ellipse at the current knob, straight from `Mission.tier3_ellipse()`.
+## Empty until solved. Refetched when the solve lands and on every knob press —
+## never per frame, though it would be cheap: a per-frame native call for a value
+## that changes on keypress is the habit that made the 2D map cost 18.9 ms.
+var tier3 := {}
+
+signal tier3_changed
+
+
+## Kick off the sensitivity solve on a worker. On demand, like the launch-window
+## grid, and for a stronger reason: 17 s on the build path would double the wait
+## before the player sees a threat at all.
+##
+## A no-op if there is no threat, one is already solved, or one is in flight.
+func request_tier3() -> void:
+	if not mission_online or tier3_online or tier3_solving:
+		return
+	if mission.begin_tier3():
+		tier3_solving = true
+		event_logged.emit(_stamp(t) + "  SOLVING B-PLANE SENSITIVITY - 13 PROPAGATIONS")
+
+
+## Pump the sensitivity worker; pull the ellipse in when it lands. Mirrors
+## `_poll_porkchop`.
+func _poll_tier3() -> void:
+	if not tier3_solving:
+		return
+	if mission.poll_tier3():
+		return
+	tier3_solving = false
+	tier3_online = mission.has_tier3()
+	if not tier3_online:
+		event_logged.emit(_stamp(t) + "  SENSITIVITY SOLVE FAILED - " + str(mission.last_error()))
+		return
+	_fetch_tier3()
+	event_logged.emit(_stamp(t) + "  UNCERTAINTY ONLINE - 1-SIGMA %s x %s KM, P(IMPACT) %s" %
+		[String.num(tier3.get("major_km", 0.0), 1), String.num(tier3.get("minor_km", 0.0), 2),
+		String.num(tier3.get("p_impact", 0.0), 4)])
+
+
+func _fetch_tier3() -> void:
+	tier3 = mission.tier3_ellipse()
+	tier3_changed.emit()
+
+
+## Turn the sigma knob by `decades` — how well the orbit is assumed to be known.
+##
+## Free: the held Jacobian is remapped, no propagation. Both blocks of the
+## covariance scale together, which is what the core's own doc says to do —
+## scaling the along-track velocity alone barely moves the answer, because at the
+## shipping numbers the position block contributes most of the ellipse.
+func tier3_sigma_step(decades: float) -> void:
+	if not tier3_online:
+		return
+	var was: float = mission.tier3_sigma_log10()
+	var now: float = clampf(was + decades, -TIER3_SIGMA_MAX, TIER3_SIGMA_MAX)
+	if is_equal_approx(now, was):
+		event_logged.emit("SIGMA KNOB AT ITS STOP - x%s" % String.num(pow(10.0, now), 4))
+		return
+	mission.tier3_set_sigma_log10(now)
+	_fetch_tier3()
+	event_logged.emit("ORBIT KNOWN TO x%s OF NOMINAL - 1-SIGMA %s KM, P(IMPACT) %s" %
+		[String.num(pow(10.0, now), 4), String.num(tier3.get("major_km", 0.0), 1),
+		String.num(tier3.get("p_impact", 0.0), 6)])
+
+
+## The knob's position in decades — 0 is the shipping (synthetic) covariance.
+func tier3_sigma_log10() -> float:
+	return mission.tier3_sigma_log10() if mission_online else 0.0
 
 
 # ------------------------------------------------- encounter geometry (f64) ---

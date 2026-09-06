@@ -151,7 +151,9 @@ fn main() {
         std::process::exit(1);
     }
 
-    println!("{RESONANCE} floor resolution: {rungs} flights over Δv {centre:.10} ± {half_width:.1e} m/s");
+    println!(
+        "{RESONANCE} floor resolution: {rungs} flights over Δv {centre:.10} ± {half_width:.1e} m/s"
+    );
 
     let t = Instant::now();
     let scenario = match RealFieldScenario::build(&ImpactorConfig::default()) {

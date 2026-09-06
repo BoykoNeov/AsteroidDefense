@@ -33,7 +33,7 @@ use asteroid_core::{
     along_track_unit, closest_approach, EphemerisPerturber, Epoch, ImpactorConfig, OpikFrame,
     RealFieldScenario, ResonantCircle, ScanOptions, StateCovariance, AU_M,
 };
-use nalgebra::{Matrix2, Vector2, Vector3};
+use nalgebra::{Vector2, Vector3};
 use std::fmt::Write as _;
 use std::time::Instant;
 
@@ -151,13 +151,11 @@ fn main() {
     let cov = StateCovariance::synthetic_along_track(seed, 5.0e-5, 20.0, 1.0e3)
         .expect("non-degenerate seed");
     let unc = sens.map(&cov);
-    let rot = Matrix2::new(
-        frame.xi_hat.dot(&sens.basis.e1),
-        frame.xi_hat.dot(&sens.basis.e2),
-        frame.zeta_hat.dot(&sens.basis.e1),
-        frame.zeta_hat.dot(&sens.basis.e2),
-    );
-    let orth = (rot * rot.transpose() - Matrix2::identity()).norm();
+    // Through the basis' own method since 2026-09-06, not six lines here. The
+    // gdext binding's `Tier3View` needs exactly this rotation to draw the ellipse
+    // on the b-plane view's axes, and two copies of it would be two pictures that
+    // must agree with no way to check.
+    let (rot, orth) = sens.basis.rotation_to(frame.xi_hat, frame.zeta_hat);
     if orth > 1e-9 {
         eprintln!("*** basis change is not orthonormal ({orth:.3e}): the two frames share no Ŝ");
         std::process::exit(1);

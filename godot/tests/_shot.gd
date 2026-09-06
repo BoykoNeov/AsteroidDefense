@@ -203,6 +203,59 @@ func _run() -> void:
 	await _shot("enc_7_keyholes_off")
 	main.enc.toggle_keyholes()
 
+	# 6c. THE TIER-3 UNCERTAINTY OVERLAY — [U]. Three pictures, because one would
+	#     not be honest about any of them.
+	#
+	#     The overlay is the first thing on this screen that cannot be drawn the
+	#     frame it is asked for: the sensitivity behind it is 13 propagations. So
+	#     the first shot is deliberately taken at the DEFAULT zoom, where the 1σ
+	#     ellipse is ~1 px across and the view says so instead of drawing it. That
+	#     is the finding, not a failure — the crossing of this rock is known to a
+	#     couple of hundred kilometres inside a capture disc eleven thousand
+	#     kilometres wide, and a shape fattened up to be visible would be a lie
+	#     about how well the orbit is known.
+	#     The keys are exercised through the InputMap, not by calling the methods:
+	#     the footer promises [U] and [Z]/[X] to a player, and three hand-written
+	#     action blocks in project.godot plus three dispatch branches in main.gd sit
+	#     between that promise and the method. Calling the method directly would
+	#     test everything except the part that was typed by hand.
+	main._show_view(main.enc)
+	for a in ["encounter_uncertainty", "encounter_sigma_down", "encounter_sigma_up"]:
+		print("SHOT  action %s registered=%s events=%d" % [a, InputMap.has_action(a),
+			InputMap.action_get_events(a).size() if InputMap.has_action(a) else 0])
+	await _press("encounter_uncertainty")
+	var tu0 := Time.get_ticks_msec()
+	while Sim.tier3_solving and Time.get_ticks_msec() - tu0 < 180000:
+		await get_tree().process_frame
+	print("SHOT  tier3_online=%s after %d ms" % [Sim.tier3_online, Time.get_ticks_msec() - tu0])
+	print("SHOT  tier3 ellipse: %s" % Sim.tier3)
+	await _settle(4)
+	await _shot("enc_9_uncertainty_subpixel")
+
+	#     Zoomed to where the ellipse is a shape. It comes out lying almost exactly
+	#     along ζ̂ — the TIMING axis — which is the same coordinate the keyhole work
+	#     found a Δv nudge moves. Worth a picture: it is the reason the core rotates
+	#     the covariance into this view's frame instead of reporting an angle in the
+	#     arbitrary frame the sensitivity was solved in, where it would have pointed
+	#     nowhere in particular.
+	main.enc._half_ld = 0.025
+	await _settle(3)
+	await _shot("enc_10_uncertainty_ellipse")
+
+	#     And the σ knob, the layer's actual lesson: the same rock, the same
+	#     trajectory, a spread that grows purely because the orbit is assumed less
+	#     well observed. Two decades wider is where P finally leaves 1.
+	main.enc._half_ld = 0.15
+	for _k in 4:
+		await _press("encounter_sigma_up")
+	await _settle(3)
+	await _shot("enc_11_uncertainty_sigma_x100")
+	print("SHOT  tier3 at x100: major %s km, P %s"
+		% [Sim.tier3.get("major_km", 0.0), Sim.tier3.get("p_impact", 0.0)])
+	for _k in 4:
+		await _press("encounter_sigma_down")
+	await _press("encounter_uncertainty")
+
 	# 7. The planner beside it — the two panels must agree, and this is the pair a
 	#    player reads against each other.
 	main._show_view(null)
@@ -283,6 +336,24 @@ func _keyhole_widths_at(dv: float) -> float:
 	await _settle(1)
 	var row: Dictionary = Sim.plan_keyhole.get("tightest", {})
 	return row.get("widths_away", INF) if not row.is_empty() else INF
+
+
+## Press one mapped action the way a player does — through `_unhandled_input`, so
+## the binding in project.godot and the dispatch branch in main.gd are both on the
+## path. `Input.parse_input_event` is the only way to reach that from a script.
+func _press(action: String) -> void:
+	var events: Array[InputEvent] = InputMap.action_get_events(action)
+	if events.is_empty():
+		print("SHOT  FAIL: action %s has no binding" % action)
+		return
+	var down: InputEvent = events[0].duplicate()
+	down.pressed = true
+	Input.parse_input_event(down)
+	await _settle(2)
+	var up: InputEvent = events[0].duplicate()
+	up.pressed = false
+	Input.parse_input_event(up)
+	await _settle(1)
 
 
 func _settle(frames: int) -> void:

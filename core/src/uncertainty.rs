@@ -419,6 +419,47 @@ impl BPlaneBasis {
     pub fn project(&self, enc: &BPlaneEncounter) -> Vector2<f64> {
         Vector2::new(enc.b_vector.dot(&self.e1), enc.b_vector.dot(&self.e2))
     }
+
+    /// The 2×2 that re-expresses a vector's components in **this** frame as its
+    /// components in a caller's own in-plane axes, together with `‖R Rᵀ − I‖∞`.
+    ///
+    /// This exists because [`from_encounter`](Self::from_encounter) is
+    /// deliberately arbitrary, and that arbitrariness is only harmless for
+    /// *scalars*. Every number this module reports — the axis lengths, the
+    /// probability, the σ-distance — is invariant under the choice and the tests
+    /// pin the invariance. **An ellipse's orientation is not.** Any caller that
+    /// draws the covariance, rather than reducing it to scalars, has to move it
+    /// into axes that mean something first, and `Σ' = R Σ Rᵀ` is how.
+    ///
+    /// It is a method rather than six lines at each call site because there are
+    /// already two call sites — `probe_keyhole_map` and the gdext binding's
+    /// `Tier3View` — and they must produce the same picture. Two hand-rolled
+    /// copies of one rotation that can never be checked against each other is the
+    /// shape of every frame bug this crate has found so far.
+    ///
+    /// **The residual is returned rather than checked here**, because what counts
+    /// as "close enough to coplanar" belongs to the caller: `e1`/`e2` are only
+    /// guaranteed to span this plane if they came from the *same* asymptote, and
+    /// a caller mixing two reductions of one hyperbola (a fixed-epoch nominal
+    /// against a closest-approach frame, say) will legitimately see a small
+    /// non-zero value. Measured for that pairing on the shipping campaign:
+    /// **1.95e-10**. A caller whose axes are genuinely out of plane gets a number
+    /// of order one, which no sane gate passes.
+    ///
+    /// `e1` and `e2` need not be normalised — but if they are not, `R` is not a
+    /// rotation and the residual will say so.
+    pub fn rotation_to(&self, e1: Vector3<f64>, e2: Vector3<f64>) -> (Matrix2<f64>, f64) {
+        let r = Matrix2::new(
+            e1.dot(&self.e1),
+            e1.dot(&self.e2),
+            e2.dot(&self.e1),
+            e2.dot(&self.e2),
+        );
+        let residual = (r * r.transpose() - Matrix2::identity())
+            .iter()
+            .fold(0.0_f64, |m, v| m.max(v.abs()));
+        (r, residual)
+    }
 }
 
 /// Central-difference Jacobian `∂(b-plane coordinates)/∂(initial state)`, a 2×6.
@@ -1068,6 +1109,77 @@ mod tests {
             s_hat: s.normalize(),
             b_vector: b,
         }
+    }
+
+    /// [`BPlaneBasis::rotation_to`] must be an orthogonal similarity for any axes
+    /// that span the same plane, and must **say so loudly** for axes that do not.
+    ///
+    /// Kernel-free, and it checks the property that actually matters to a caller
+    /// drawing an ellipse: the eigenvalues survive (so the axis *lengths* are
+    /// untouched) while the eigenvectors move (so the *orientation* becomes
+    /// meaningful). A rotation that quietly changed the axis lengths would still
+    /// produce a plausible picture, which is exactly why this is asserted rather
+    /// than assumed.
+    #[test]
+    fn a_rotation_between_two_frames_of_one_plane_moves_the_angle_and_not_the_axes() {
+        let enc = encounter_with_s(
+            Vector3::new(0.3, -0.5, 0.81),
+            Vector3::new(4.0e6, 1.0e6, -1.1e6),
+            1.1e7,
+        );
+        let basis = BPlaneBasis::from_encounter(&enc);
+
+        // Its own axes: the identity, exactly.
+        let (r_id, res_id) = basis.rotation_to(basis.e1, basis.e2);
+        assert!(res_id < 1e-14, "self-rotation residual {res_id:.3e}");
+        assert!((r_id - Matrix2::identity()).norm() < 1e-14);
+
+        // A 30° turn of the same plane. Still orthonormal, and it must move an
+        // ellipse's angle by exactly 30°.
+        let (c, s) = (30.0_f64.to_radians().cos(), 30.0_f64.to_radians().sin());
+        let f1 = basis.e1 * c + basis.e2 * s;
+        let f2 = -basis.e1 * s + basis.e2 * c;
+        let (rot, res) = basis.rotation_to(f1, f2);
+        assert!(res < 1e-14, "in-plane rotation residual {res:.3e}");
+
+        let cov = Matrix2::new(4.0e6, 1.0e5, 1.0e5, 9.0e4);
+        let turned = rot * cov * rot.transpose();
+        let (mut a, mut b) = (cov.symmetric_eigen(), turned.symmetric_eigen());
+        let mut ev = |e: &mut nalgebra::SymmetricEigen<f64, nalgebra::U2>| {
+            let mut l = [e.eigenvalues[0], e.eigenvalues[1]];
+            if l[1] > l[0] {
+                l.swap(0, 1);
+            }
+            l
+        };
+        let (la, lb) = (ev(&mut a), ev(&mut b));
+        for k in 0..2 {
+            assert!(
+                (la[k] - lb[k]).abs() / la[k] < 1e-12,
+                "eigenvalue {k} moved: {} vs {}",
+                la[k],
+                lb[k]
+            );
+        }
+        let ang = |m: Matrix2<f64>| {
+            let e = m.symmetric_eigen();
+            let i = usize::from(e.eigenvalues[1] > e.eigenvalues[0]);
+            let v = e.eigenvectors.column(i);
+            v[1].atan2(v[0]).to_degrees()
+        };
+        let moved = (ang(turned) - ang(cov) + 180.0).rem_euclid(180.0);
+        assert!(
+            (moved - 150.0).abs() < 1e-9,
+            "a 30° change of axes must move the drawn angle by 30° (mod 180); got {moved}"
+        );
+
+        // Axes that are NOT in this plane: the residual has to be of order one, so
+        // no caller's gate can mistake them for a frame of the same plane.
+        let (_, bad) = basis.rotation_to(enc.s_hat, basis.e1);
+        assert!(
+            bad > 0.1,
+            "out-of-plane axes must give a large residual, got {bad:.3e}"
+        );
     }
 
     #[test]

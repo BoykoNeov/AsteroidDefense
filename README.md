@@ -56,15 +56,24 @@ regression test.
 *The b-plane of the 2040-01-01 encounter: Earth's gravitationally-focused capture
 disc, the resonant-return circles (each a place where a miss sets up a return
 `h` years later), the flown ±0.2 m/s deflections, and the uncertainty ellipse —
-sub-kilometre and along ζ, because along-track uncertainty is timing
-uncertainty. An interactive version is generated at `docs/keyhole_map.html`.*
+a needle **169 km long and 0.82 km across, lying 0.3° off ζ**, because along-track
+uncertainty is timing uncertainty. An interactive version is generated at
+`docs/keyhole_map.html`.*
+
+That same ellipse is now on the **live** b-plane view: `[U]` orders the
+sensitivity solve on a worker and holds it, so `[Z]`/`[X]` can ask the question
+again at a better- or worse-known orbit for free. It reproduces the map's
+168.710 × 0.818 km at 89.7° through an independent path, and at the default zoom
+it is about **one pixel** — which the view says outright rather than fattening it,
+because that smallness is the finding.
 
 **What is next** (in order, spelled out in `HANDOFF.md` → *Where things stand*):
-the Tier-3 ellipse on the Godot b-plane view; more flown resonances to calibrate
-the keyhole width's placement slack; the dop853→IAS15 crossover for the
-multi-revolution returns; then Phase 3. Keyhole targeting, the impact probability
-near a keyhole, and real orbit covariances from the JPL Small-Body Database all
-landed in 2026-09.
+more flown resonances to calibrate the keyhole width's placement slack; then
+Phase 3. Keyhole targeting, the impact probability near a keyhole, real orbit
+covariances from the JPL Small-Body Database, and the Tier-3 ellipse on the Godot
+b-plane view all landed in 2026-09 — as did the dop853→IAS15 question, which was
+**retired by measurement** rather than built: dop853 is already converged where it
+ships, and a second integrator has no oracle to prove anything against.
 
 If you're reading the code: **`HANDOFF.md` is the source of truth** for *why*
 things are the way they are, and **`DEVELOPING.md`** for how to build, test and

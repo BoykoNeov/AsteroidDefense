@@ -258,6 +258,17 @@ func _input(event: InputEvent) -> void:
 		_jump_to_closest_approach()
 	elif enc.visible and event.is_action_pressed("encounter_keyholes"):
 		enc.toggle_keyholes()
+	elif enc.visible and event.is_action_pressed("encounter_uncertainty"):
+		enc.toggle_uncertainty()
+	# The sigma knob, guarded on the b-plane view like the two above. [Z]/[X] rather
+	# than the arrows because the arrows are already spoken for three times over
+	# (planner lead, launch-window cursor, tractor knobs) and a fourth claimant
+	# resolved by guard order is how a keypress starts meaning different things
+	# depending on which panel happens to be open.
+	elif enc.visible and event.is_action_pressed("encounter_sigma_down"):
+		Sim.tier3_sigma_step(-Sim.TIER3_SIGMA_STEP)
+	elif enc.visible and event.is_action_pressed("encounter_sigma_up"):
+		Sim.tier3_sigma_step(Sim.TIER3_SIGMA_STEP)
 	# The porkchop's cursor keys are checked BEFORE the planner's, and both are
 	# guarded on their own view being up. LEFT/RIGHT are shared with the planner's
 	# lead adjust, so whichever guard matches first in this chain wins — when the

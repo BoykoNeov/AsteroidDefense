@@ -76,6 +76,19 @@ use crate::state::StateVector;
 /// otherwise silently change the covariance answer while everything kept working.
 /// [`cadence_is_pinned`](self) guards it: change this constant and re-measure, or
 /// the test fails.
+///
+/// **What that +118 m actually is, measured 2026-09-06
+/// (`probe_integrator_convergence`): a step-size error, controlled by
+/// [`ImpactorConfig::forward_rtol`](crate::ImpactorConfig::forward_rtol) rather than
+/// by the cadence.** At `rtol = 1e-13` the same 10-day cadence sits **0.36 m** from
+/// the 1-day answer instead of 118 m, and costs 1.53 s against 1.56 s — the same wall
+/// clock. Nothing here changes as a result, and that is the point: re-measuring the
+/// column at both tolerances moves `∂(perigee)/∂v_along` by **0.0225 %**, which is the
+/// 0.024 % the cancellation argument above already predicted. So the cadence bias
+/// never was in the derivative, and this constant stays at ten days on the same
+/// reasoning it always had. The tolerance pairing is worth knowing about only if this
+/// module ever starts reading an *absolute* b-plane position rather than a difference
+/// of two — drawing the ellipse on the frontend, for instance.
 pub const SAMPLE_CADENCE_DAYS: f64 = 10.0;
 
 /// Central-difference step for the three **position** columns, metres.

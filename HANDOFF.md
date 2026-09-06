@@ -25,6 +25,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **Tier 3b: keyholes** — Öpik (ξ, ζ) frame and b-vector sign pinned, resonant circles in closed form, keyhole widths, the keyhole map, **the 3:4 keyhole flown to a return impact** | **done 2026-09-02** | `core/src/keyhole.rs`, `examples/probe_keyhole_{map,return}.rs`, `docs/keyhole_map.*` |
 | **Tier 3c: keyhole targeting** — aim at any resonance on either branch, fly it, refine to the floor, and read the return in **its own** Öpik frame; the planner's `KEYHOLE` row | **done 2026-09-05** | `core/src/keyhole_target.rs`, `godot/scripts/{sim,planner}.gd` |
 | **Tier 3d: P(impact) at the resonant return** — the covariance flown through *both* encounters (the chaining is in the propagation, not a matrix product), finite-difference steps re-measured on the return, the chained gain checked against the closed form to 14 % | **done 2026-09-06**; the answer is set by how well the orbit is known, not how well the impulse is aimed | `core/src/keyhole_target.rs`, `core/examples/probe_keyhole_probability.rs` |
+| **Integrator convergence** — the forward tolerance swept `1e-9…1e-13` against the 12-yr campaign and the 15-yr keyhole return, crossed with the snapshot cadence; the bit-for-bit determinism gate; the flyby's amplification measured | **done 2026-09-06**; every published number is converged, but because the 1-day cadence **caps the step** — the same tolerance uncapped is 129 km off. **IAS15 retired, not deferred** (no oracle exists for it) | `core/examples/probe_integrator_convergence.rs`, `ImpactorConfig::forward_rtol` |
 | Godot frontend: DE440 orrery, real NEO scenery, planner, b-plane view (with the keyhole map, `[H]`), launch-window map, Tier-2 force menu, tractor bench, threat-orbit knob | done; keyhole overlay **seen on screen 2026-09-05** and its captions budgeted | `godot/`, `godot/rust/` |
 | Godot visual/perf pass: 3D world in its own viewport with 4× MSAA and phosphor persistence (peak-hold trails), per-frame position memo, cached 2D orbit traces, the `_perf.gd` frame-time harness and `run_harness.ps1` | done 2026-09-05; the 2D map went 18.9 → 7.1 ms/frame, native calls/frame 764 → 29; follow-ups in `docs/plans/2026-09-05-visuals-performance-followups.md` | `godot/scripts/main.gd`, `godot/shaders/phosphor_persist.gdshader`, `godot/tests/` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
@@ -71,8 +72,21 @@ Read this table first, then the session that owns the layer you are touching.
    linearised width is conservative by **1.17×**, not ~1.6×. That is a
    *differential* calibration and it does not touch the *placement* question the
    1.64 half-widths describes, which is what still wants more flown resonances.
-5. **dop853 → IAS15 crossover**, now that 15-year multi-revolution arcs (the
-   keyhole returns) are in the pipeline and the question has a customer.
+5. ~~**dop853 → IAS15 crossover.**~~ **RETIRED 2026-09-06 — measured, and no second
+   integrator is warranted.** Three corrections to that line. (a) The premise was
+   wrong: it leaned on the 15.1 km residual vs JPL, which is *unmodelled forces*
+   (planetary GR, radial `A1`), and no integrator fixes a missing force. (b) dop853
+   **is** converged where it ships — the encounter perigee moves 0.07 m and the 3:4
+   return's timing coordinate 365 m out of 891 km across four decades of tolerance,
+   so every keyhole conclusion holds. (c) But not for a good reason: the 1-day
+   snapshot cadence **caps the step**, and the same tolerance uncapped is **129 km**
+   off over the cruise. So the shipping accuracy is a property of the architecture,
+   which is now a named knob (`ImpactorConfig::forward_rtol`) with a guard test.
+   And IAS15 is retired rather than deferred because **there is no oracle for it**:
+   REBOUND self-gravitates the planets (§6 says so), Horizons cannot resolve this
+   class of flyby, and a resonant return is in no truth table — leaving
+   dop853-at-a-tighter-tolerance as the only oracle, which is what was run. See
+   *The integrator, measured instead of replaced*.
 6. Phase 3.
 
 ---
@@ -443,7 +457,7 @@ At that point the engine supports the full MVP scenario. Tier-2 realism and Tier
 
 The first review and the follow-up discussion closed every major open question (see *Resolved* below). What remains is genuinely deferred to when the relevant tier arrives:
 
-- **dop853 → IAS15 crossover (Tier 2).** dop853 is the MVP integrator; the lead time / orbit count at which IAS15's near-symplectic long-arc behavior actually wins is an empirical question — measure it against REBOUND when Tier-2 long arcs arrive.
+- ~~**dop853 → IAS15 crossover (Tier 2).**~~ **Answered 2026-09-06 and the item is retired.** Measured on the 12-year campaign and the 15-year keyhole return, not against REBOUND — which §6 itself rules out as a trajectory oracle because it self-gravitates the planets. dop853 is converged at the shipping tolerance on both; what is *not* converged is the tolerance without the snapshot cadence's step cap (129 km over the cruise). The crossover question turned out to be about how the integrator is driven, not about the method. See *The integrator, measured instead of replaced*.
 - **Impulse soft-cap: hard gate vs. honest readout.** Whether the MVP forbids an over-budget nudge outright or allows it with an honest *"this would take N DART-class impactors"* label — a UX call to settle in implementation (§5).
 - **SBDB covariance ingestion (Tier 3).** The on-disk format/units for real-asteroid orbit-determination covariances feeding `uncertainty.rs` — deferred until Tier 3.
 - ~~**b-vector sign convention + ξ,ζ decomposition (raised by step-8 b-plane geometry).**~~ **CLOSED 2026-09-02** — `B` points at the incoming asymptote (derived from the hyperbola's centre, measured 489× on a flown flyby), `ζ̂` opposes Earth's motion, `(ξ, η, ζ)` right-handed; `core/src/keyhole.rs`, see *Keyholes, closed*. The original text follows for the record. `geometry.rs` ships the b-plane hit test and the b-vector `B` with its *magnitude* pinned (`|B| = b`) and its plane pinned (`B ⊥ Ŝ`, `B ⊥ ĥ`), but its **sign** deliberately unasserted, and the Öpik/Kizner **ξ,ζ decomposition** — which needs an external reference direction (Earth's heliocentric velocity, or an ecliptic pole) — deferred to Tier 3 (`uncertainty.rs`), since that is the layer (keyholes/covariance) that actually reasons in b-plane coordinates. Nail the sign + reference frame when keyhole geometry needs it. **Phase-2 3C-2c coexists with this rather than forcing it:** the Godot b-plane view builds its *display* axes from `Ŝ` and the ecliptic pole in the binding (not core), labels them as display axes, and prints only rotation-invariant scalars (`|B|`, perigee, capture radius, `v_inf`) — so nothing on screen depends on the unpinned convention, and settling it later is still free.
@@ -2355,3 +2369,166 @@ binding's three helpers delegate to it. The constant is `84381.448″`, IAU 1976
 - **Nothing of this is on the frontend.** The Tier-3 ellipse on the Godot b-plane
   view (roadmap item 3) is still the next visible thing, and it now has two
   ellipses worth drawing rather than one.
+
+---
+
+### The integrator, measured instead of replaced — 2026-09-06 session (roadmap item 5 retired: dop853 is converged, and the reason is not the tolerance)
+
+Roadmap item 5 was "dop853 → IAS15 crossover, now that 15-year multi-revolution
+arcs (the keyhole returns) are in the pipeline." It is **retired, not deferred**,
+and the batch that retired it is a measurement: `core/examples/probe_integrator_convergence.rs`,
+plus one guard test and three doc corrections. No second integrator was written.
+
+The pitch for the item was wrong, and worth recording as wrong: it was argued from
+the previous session's finding that our own position residual against JPL over
+Apophis' arc (15.1 km) is the same size as the real orbit uncertainty (18.2 km).
+That residual is **unmodelled forces** — every planet's relativity, and the radial
+`A1` — and this file says so where it reports it. A better integrator does nothing
+for a force that is not in the model. The real customer was elsewhere: every
+keyhole conclusion rests on 15-year arcs whose convergence nobody had checked.
+
+#### The gate first, because every number below is a difference of two runs
+
+Two builds at one tolerance reproduce the seed, the encounter perigee and the
+end state **bit-for-bit**. Without that identity a tolerance delta and a
+nondeterministic re-fly are indistinguishable — the same identity the Pluto
+measurement leaned on to read 0.6 m as physics.
+
+#### What the shipping tolerance actually allows, and why it never showed
+
+`Dop853`'s error scale is `atol + rtol·|y|`. Every forward propagation ran at
+`Dop853::new()`'s default `rtol = atol = 1e-9`, in SI, where a heliocentric
+position component is ~`1.5e11 m` — so the controller accepts a sub-step with up
+to **~150 m** of estimated local position error, and `atol` never binds on
+anything. The *backward* seed design runs at `1e-12` and every force-term
+isolation test at `1e-12`/`1e-13`. The forward path — the one every published
+number comes out of — was the loosest thing in the crate.
+
+Sweeping it `1e-9 … 1e-13` over the 12-year campaign, **the same tolerance is
+either fine or catastrophic depending on how it is driven**:
+
+| path over the 12.16-yr span | `|Δr|` vs the converged reference, on the cruise |
+|---|---|
+| one uninterrupted `step` call, rtol `1e-9` | **129 km** |
+| the shipping clock path (1-day snapshots), rtol `1e-9` | **0.26 m** |
+
+Both are the same integrator at the same tolerance. The difference is that
+`Clock::propagate` restarts the adaptive controller at every snapshot, so a 1-day
+snapshot **caps the step**, and the cap is what holds the error down. The
+comparison is taken a year *short* of the flyby on purpose: the campaign ends 60
+days past a 3 000 km Earth pass, which multiplies whatever arrives at it by a
+measured **5 558×** (steady across four tolerances, which is itself the check that
+it is a linear amplification and not noise). The amplified figures — 719 000 km
+and 1.4 km — are those two times 5 558, and quoting them as integration error
+would be quoting the flyby.
+
+That closes on itself exactly: the clock path's `0.2582 m` cruise error × `5557.9`
+= `1435 m`, which is its measured end-state column to four figures. Two
+independent routes to one number.
+
+#### The cross that decides it
+
+If the cap is what sets accuracy, then coarsening the cadence removes the cap and
+the tolerance becomes the only thing controlling the step — so the coarse-cadence
+penalty `probe_tier3_cost` measured must **shrink** when the tolerance tightens.
+Encounter-1 perigee, cadence × tolerance, shift against that row's own 1-day cell:
+
+| rtol | 3 d | 10 d | 30 d | 90 d | 180 d |
+|---|---|---|---|---|---|
+| `1e-9` (shipping) | +0.03 m | +117.7 m | **+13 566 m** | +25 100 m | +27 360 m |
+| `1e-11` | −0.02 m | −5.4 m | +54 m | +72 m | +58 m |
+| `1e-13` | −0.02 m | +0.36 m | +0.51 m | +0.66 m | **+0.68 m** |
+
+It shrinks by 40 000×. So the coarse-cadence error was step size all along, and
+three things follow:
+
+1. **At the shipping 1-day cadence the tolerance is not binding.** Tightening it
+   four decades moves the perigee 0.07 m and costs 33 % more wall clock. The
+   shipping value stays.
+2. **The shipping accuracy is a property of the architecture, not of the
+   tolerance** — a latent trap for anything that lengthens the effective step. The
+   knob is now named (`ImpactorConfig::forward_rtol`, threaded through a single
+   `stepper` field so the nominal, the re-flies and `propagate_free` cannot end up
+   at different tolerances) and a kernel-gated test pins the conditional:
+   `a_coarse_cadence_is_tolerance_bound_where_a_fine_one_is_step_capped` asserts
+   the **ratio** collapses (fine-cadence sensitivity < 1/1000 of coarse), because
+   the metre values are machine-specific and the separation is the physics.
+3. **The efficient pairing is the opposite of the shipping one.** 180 days at
+   `1e-13` reaches the 1-day answer to **0.68 m in 0.56 s**, against the shipping
+   1-day/`1e-9`'s **10.9 s**. An 8th-order method wants few large accurate steps;
+   we were giving it many small sloppy ones. The shipping cadence stays at 1 day
+   anyway — the frontend draws the arc and needs the snapshots — but a sampling
+   path that only wants a b-plane number is paying ~19× for nothing.
+
+#### The keyhole conclusions, in the coordinates they are stated in
+
+The load-bearing check. The 3:4 refined floor is called physics rather than an
+unconverged search *because* the return's timing coordinate `ζ₂` is small beside
+its spatial one `ξ₂` — and truncation over a 15-year arc lands as secular **phase**
+error, which is precisely `ζ₂`. Flying the same Δv = 0.216550 m/s at each
+tolerance:
+
+| rtol | enc-1 perigee | return | `ξ₂` | `ζ₂` | `|ζ₂/ξ₂|` |
+|---|---|---|---|---|---|
+| `1e-9` (shipping) | 146 785.195 km | 1 141.296 km | 4 014.289 km | 890.598 km | 0.2219 |
+| `1e-13` | 146 785.195 km | 1 141.339 km | 4 014.292 km | 890.963 km | 0.2219 |
+
+`ζ₂` moves **365 m out of 891 km** (0.04 %), `ξ₂` moves 3 m out of 4 014 km, and
+the ratio the argument turns on is 0.2219 at every rung. **Every keyhole
+conclusion is converged at the shipping tolerance.**
+
+And the column does not converge monotonically — it scatters (−365, −349, +127,
++59 m). That is not a failure of the sweep, it is *stronger* evidence for the
+finding than a monotone fall would be: at 1-day cadence the tolerance is not
+binding, so what is left between rungs is uncorrelated scatter rather than
+truncation. A monotone fall would have meant the tolerance was still in control.
+
+#### Two loose ends, chased rather than asserted
+
+- **The 118 m at the Tier-3 cadence is not a Tier-3 error.** Every cell of the
+  cross is a *nominal* perigee, and Tier 3 reads **derivatives**. Re-measuring one
+  central-difference column, `∂(perigee)/∂v_along` at 10 days, gives `1e-9` vs
+  `1e-13` differing by **0.0225 %** — which is the 0.024 % the cancellation
+  argument in `SAMPLE_CADENCE_DAYS`' doc already predicted. So the cadence bias
+  never was in the derivative, the constant stays at ten days on the reasoning it
+  always had, and the tolerance pairing matters here only if this layer starts
+  reading an *absolute* b-plane position — drawing the ellipse on the frontend,
+  which is roadmap item 3.
+- **A sub-metre residual survives a tight tolerance, and it is not the scan.** At
+  `1e-13` the perigee still walks monotonically with cadence and saturates
+  (+0.36 m at 10 d → +0.68 m at 180 d). Refining the close-approach scan's
+  sampling step 24× (6 h → 1 h → 15 min) does not move it by a **bit**, so it is
+  not the argmin's resolution. What that does *not* separate is the degree-7 dense
+  interpolant's own accuracy over larger accepted sub-steps from a real trajectory
+  difference — finer sampling of an inaccurate interpolant does not help.
+  Distinguishing them needs a re-integration to the closest-approach epoch and is
+  not done. 0.68 m changes no conclusion in this project; it is recorded so it is
+  not rediscovered.
+
+#### Why IAS15 is retired rather than deferred
+
+There is no oracle for it, and that is a stronger argument than cost. §6 nominates
+REBOUND for the comparison and in the same breath says REBOUND self-gravitates the
+planets and is therefore **not** a trajectory oracle — only invariants and
+encounter sensitivity. Horizons cannot help either: `horizons.rs` documents that a
+1-day state table cannot resolve this class of flyby (18 885 km of its own
+interpolation error), and a resonant return three years past a deflection is in no
+truth table anywhere. So the only available oracle for "does IAS15 beat dop853 on
+*our* field" is dop853-at-a-tighter-tolerance — which is exactly what this batch
+ran, and it says dop853 is converged. A second integrator would have nothing to
+prove against, and unfalsifiable work is worse than no work.
+
+The reversibility residual (forward 12 years then back) is reported and
+deliberately **not** used: it falls four decades then jumps at the tightest rung,
+because it round-trips the flyby twice and both cancellation and amplification act
+on it. The direct comparison against a converged reference is the metric; this one
+is a free invariant that happens to be a bad one here, and saying so is cheaper
+than letting a reader trust it.
+
+#### One inconsistency found and not resolved
+
+`ζ₂` reproduces here as **891 km** against `ξ₂` 4 014 km, matching the
+keyhole-targeting memory entry. `core/src/keyhole_target.rs`'s own module-doc
+table says **786 km** against 4 013 km for the same refined shot. Two spellings of
+one measurement disagreeing inside the repo — the class of thing this project
+keeps catching. Not chased in this batch; recorded so it is not lost.

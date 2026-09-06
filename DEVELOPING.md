@@ -73,6 +73,7 @@ ones the current physics rests on:
 | `probe_keyhole_map` | the whole b-plane keyhole map as JSON, with two flown checks | ~50 s |
 | `probe_keyhole_return` | **fly** the 3:4 keyhole and find the return's floor | ~4 min |
 | `probe_keyhole_probability` | Tier 3 **at the return**: the chained two-encounter Jacobian and P(impact). Modes `check` (2 flights) / `steps` / `gain` / `probability` / `cadence` / `sweep` | 2 min – 20 min per mode |
+| `probe_integrator_convergence` | is `dop853` **converged** on these arcs, and is the limit the tolerance, the snapshot cadence, or the method? Modes `determinism` (the bit-for-bit gate — run it first) / `campaign` / `cadence` / `keyhole` | 30 s – 6 min per mode |
 
 ```sh
 cargo run -p asteroid_core --release --example probe_keyhole_map -- docs/keyhole_map.json

@@ -277,6 +277,19 @@ pub struct ImpactorConfig {
     /// absolute positions here (a difference of two runs at one cadence cancels the
     /// systematic error), which is why [`SAMPLE_CADENCE_DAYS`] can afford 10 days
     /// where this cannot.
+    ///
+    /// **Corrected a second time, 2026-09-06: that cost is a *step-size* cost, and
+    /// [`forward_rtol`](Self::forward_rtol) is what controls it.** The cadence caps
+    /// the step; when the cap is loose, nothing else is holding the step down,
+    /// because the shipping tolerance is too slack to. `probe_integrator_convergence`
+    /// crossed the two axes: the 30-day penalty is **+13 566 m at `rtol = 1e-9` and
+    /// +0.5 m at `1e-13`**, and at `1e-13` the perigee holds to **0.7 m from 1 day
+    /// out to 180**. So a coarse cadence is not inherently inaccurate — it is
+    /// inaccurate *at this tolerance*, and the two knobs have to be chosen together.
+    /// Which also means the efficient pairing is the opposite of the shipping one:
+    /// 180 days at `1e-13` reaches the 1-day answer to 0.7 m in **0.56 s** against
+    /// the shipping 1-day/`1e-9`'s 10.9 s. The shipping cadence stays at 1 day
+    /// regardless — the frontend draws the arc and needs the snapshots.
     pub cadence_days: f64,
     /// How far past the impact epoch to propagate, days — a margin so a deflected
     /// (time-shifted) pass still lands inside the span.
@@ -284,6 +297,40 @@ pub struct ImpactorConfig {
     /// Relative tolerance for the **backward** seed integration. Tight, because
     /// this fixes how faithfully the forward pass reproduces the designed impact.
     pub back_rtol: f64,
+    /// Relative tolerance for every **forward** propagation this scenario drives —
+    /// the nominal cruise, the deflected re-flies, and [`propagate_free`]'s
+    /// resonant-return arcs.
+    ///
+    /// **This is a convergence knob, not a performance one, and it is looser than
+    /// its backward sibling by three decades.** `Dop853`'s error scale is
+    /// `atol + rtol·|y|`, and at 1 AU (`|r| ≈ 1.5e11 m`) the shipping `1e-9`
+    /// allows ~150 m of local error per position component per accepted step,
+    /// while `atol` never binds at all.
+    ///
+    /// **Measured, 2026-09-06 (`probe_integrator_convergence`): it does not matter
+    /// at the shipping cadence, and the reason is not flattering.** Every published
+    /// number is converged — the encounter perigee moves 0.07 m and the 3:4 keyhole
+    /// return's timing coordinate 365 m out of 891 km across four decades of
+    /// tolerance. But that is the **snapshot cadence's** doing, not this value's: a
+    /// 1-day snapshot caps the step, and the cap is what holds the error down. Take
+    /// the cap away and the same tolerance is **129 km** off over the 12-year cruise
+    /// (one uninterrupted `step` call against a converged reference; 719 000 km after
+    /// the flyby multiplies it 5 558×). So this is slack enough to be wrong and is
+    /// only ever saved by how it happens to be driven.
+    ///
+    /// Which is why it is worth a named knob rather than a `Dop853::new()` at each
+    /// call site: anything that lengthens the effective step — a coarser cadence, or
+    /// a direct `step` over a long arc — has to tighten this in step with it. See
+    /// [`cadence_days`](Self::cadence_days) for the cross-measurement, and
+    /// `a_coarse_cadence_is_tolerance_bound_where_a_fine_one_is_step_capped` for the
+    /// regression guard.
+    ///
+    /// Same hazard shape as [`cadence_days`](Self::cadence_days): a caller that
+    /// loosens this to buy speed changes every number downstream while everything
+    /// keeps working and every value stays plausible.
+    ///
+    /// [`propagate_free`]: RealFieldScenario::propagate_free
+    pub forward_rtol: f64,
     /// Which Tier-2 force terms the field carries (HANDOFF §5/§6). [`Default`] is
     /// all-off, reproducing the Tier-1 scenario bit-for-bit; the back-propagation
     /// that designs the seed uses this same field, so a terms-on config yields a
@@ -319,6 +366,9 @@ impl Default for ImpactorConfig {
             cadence_days: 1.0,
             span_margin_days: 60.0,
             back_rtol: 1.0e-12,
+            // Dop853's own default, which is what every forward propagation in this
+            // crate has always run at; named here so it is a stated choice.
+            forward_rtol: 1.0e-9,
             tier2: Tier2Config::default(),
         }
     }
@@ -635,6 +685,12 @@ pub struct RealFieldScenario {
     mu_earth: f64,
     earth_radius: f64,
     scan: ScanOptions,
+    /// The stepper every forward propagation this scenario drives runs on, carrying
+    /// `cfg.forward_rtol`. A field rather than a `Dop853::new()` at each call site
+    /// so the nominal cruise, the deflected re-flies and [`Self::propagate_free`]'s
+    /// return arcs cannot end up integrated at different tolerances — which would
+    /// make a convergence study meaningless and a cached nominal wrong.
+    stepper: Dop853,
 
     epoch0: Epoch,
     seed: StateVector,
@@ -846,6 +902,7 @@ impl RealFieldScenario {
             mu_earth,
             earth_radius,
             scan,
+            stepper: Dop853::new().with_rtol(cfg.forward_rtol),
             epoch0,
             seed,
             impact_epoch: cfg.impact_epoch,
@@ -883,6 +940,44 @@ impl RealFieldScenario {
         &self.ephemeris
     }
 
+    /// The stepper every forward propagation here runs on (carrying
+    /// [`ImpactorConfig::forward_rtol`]).
+    ///
+    /// Exposed for the one caller that re-integrates part of this scenario by
+    /// hand: `probe_integrator_convergence` flies the campaign span in a *single*
+    /// uninterrupted `step` call, because the difference between that and the same
+    /// span through [`Clock::propagate`] is the snapshot cadence's contribution to
+    /// the error, separated from the integrator's own. Doing that with
+    /// `Dop853::new()` would silently compare two tolerances.
+    pub fn forward_stepper(&self) -> Dop853 {
+        self.stepper
+    }
+
+    /// The designed seed state at [`epoch0`](Self::epoch0), SSB-relative ICRF in SI
+    /// — the back-propagated impact state every forward number here starts from.
+    pub fn seed(&self) -> StateVector {
+        self.seed
+    }
+
+    /// The force field the seed is designed against and flown through — Tier 1
+    /// plus whatever Tier-2 terms `cfg.tier2` enabled.
+    ///
+    /// `&dyn` because callers only ever evaluate it; the concrete sum is this
+    /// scenario's business.
+    pub fn field(&self) -> &dyn crate::ForceModel {
+        &self.force
+    }
+
+    /// The snapshot cadence of the nominal propagation, seconds.
+    pub fn cadence_seconds(&self) -> f64 {
+        self.cadence_seconds
+    }
+
+    /// How many snapshots the nominal propagation spans.
+    pub fn n_snapshots(&self) -> u32 {
+        self.n_snapshots
+    }
+
     /// Build a [`DeflectionScenario`] borrowing this scenario's owned field and
     /// Earth-state source — the object the Δv solver runs on.
     ///
@@ -893,7 +988,7 @@ impl RealFieldScenario {
     /// session instead of once per keypress.
     pub fn deflection(&self) -> Result<DeflectionScenario<'_>, DeflectionError> {
         DeflectionScenario::with_nominal(
-            Dop853::new(),
+            self.stepper,
             &self.force,
             &self.earth,
             self.epoch0,
@@ -925,7 +1020,7 @@ impl RealFieldScenario {
             self.earth_radius,
         )?;
         let nominal = Clock::propagate(
-            &Dop853::new(),
+            &self.stepper,
             &self.force,
             self.epoch0,
             self.seed,
@@ -1035,7 +1130,7 @@ impl RealFieldScenario {
         let force = compose_force(&self.ephemeris, tier2)
             .map_err(|e| ScenarioError::Ephemeris(e.to_string()))?;
         let nominal = Clock::propagate(
-            &Dop853::new(),
+            &self.stepper,
             &force,
             self.epoch0,
             self.seed,
@@ -1044,7 +1139,7 @@ impl RealFieldScenario {
         )
         .map_err(|e| ScenarioError::Integration(e.to_string()))?;
         let ds = DeflectionScenario::with_nominal(
-            Dop853::new(),
+            self.stepper,
             &force,
             &self.earth,
             self.epoch0,
@@ -1099,7 +1194,7 @@ impl RealFieldScenario {
             ));
         }
         Clock::propagate(
-            &Dop853::new(),
+            &self.stepper,
             &self.force,
             epoch0,
             seed,
@@ -1919,6 +2014,115 @@ mod tests {
     /// a fresh/empty one), (b) hands the dense output back correctly, and (c)
     /// serves an arbitrary sub-snapshot epoch, not just cadence boundaries.
     ///
+    /// The forward tolerance is only slack enough to ship **because** the snapshot
+    /// cadence caps the step. Pinned here, because nothing else says so.
+    ///
+    /// `probe_integrator_convergence` measured this (2026-09-06) and it is the batch's
+    /// whole result. `Dop853`'s error scale is `atol + rtol·|y|`, so the shipping
+    /// `forward_rtol = 1e-9` allows ~150 m of local position error per accepted step
+    /// at 1 AU — loose enough that one *uninterrupted* 12-year integration lands 129 km
+    /// from a converged reference. It never shows, because [`Clock::propagate`] restarts
+    /// the controller at every snapshot and a 1-day snapshot therefore caps the step,
+    /// which drags the same tolerance down to ~0.26 m over the same cruise.
+    ///
+    /// That makes the shipping accuracy a property of the **architecture**, not of the
+    /// tolerance — and a latent trap, since anything that lengthens the effective step
+    /// silently spends it. So the invariant worth pinning is the *conditional* one:
+    ///
+    /// - at a **fine** cadence the tolerance is not binding, so tightening it four
+    ///   decades must barely move the perigee;
+    /// - at a **coarse** cadence it is the only thing controlling the step, so the same
+    ///   tightening must move the perigee by kilometres.
+    ///
+    /// The assertion is on the **ratio**, not the magnitudes: the metre values are
+    /// machine- and kernel-specific, but "coarse cadence is orders of magnitude more
+    /// tolerance-sensitive than fine cadence" is the physics and is portable. A failure
+    /// means either the controller changed or the cap stopped applying, and both are
+    /// things a reader of the shipping numbers needs to know about.
+    ///
+    /// 3 days is the fine baseline rather than 1 because the probe's cross table has
+    /// them agreeing to 0.022 m at a third of the cost; 90 days is coarse enough for the
+    /// loose run to be visibly out of control (~25 km) while still costing under a second.
+    ///
+    /// Kernel-gated; skips (does not fail) without the DE440 pair.
+    #[test]
+    fn a_coarse_cadence_is_tolerance_bound_where_a_fine_one_is_step_capped() {
+        if crate::kernels::resolve_for_test(
+            "a_coarse_cadence_is_tolerance_bound_where_a_fine_one_is_step_capped",
+        )
+        .is_none()
+        {
+            return;
+        }
+
+        let cfg = ImpactorConfig::default();
+        // One build. The seed is a product of `back_rtol` alone, so the tight-tolerance
+        // runs can reuse it and drive a stepper of their own rather than paying a
+        // second 12-year backward design for a state that would come out identical.
+        let sc = RealFieldScenario::build(&cfg).expect("scenario builds");
+        let ds = sc.deflection().expect("deflection");
+        let nominal = sc.nominal_hit(&ds).expect("nominal hit");
+        let span = cfg.lead_years * SECONDS_PER_YEAR + cfg.span_margin_days * 86_400.0;
+        let earth = EphemerisPerturber::new(Arc::clone(sc.ephemeris()), EARTH_J2000);
+
+        let perigee = |cadence_days: f64, rtol: f64| -> f64 {
+            let cadence = cadence_days * 86_400.0;
+            let n = (span / cadence).ceil().max(2.0) as u32;
+            let clock = Clock::propagate(
+                &Dop853::new().with_rtol(rtol),
+                &sc.force,
+                sc.epoch0(),
+                sc.seed(),
+                cadence,
+                n,
+            )
+            .expect("propagation");
+            let ca = find_close_approaches(&clock, &earth, sc.scan)
+                .expect("scan")
+                .into_iter()
+                .min_by(|a, b| a.distance.total_cmp(&b.distance))
+                .expect("a close approach inside the shipping gate");
+            ca.b_plane(nominal.mu, nominal.earth_radius)
+                .expect("b-plane")
+                .perigee
+        };
+
+        const FINE_DAYS: f64 = 3.0;
+        const COARSE_DAYS: f64 = 90.0;
+        const LOOSE: f64 = 1.0e-9; // the shipping forward tolerance
+        const TIGHT: f64 = 1.0e-13;
+
+        let fine_sensitivity = (perigee(FINE_DAYS, LOOSE) - perigee(FINE_DAYS, TIGHT)).abs();
+        let coarse_sensitivity = (perigee(COARSE_DAYS, LOOSE) - perigee(COARSE_DAYS, TIGHT)).abs();
+
+        // Fine cadence: the cap binds, so four decades of tolerance are worth nothing.
+        // A metre is generous against the measured ~0.07 m and leaves room for a
+        // different kernel revision without leaving room for the effect coming back.
+        assert!(
+            fine_sensitivity < 1.0,
+            "at a {FINE_DAYS}-day cadence the step is capped, so rtol {LOOSE:.0e} → \
+             {TIGHT:.0e} should move the perigee by well under a metre; moved \
+             {fine_sensitivity:.3} m"
+        );
+
+        // Coarse cadence: nothing caps the step but the tolerance, and the shipping
+        // tolerance cannot do it. Kilometres, not metres.
+        assert!(
+            coarse_sensitivity > 1.0e3,
+            "at a {COARSE_DAYS}-day cadence only rtol controls the step, so the shipping \
+             {LOOSE:.0e} should be kilometres from {TIGHT:.0e}; moved only \
+             {coarse_sensitivity:.3} m — has the step cap started applying elsewhere?"
+        );
+
+        // The portable form of the claim: the two regimes differ by orders of magnitude.
+        assert!(
+            fine_sensitivity < 1.0e-3 * coarse_sensitivity,
+            "the whole finding is that tolerance-sensitivity is set by the cadence: fine \
+             {fine_sensitivity:.3e} m vs coarse {coarse_sensitivity:.3e} m is not the \
+             ≥1000× separation measured"
+        );
+    }
+
     /// Kernel-gated: needs the DE440 `.bsp`/`.pca` via `ASTEROID_DE_KERNEL` /
     /// `ASTEROID_PLANETARY_CONSTANTS`; skips (does not fail) when they are unset.
     #[test]

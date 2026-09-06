@@ -88,3 +88,17 @@ that change how this file should be read:
   covariance. The `sigma_distance` oddity this file records (8 196 σ with P = 1)
   recurs at the return and is the *tell* for a mean moving along the covariance's
   own long axis.
+
+**Update 2026-09-06:** real SBDB covariance ingestion — the thing this layer was missing — is built. See [[sbdb-covariance]]. `synthetic_along_track` is untouched and remains the only honest covariance for the shipping synthetic rock.
+
+**Update 2026-09-06 (second) — what the 10-day cadence bias actually is.** See
+[[integrator-convergence]]. The +118 m absolute perigee shift this file attributes
+to the cadence is a **step-size** error, controlled by
+`ImpactorConfig::forward_rtol` and not by the cadence: at rtol 1e-13 the same
+10-day cadence sits 0.36 m from the 1-day answer, at the same wall clock (1.53 s vs
+1.56 s). Nothing here changes — re-measuring `d(perigee)/dv_along` at both
+tolerances moves it **0.0225 %**, i.e. the 0.024 % the cancellation argument in
+point 2 already predicted, so the bias never was in the derivative and
+`SAMPLE_CADENCE_DAYS` stays 10 for the reason it always had. The tolerance pairing
+becomes relevant only when this layer reads an *absolute* b-plane position rather
+than a difference of two — drawing the ellipse on the frontend.

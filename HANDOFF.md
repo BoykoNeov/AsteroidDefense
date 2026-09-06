@@ -8,7 +8,7 @@ This document is the starting context for continuing development in Claude Code.
 
 ---
 
-## Where things stand — 2026-09-05
+## Where things stand — 2026-09-06
 
 A dashboard, because §10's task list has been complete since the MVP and the
 truth has lived in the dated session sections at the end of this file since.
@@ -23,6 +23,7 @@ Read this table first, then the session that owns the layer you are touching.
 | Tier 3a: covariance → b-plane Jacobian → P(impact), linearity shell | done (covariance invented, labelled) | `core/src/uncertainty.rs` |
 | **Tier 3b: keyholes** — Öpik (ξ, ζ) frame and b-vector sign pinned, resonant circles in closed form, keyhole widths, the keyhole map, **the 3:4 keyhole flown to a return impact** | **done 2026-09-02** | `core/src/keyhole.rs`, `examples/probe_keyhole_{map,return}.rs`, `docs/keyhole_map.*` |
 | **Tier 3c: keyhole targeting** — aim at any resonance on either branch, fly it, refine to the floor, and read the return in **its own** Öpik frame; the planner's `KEYHOLE` row | **done 2026-09-05** | `core/src/keyhole_target.rs`, `godot/scripts/{sim,planner}.gd` |
+| **Tier 3d: P(impact) at the resonant return** — the covariance flown through *both* encounters (the chaining is in the propagation, not a matrix product), finite-difference steps re-measured on the return, the chained gain checked against the closed form to 14 % | **done 2026-09-06**; the answer is set by how well the orbit is known, not how well the impulse is aimed | `core/src/keyhole_target.rs`, `core/examples/probe_keyhole_probability.rs` |
 | Godot frontend: DE440 orrery, real NEO scenery, planner, b-plane view (with the keyhole map, `[H]`), launch-window map, Tier-2 force menu, tractor bench, threat-orbit knob | done; keyhole overlay **seen on screen 2026-09-05** and its captions budgeted | `godot/`, `godot/rust/` |
 | Godot visual/perf pass: 3D world in its own viewport with 4× MSAA and phosphor persistence (peak-hold trails), per-frame position memo, cached 2D orbit traces, the `_perf.gd` frame-time harness and `run_harness.ps1` | done 2026-09-05; the 2D map went 18.9 → 7.1 ms/frame, native calls/frame 764 → 29; follow-ups in `docs/plans/2026-09-05-visuals-performance-followups.md` | `godot/scripts/main.gd`, `godot/shaders/phosphor_persist.gdshader`, `godot/tests/` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
@@ -32,10 +33,13 @@ Read this table first, then the session that owns the layer you are touching.
 1. **Real covariances from the SBDB** (equinoctial or Keplerian elements at their
    own epoch, mixed units; validate the conversion by round-trip). This makes
    P(impact) real for Apophis/Bennu and retires the "invented" label.
-2. **P(impact) rising near a keyhole.** The deflected trajectory as the Tier-3
-   nominal, and a chained two-encounter Jacobian — `uncertainty_sampling_plan`
-   refuses two encounters in span today, by design, until this exists. The
-   targeting layer now supplies the second encounter, reduced in its own frame.
+2. ~~**P(impact) rising near a keyhole.**~~ **DONE 2026-09-06** — and it does
+   not rise, at the shipping uncertainty: the return's 1σ ellipse is a needle
+   131 334 km long lying in the same coordinate Δv moves, so P is 0.064 flat
+   across the whole door (contrast 1.02×). Shrink the *whole* covariance 12× and
+   the door appears as a 12× peak; 100× and it is a hard 0→1→0. See *P(impact) at
+   the resonant return*. `uncertainty_sampling_plan` is unchanged — the return
+   does not exist on the nominal, so its refusal never applied.
 3. **The Tier-3 ellipse on the Godot b-plane view** (the sensitivity solve is
    ~17 s: an on-demand worker like the porkchop grid, not a build-path cost).
 4. **The keyhole width's order-unity slack, measured on more than one case.**
@@ -47,7 +51,12 @@ Read this table first, then the session that owns the layer you are touching.
    capture radii out, so it is a resonant return but not an impact keyhole for
    this rock at this ξ — there is no "flew through the door" to measure the door
    against. The next candidates need to be resonances whose circle passes near
-   the *impact* region, not merely near the b-point.
+   the *impact* region, not merely near the b-point. **Partly answered 2026-09-06 by a
+   different route:** measuring the chained `∂ζ₂/∂ζ₁` on the flown trajectory
+   gives the door width directly — 29.09 km against the map's 24.92 km, so the
+   linearised width is conservative by **1.17×**, not ~1.6×. That is a
+   *differential* calibration and it does not touch the *placement* question the
+   1.64 half-widths describes, which is what still wants more flown resonances.
 5. **dop853 → IAS15 crossover**, now that 15-year multi-revolution arcs (the
    keyhole returns) are in the pipeline and the question has a customer.
 6. Phase 3.
@@ -1923,3 +1932,218 @@ closes that — ξ is a property of the deflection **direction**, so reaching it
 would need an out-of-plane component, not more of the same nudge. That is the
 first honest negative result for a resonance other than the 3:4, and it cost 31
 flights in 814 s.
+
+### P(impact) at the resonant return — 2026-09-06 session (the covariance mapped through *both* encounters, and the finding that it is knowing, not aiming, that moves the answer)
+
+Roadmap item 2 from the *What is next* list: *"P(impact) rising near a keyhole —
+the deflected trajectory as the Tier-3 nominal, and a chained two-encounter
+Jacobian."* `uncertainty_sampling_plan` had refused two encounters in span since
+2026-07-28, by design, until this existed. It exists now, and the headline it
+produced is not the one the roadmap entry predicted — which is the part worth
+reading.
+
+**The chaining is in the propagation, not in a matrix product.**
+`core/src/keyhole_target.rs` gains `ReturnSamplingPlan` / `chained_sample` /
+`return_sensitivity`. Each of the thirteen columns flies a perturbed seed from
+the campaign start, through the impulse, through encounter 1, across the handoff
+and on to the resonant return, and reads the b-plane there. No two-encounter
+matrix is composed and no flyby is modelled — the amplification is simply in the
+numbers, which is the only honest way to do it, because the amplification *is*
+the keyhole. `uncertainty_sampling_plan` is untouched: its refusal fires on the
+*nominal* census, where the return does not exist at all, so there was nothing to
+relax and its ~30 callers keep their meaning.
+
+**Every epoch is pinned from one nominal flight.** The module's founding lesson —
+reduce at a fixed epoch, never at the sample's own closest approach, or the
+argmin quantises the Jacobian into plausible noise — has more places to be sprung
+with two encounters, so `ReturnSamplingPlan` carries all of them: the handoff and
+both reduction epochs. Letting each sample find its own handoff would
+re-introduce the argmin at the seam.
+
+**The licence for all of it, checked before anything else was spent (2 flights,
+90 s):** reducing at the fixed epoch reproduces the flown solution's encounter-1
+`b` to **+0.011 %** (153 469.8 → 153 486.0 km) and the return's to **−0.109 %**
+(4 111.9 → 4 107.4 km). What is compared is `b`, not the closest-approach
+distance — `b` is the asymptotic quantity a reduction 12 h early is entitled to
+reproduce, and the geocentric distance is smaller by focusing and is a different
+number by construction.
+
+#### The step sizes: the risk was real, the map is linear anyway
+
+`FD_STEP_POSITION_M` / `FD_STEP_VELOCITY_MS` were measured to provoke a 10–20 km
+b-plane response **at encounter 1**. Downstream of a flyby the same step is
+multiplied by the flyby's gain, and here that gain is **778×**: the shipping
+velocity step provokes **78 559 km** at the return, seven times the 11 310 km
+capture disc the answer is integrated over. A secant across seven times the
+feature, returning a finite, symmetric, entirely plausible matrix.
+
+So `bplane_jacobian` gained a sibling taking `FdSteps`, and the plateau study
+(`probe_keyhole_probability steps`, 24 flights) ran with the *return* as the
+observable:
+
+| scale | position step | ∣Δb₁∣ | ∣Δb₂∣ | column moved |
+|---|---|---|---|---|
+| 1.0 | 312.5 m | 72.4 km | 56 305 km | — |
+| 0.1 | 31.2 m | 7.2 km | 5 630 km | 0.000 % |
+| 0.01 | 3.12 m | 0.7 km | 563 km | 0.039 % |
+| 0.003 | 0.94 m | 0.2 km | 169 km | 0.187 % |
+
+**The columns do not move.** The gain is 777.5 for the position block and 777.8
+for the velocity block, constant to four figures over a 300× range of step. The
+state→return-b-plane map is *linear* far beyond where it needed to be, so the
+shipping steps would in fact have produced the right Jacobian — but only the
+measurement could say so, and the shipping run now sits at 1 % of them (response
+~5 % of the disc) because there is no reason to stand on a secant that wide once
+the narrower one is known to be free.
+
+That the two blocks return the same gain to four figures is itself the physics:
+position and velocity perturbations both act through the single scalar channel
+the closed form describes — encounter-1 b-plane displacement → `a'` → period →
+arrival time — so the gain is a property of the *encounter*, not of the
+perturbation.
+
+#### The closed form is the discriminator, because the covariance cannot be one
+
+The covariance is invented (synthetic rock, no observation arc), so it cannot
+falsify a Jacobian: any matrix maps it to *something*. The closed form can.
+Differentiating `a'` at the flown b-point (`OpikFrame::gradient_semi_major_axis`),
+turning that into a period error (`ΔT/T = 1.5 Δa'/a'`), an arrival slip over the
+3-year return, and Earth's own 30.278 km/s of motion gives a prediction with
+nothing fitted in it:
+
+- measured `∂ζ₂/∂ζ₁` = **−777.7**
+- closed form = **−905.9**
+- ratio **0.858**, signs agreeing
+
+Agreement to 14 % across a chain spanning a flyby, three years of propagation and
+two independently-built Öpik frames. That is the check that says the machinery
+works, and there is no other available.
+
+**The keyhole width falls out of it — with a caveat that matters.** `keyhole_at`
+defines the width as `Δa'_tol / |∇a'|`, which *is* `2·capture_radius ÷
+closed-form gain`. Substituting the **measured** gain gives **29.09 km** against
+the map's **24.92 km** for the 3:4 far point: the linearised width is
+conservative by **1.17×**, measured differentially, so it does not inherit the
+map's absolute-placement error at all. Two things it is not. It is not an
+independent second result — it is the 0.858 gain ratio inverted. And it does not
+retire the earlier "the flown b-point sits 1.64 half-widths from its own circle"
+finding, which is a statement about *placement* and a different quantity. The
+roadmap asked for more flown resonances to calibrate the width; this calibrates
+it differentially from one, which is better, but the placement question stays
+open.
+
+#### The cadence does not survive the flyby
+
+`SAMPLE_CADENCE_DAYS = 10` rests on a cancellation argument: both runs of a
+central difference fly at the same cadence, so the systematic error is common and
+drops out. That was measured at a **single** encounter, and here whatever
+survives the differencing is multiplied by 778 on its way to the return.
+Measured (13 + 13 flights):
+
+- the nominal return `b` moves **+2.97 % (+122 km)** at 10 days — and that is the
+  *mean*, which no differencing protects;
+- five columns agree within 2 %, and **column 2 is 17.7 % off** — the smallest
+  column, an order below its neighbours, so the one where a common-mode residue
+  is largest against its own signal.
+
+The coarse cadence is therefore **not** available here, and `ReturnSamplingPlan`
+carries its cadence as a field rather than reading the module constant. "A
+Jacobian is only valid at the cadence its columns converged at" has been a doc
+comment since July; this is the first place it has bitten.
+
+#### The result: at a keyhole it is knowing, not aiming, that moves the answer
+
+The roadmap entry expected a peak — probability high inside the door, low
+outside. With the shipping covariance that is flatly not what happens, for a
+geometric reason.
+
+Mapping the invented covariance through the chained Jacobian gives a 1σ ellipse
+at the return of **131 334 km × 0.5 km** — a *needle*, 260 000 times longer than
+it is wide, against an 11 310 km capture disc. And the needle lies along **ζ₂,
+the timing coordinate**, which is the only coordinate Δv can move. Sliding Δv
+slides the mean *along* the needle, which cannot change how much of the needle
+crosses the disc. Across the whole door — 21 points, ±5×10⁻⁵ m/s, the mean
+sweeping from 4 107 km out to 28 345 km — **P moves from 0.0628 to 0.0642, a
+contrast of 1.02×.** The σ-distance sits at ~8 210 on *every* row, which is the
+tell: a 22 000 km excursion barely registers because it runs along the direction
+the covariance is largest in. `uncertainty.rs` already documents that signature
+at the first encounter (8 196 σ with P = 1); this is the same thing one encounter
+downstream.
+
+**Shrinking the uncertainty is what moves it.** Because mapping a covariance
+through a fixed Jacobian is free, the probe reports three sizes of orbit
+uncertainty per flight — scale factors on the **whole** covariance — and the
+three are three different physical regimes:
+
+| Σ scale | 1σ major | vs disc | P at the floor | across the door |
+|---|---|---|---|---|
+| 1.0 | 131 334 km | 11.61× | 0.0642 | contrast **1.02×** (flat) |
+| 1/12 | 10 944 km | 0.97× | 0.6645 | 0.055 → **0.665** → 0.055, contrast **12.1×** |
+| 1/100 | 1 313 km | 0.12× | 1.0000 | 0 → **1** → 0, a hard door |
+
+At the crossover the keyhole finally appears as a *peak*; in the deterministic
+limit it is a yes/no door about 2×10⁻⁵ m/s wide, and the unrefined closed-form
+aim scores exactly 0 in both of the smaller columns while scoring 0.058 in the
+largest. **So the honest statement is that the impact probability at a keyhole is
+set by how well the orbit is known, not by how well the impulse is aimed** —
+steering inside the door buys nothing until the uncertainty is already smaller
+than the door. Which is why real planetary defence spends its money on
+observation arcs.
+
+**Two things had to be deleted before the data could be read.**
+
+*The narration.* The first version of the sweep closed by printing that the
+probability "swings from near-certain to near-zero over a Δv window smaller than
+any impulse can be controlled to" — a sentence written before the run, asserting
+the expected story. The measurement contradicted it. That is the fourth time in
+three sessions that a number here was found stating a claim rather than
+describing a measurement, and the sweep now prints a measured contrast ratio per
+covariance instead of a conclusion.
+
+*The first σ-ladder.* It varied `σ_along` over two decades and held `σ_position`
+at 1 km, and the ellipse did not move: **131 334 → 128 501 km for a 100× change**.
+At the return the **position** block dominates — the Jacobian's position columns
+are ~1.2×10⁵ b-plane metres per metre, so a 1 km position σ contributes ~117 000
+km against the velocity block's ~24 500 km. `synthetic_along_track`'s doc says
+"the along-track velocity term dominates the map", which is the claim that made
+the one-block ladder look reasonable; it does not hold at the return. "How well
+is the orbit known" is a statement about the whole covariance, and only scaling
+all of it asks that question.
+
+#### The needle forced a conditioning check on the probability integral
+
+A 2.6×10⁵ aspect ratio is far outside anything `impact_probability` had been
+tested at, and its whitened-polar rule is exactly the kind that returns a
+plausible small number when the `θ` band where the needle enters the disc is
+under-resolved — the module's founding failure mode in different clothes. So
+before any number above was quoted, two kernel-free tests went in:
+
+- `a_needle_ellipse_matches_monte_carlo` — the measured 131 334 × 0.5 km geometry
+  against 4 million deterministic draws (fixed-seed xorshift + Box–Muller, no new
+  dependency), at three means including one inside the disc. It agrees.
+- `needle_probability_holds_until_f64_loses_the_covariance` — squeezing the minor
+  axis must not move P, and it does not, out to an aspect ratio of 2.6×10⁷. One
+  decade further, `(σ_long/σ_short)² = 6.9×10¹⁶` is past what f64 can hold and
+  the covariance stops being positive definite: the module **refuses** there
+  rather than answering, which this test now pins. `StateCovariance`'s validation
+  turns out to be load-bearing rather than ceremonial.
+
+#### Cost, and what this leaves open
+
+The whole batch is ~110 flights at ~45 s each in release: the step study 24, the
+Jacobian 13, the cadence pair 26, the gain 2, and 22 per sweep. Nothing here
+belongs on a build path or a frame; `return_sensitivity` is an on-demand worker
+at best and an example at least.
+
+Still open:
+
+- **The Tier-3 ellipse on the Godot b-plane view** (roadmap item 3) — unchanged,
+  and now with a second, far stranger ellipse worth drawing.
+- **Real SBDB covariances** (roadmap item 1) — and this batch sharpens why they
+  matter: every number above is a statement about an *invented* needle, and the
+  needle's length is the whole answer.
+- **The placement half of the keyhole-width question** (the 1.64 half-widths),
+  which the differential calibration does not touch.
+- **`synthetic_along_track`'s "velocity dominates" doc claim**, which this
+  measurement contradicts at the return and which has not been re-checked at the
+  first encounter.

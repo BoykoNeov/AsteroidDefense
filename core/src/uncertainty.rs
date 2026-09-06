@@ -241,9 +241,25 @@ impl StateCovariance {
     /// other two, then rotated into ICRF. Position uncertainty is implied
     /// dynamically rather than dialled independently: a velocity error *is* a
     /// growing position error, and inventing two independent numbers would invent
-    /// a correlation structure this has no basis for. The position block is set
-    /// isotropic and small, so the along-track velocity term dominates the map —
-    /// which is the physical truth being taught.
+    /// a correlation structure this has no basis for.
+    ///
+    /// **Which block dominates is a measurement, and at the shipping numbers it
+    /// is the position one — not the velocity.** This doc used to assert the
+    /// opposite ("the position block is set isotropic and small, so the
+    /// along-track velocity term dominates the map"). Measured 2026-09-06, at the
+    /// shipping `σ_along = 5e-5 m/s` and `σ_position = 1 km`: the b-plane
+    /// Jacobian's position columns are ~1.5e2 metres per metre, so the 1 km
+    /// position term contributes ~153 km of the 168.7 km ellipse, while the whole
+    /// velocity block contributes at most ~32 km. `probe_tier3_uncertainty`'s own
+    /// σ-ladder shows it and had done since July — the ellipse sits at 165.2 km
+    /// for `σ_along = 1e-5` and only reaches 385.6 km at `5e-4`. The same holds
+    /// one encounter downstream at a resonant return, where dividing `σ_along` by
+    /// 100 moved the ellipse from 131 334 km to 128 501 km, i.e. not at all.
+    ///
+    /// The *shape* the caller gets is still the elongated cigar a real NEO
+    /// covariance has, so the lesson the type exists to teach survives. What does
+    /// not survive is reading `sigma_along_ms` as the knob that sets the answer:
+    /// to ask "how well is the orbit known", scale **both** arguments.
     ///
     /// Returns `None` if the state is degenerate (zero velocity, or velocity
     /// parallel to position, so the frame cannot be built).
@@ -406,8 +422,67 @@ impl BPlaneBasis {
 ///
 /// Costs **12 samples**, one pair per column. At the module's cadence that is
 /// about 13 seconds against the real propagator.
-pub fn bplane_jacobian<F>(
+pub fn bplane_jacobian<F>(seed: StateVector, sample: F) -> Result<Matrix2x6<f64>, UncertaintyError>
+where
+    F: FnMut(StateVector) -> Result<Vector2<f64>, UncertaintyError>,
+{
+    bplane_jacobian_with_steps(seed, FdSteps::default(), sample)
+}
+
+/// The central-difference steps a [`bplane_jacobian`] is built with — metres on
+/// the position columns, m/s on the velocity ones.
+///
+/// A struct rather than two arguments because the pair is only ever meaningful
+/// together: what makes a step right is the *response* it provokes in the
+/// observable, and a caller that tunes one without the other is measuring two
+/// different secant lengths and calling them one Jacobian.
+///
+/// [`Default`] is the shipping pair ([`FD_STEP_POSITION_M`],
+/// [`FD_STEP_VELOCITY_MS`]), measured for the **first** encounter of the
+/// shipping campaign — a response of order 10–20 km of b-plane. That criterion
+/// does not travel: an observable downstream of a flyby amplifies the same step
+/// by the flyby's gain, and a step chosen for encounter 1 can be a secant across
+/// several Earth radii at a resonant return. See
+/// [`keyhole_target::return_sensitivity`](crate::keyhole_target::return_sensitivity),
+/// which is why this stopped being two constants.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FdSteps {
+    /// Step on each of the three position columns, metres.
+    pub position_m: f64,
+    /// Step on each of the three velocity columns, m/s.
+    pub velocity_ms: f64,
+}
+
+impl Default for FdSteps {
+    fn default() -> Self {
+        Self {
+            position_m: FD_STEP_POSITION_M,
+            velocity_ms: FD_STEP_VELOCITY_MS,
+        }
+    }
+}
+
+impl FdSteps {
+    /// Both steps scaled by `factor` — the sweep a step-size plateau study walks.
+    pub fn scaled(self, factor: f64) -> Self {
+        Self {
+            position_m: self.position_m * factor,
+            velocity_ms: self.velocity_ms * factor,
+        }
+    }
+}
+
+/// [`bplane_jacobian`] with the finite-difference steps named by the caller.
+///
+/// Use this when the observable is not the one the shipping steps were measured
+/// on. The steps are not a taste: too large and the secant spans the curvature,
+/// too small and the difference is propagation round-off, and the failure in
+/// both directions is a finite, symmetric, plausible matrix. The only way to
+/// know is a plateau study — halve and watch the column stop moving — which is
+/// what this signature exists to make possible.
+pub fn bplane_jacobian_with_steps<F>(
     seed: StateVector,
+    steps: FdSteps,
     mut sample: F,
 ) -> Result<Matrix2x6<f64>, UncertaintyError>
 where
@@ -416,9 +491,9 @@ where
     let mut j = Matrix2x6::zeros();
     for col in 0..6 {
         let h = if col < 3 {
-            FD_STEP_POSITION_M
+            steps.position_m
         } else {
-            FD_STEP_VELOCITY_MS
+            steps.velocity_ms
         };
         let plus = sample(offset(seed, col, h)).map_err(|e| tag(e, col))?;
         let minus = sample(offset(seed, col, -h)).map_err(|e| tag(e, col))?;
@@ -1051,6 +1126,144 @@ mod tests {
         }
     }
 
+    /// **The needle case: an ellipse 260 000 times longer than it is wide.**
+    ///
+    /// The keyhole layer produces exactly this and the closed forms above cannot
+    /// see it. Mapping the shipping (invented) covariance to a resonant return
+    /// gives a 1σ ellipse of **131 334 km × 0.5 km** against an 11 310 km capture
+    /// disc — an aspect ratio of 2.6e5, where the ray directions `θ` that enter
+    /// the disc occupy a band of order `1/aspect` radians. An equispaced rule that
+    /// steps over that band returns a plausible small number rather than an error,
+    /// which is the module's founding failure mode wearing different clothes.
+    ///
+    /// So it is checked against an independent estimator that shares none of the
+    /// quadrature's assumptions: 4 million deterministic Gaussian draws, whitened
+    /// by the same Cholesky factor and counted against the disc. The RNG is a
+    /// fixed-seed xorshift with Box–Muller rather than a dependency, so the test
+    /// is reproducible and adds nothing to the crate's link surface.
+    #[test]
+    fn a_needle_ellipse_matches_monte_carlo() {
+        // The measured return geometry: σ along the needle, σ across it, and the
+        // mean sitting inside the capture disc but strung out along the needle.
+        let sigma_long = 1.31334e8;
+        let sigma_short = 5.0e2;
+        let capture = 1.1310e7;
+        // An arbitrary orientation, so nothing lines up with the frame axes.
+        let phi = 0.7_f64;
+        let (c, s) = (phi.cos(), phi.sin());
+        let l = Matrix2::new(
+            c * sigma_long,
+            -s * sigma_short,
+            s * sigma_long,
+            c * sigma_short,
+        );
+        let cov = l * l.transpose();
+
+        for mean in [
+            Vector2::new(4.107e6, 0.0),
+            Vector2::new(2.6512e7, 0.0),
+            Vector2::zeros(),
+        ] {
+            let u = uncertainty(mean, cov, capture);
+            let p = u.impact_probability().expect("well-posed");
+
+            // Independent estimator: draw u ~ N(0, I₂), map to x = μ + L u, count.
+            const N: usize = 4_000_000;
+            let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+            let mut next = || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                // (0, 1] — never exactly 0, so the log below is finite.
+                ((state >> 11) as f64 + 1.0) / ((1u64 << 53) as f64 + 1.0)
+            };
+            let mut hits = 0usize;
+            for _ in 0..(N / 2) {
+                let (u1, u2) = (next(), next());
+                let r = (-2.0 * u1.ln()).sqrt();
+                let th = std::f64::consts::TAU * u2;
+                for z in [Vector2::new(r * th.cos(), r * th.sin()); 1] {
+                    let x = mean + l * z;
+                    if x.norm() <= capture {
+                        hits += 1;
+                    }
+                }
+                // Box–Muller yields a pair; use the second draw too rather than
+                // throwing away half the samples.
+                let z2 = Vector2::new(r * th.sin(), r * th.cos());
+                let x2 = mean + l * z2;
+                if x2.norm() <= capture {
+                    hits += 1;
+                }
+            }
+            let mc = hits as f64 / N as f64;
+            // 4e6 draws at p ≈ 0.06 give a standard error ~1.2e-4; allow 5σ plus a
+            // floor for the near-zero case.
+            let tol = 5.0 * (mc * (1.0 - mc) / N as f64).sqrt() + 1.0e-4;
+            assert!(
+                (p - mc).abs() <= tol,
+                "needle at mean {mean:?}: quadrature {p:.6} vs Monte Carlo {mc:.6} (tol {tol:.2e})"
+            );
+        }
+    }
+
+    /// The same conditioning question asked of the quadrature alone, and the
+    /// point where f64 stops being able to hold the question at all.
+    ///
+    /// Squeezing the minor axis changes the geometry only in the direction the
+    /// ellipse contributes nothing, so the probability must not move; an
+    /// under-resolved `θ`-rule would drift instead. That holds to an aspect ratio
+    /// of **2.6e7**.
+    ///
+    /// One decade further the covariance is no longer positive definite *in
+    /// f64* — `(σ_long/σ_short)² = 6.9e16` is past the 1e16 where a symmetric
+    /// matrix's smaller eigenvalue is lost to round-off in forming `LLᵀ`. This
+    /// pins that the module **refuses** there rather than returning the plausible
+    /// small number it could: the covariance validation is the guard, and this is
+    /// the case that proves it is load-bearing rather than ceremonial.
+    #[test]
+    fn needle_probability_holds_until_f64_loses_the_covariance() {
+        let sigma_long = 1.31334e8;
+        let capture = 1.1310e7;
+        let phi = 0.7_f64;
+        let (c, s) = (phi.cos(), phi.sin());
+        let mean = Vector2::new(4.107e6, 0.0);
+        let needle = |sigma_short: f64| {
+            let l = Matrix2::new(
+                c * sigma_long,
+                -s * sigma_short,
+                s * sigma_long,
+                c * sigma_short,
+            );
+            l * l.transpose()
+        };
+
+        let mut previous: Option<f64> = None;
+        for sigma_short in [5.0e2, 5.0e1, 5.0e0] {
+            let u = uncertainty(mean, needle(sigma_short), capture);
+            let p = u.impact_probability().expect("well-posed");
+            if let Some(prev) = previous {
+                assert!(
+                    (p - prev).abs() <= 1.0e-3 * prev.max(1.0e-6),
+                    "σ_short {sigma_short:e}: P moved from {prev:.9} to {p:.9} — the θ-rule is \
+                     not resolving the band where the needle enters the disc"
+                );
+            }
+            previous = Some(p);
+        }
+
+        // Past the f64 limit: refused, not answered.
+        let u = uncertainty(mean, needle(5.0e-1), capture);
+        assert_eq!(
+            u.impact_probability(),
+            Err(UncertaintyError::NotPositiveDefinite),
+            "an aspect ratio f64 cannot represent must be refused, not answered"
+        );
+        assert!(
+            StateCovariance::new(Matrix6::from_diagonal(&Vector6::repeat(1.0))).is_ok(),
+            "sanity: a well-conditioned covariance still builds"
+        );
+    }
     /// The whole reason the ξ,ζ convention can stay deferred: the probability is
     /// invariant under any orthonormal change of b-plane basis. Rotate the mean and
     /// the covariance together — and reflect, which is the case a rotation-only

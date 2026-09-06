@@ -92,7 +92,8 @@ use crate::epoch::Epoch;
 use crate::geometry::BPlaneEncounter;
 use crate::keyhole::{CircleBranch, OpikFrame, Resonance, ResonantCircle, AU_M, JULIAN_YEAR_S};
 use crate::perturber_field::EphemerisPerturber;
-use crate::scenario::{RealFieldScenario, ScenarioError};
+use crate::scenario::{RealFieldScenario, ScenarioError, UNCERTAINTY_REDUCTION_LEAD_SECONDS};
+use crate::state::StateVector;
 
 /// Metres per kilometre — the ephemeris speaks km, everything here speaks m.
 const M_PER_KM: f64 = 1.0e3;
@@ -143,6 +144,13 @@ pub enum KeyholeTargetError {
         /// The impulse magnitude tried, m/s.
         dv_m_s: f64,
     },
+    /// The flyby happened, but no Earth approach fell inside the return census
+    /// gate — so there is no second encounter to pin a sampling plan to, and
+    /// inventing a reduction epoch for one would be the worst kind of plausible.
+    NoReturn {
+        /// The impulse magnitude flown, m/s.
+        dv_m_s: f64,
+    },
     /// A deflection solve or evaluation failed.
     Deflection(DeflectionError),
     /// A propagation or scenario operation failed.
@@ -171,6 +179,10 @@ impl std::fmt::Display for KeyholeTargetError {
             KeyholeTargetError::NoFirstEncounter { dv_m_s } => write!(
                 f,
                 "Δv {dv_m_s:.6} m/s left no Earth encounter inside the scan gate"
+            ),
+            KeyholeTargetError::NoReturn { dv_m_s } => write!(
+                f,
+                "Δv {dv_m_s:.6} m/s flew the flyby but left no return inside the census gate"
             ),
             KeyholeTargetError::Deflection(e) => write!(f, "deflection: {e}"),
             KeyholeTargetError::Scenario(e) => write!(f, "scenario: {e}"),
@@ -407,6 +419,15 @@ impl FlownReturn {
 pub struct KeyholeShot {
     /// The impulse magnitude flown, m/s (along the caller's direction).
     pub dv_m_s: f64,
+    /// When encounter 1's closest approach happens.
+    ///
+    /// Carried because everything downstream that has to be *pinned to this
+    /// flight* hangs off it — the handoff epoch, and the fixed reduction epochs a
+    /// chained-encounter Jacobian samples at
+    /// ([`ReturnSamplingPlan`]). Re-deriving it from
+    /// [`FlownReturn::years_after_first`] loses seconds to the year conversion,
+    /// and seconds at a flyby are thousands of kilometres downstream.
+    pub first_epoch: Epoch,
     /// Encounter 1's b-plane reduction.
     pub encounter: BPlaneEncounter,
     /// Encounter 1's b-point in the **aiming** frame, `(ξ, ζ)` metres.
@@ -523,6 +544,7 @@ pub fn fly_keyhole_shot(
 
     Ok(KeyholeShot {
         dv_m_s,
+        first_epoch: ca1.epoch,
         a_prime_m: frame.post_encounter_semi_major_axis(point),
         encounter: enc1,
         point,
@@ -835,6 +857,342 @@ pub fn solve_keyhole_return(
         dv_window_m_s: b - a,
         flights,
         bracketed,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 at the return: the chained-encounter b-plane sensitivity
+// ---------------------------------------------------------------------------
+
+/// The fixed geometry every sample of a chained two-encounter Jacobian shares —
+/// the plan a return-encounter covariance mapping is flown against.
+///
+/// [`crate::uncertainty`]'s founding lesson is that a Tier-3 sample must be
+/// reduced at a **fixed epoch**, never at its own closest approach: closest
+/// approach is an argmin over a sampled polyline, so perturbing the state moves
+/// it by a whole sample or not at all, and the resulting Jacobian is quantised
+/// noise wearing a plausible shape. Chaining two encounters multiplies the
+/// places that trap can be sprung, so **every** epoch here is pinned from one
+/// nominal flight and reused by all thirteen samples:
+///
+/// - `deflection_epoch` — when the impulse goes in (the caller's).
+/// - `handoff_epoch` — where the campaign leg stops and the resonant-orbit leg
+///   starts, taken from the *nominal* flight's encounter 1 plus
+///   [`KeyholeShotOptions::handoff_seconds_after_ca`]. Letting each sample find
+///   its own would re-introduce the argmin at the seam.
+/// - `first_reduce_epoch` / `second_reduce_epoch` — where the two encounters are
+///   read, each `UNCERTAINTY_REDUCTION_LEAD_SECONDS` before its nominal closest
+///   approach.
+///
+/// The [`cadence_seconds`](Self::cadence_seconds) is part of the plan for the
+/// same reason: a Jacobian is only valid at the cadence its columns converged
+/// at, and here the cadence bias does **not** simply cancel between the two
+/// differenced runs the way it does at a single encounter — whatever survives
+/// the differencing is multiplied by the flyby's gain on its way to the return.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReturnSamplingPlan {
+    /// The campaign start — the epoch the perturbed seeds are expressed at.
+    pub campaign_start: Epoch,
+    /// The unperturbed seed at `campaign_start`, barycentric ICRF, SI.
+    pub seed: StateVector,
+    /// When the impulse is applied.
+    pub deflection_epoch: Epoch,
+    /// The impulse itself, m/s in barycentric ICRF — `dv · direction`, resolved
+    /// once so no sample can re-resolve it differently.
+    pub impulse: Vector3<f64>,
+    /// Where the campaign leg hands over to the resonant-orbit leg. Fixed.
+    pub handoff_epoch: Epoch,
+    /// Where encounter 1 is reduced. Fixed.
+    pub first_reduce_epoch: Epoch,
+    /// Where the return is reduced. Fixed.
+    pub second_reduce_epoch: Epoch,
+    /// Snapshot cadence of every leg of every sample, seconds.
+    pub cadence_seconds: f64,
+    /// `μ⊕`, m³/s² — both reductions are taken against it.
+    pub mu_earth: f64,
+    /// Earth's radius, metres — likewise, so the capture radii match the flown
+    /// solution's.
+    pub earth_radius_m: f64,
+}
+
+/// One chained sample: the same flight read at **both** encounters.
+///
+/// Both are carried because the ratio between them is the only independent check
+/// this pipeline has. The covariance is invented (see
+/// [`StateCovariance::synthetic_along_track`]) and therefore cannot falsify a
+/// Jacobian; what can is the closed form, which predicts `∂ζ₂/∂ζ₁` from
+/// [`OpikFrame::gradient_semi_major_axis`] and Earth's own motion. That
+/// comparison needs both encounters measured on the same perturbation.
+///
+/// [`StateCovariance::synthetic_along_track`]: crate::uncertainty::StateCovariance::synthetic_along_track
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChainedSample {
+    /// Encounter 1, reduced at [`ReturnSamplingPlan::first_reduce_epoch`].
+    pub first: BPlaneEncounter,
+    /// The resonant return, reduced at
+    /// [`ReturnSamplingPlan::second_reduce_epoch`].
+    pub second: BPlaneEncounter,
+}
+
+/// Build the sampling plan by flying the shot **once**, and hand back the flight
+/// that defined it.
+///
+/// `dv_m_s` should be a Δv whose return is the one being studied — in practice
+/// the floor from [`solve_keyhole_return`]. The single flight here is what pins
+/// the handoff and the two reduction epochs; everything afterwards is flown
+/// against them.
+///
+/// **Cost: one flight** (~15 s on the shipping rock in release).
+pub fn return_sampling_plan(
+    scenario: &RealFieldScenario,
+    ds: &DeflectionScenario<'_>,
+    aiming: KeyholeAiming<'_>,
+    dv_m_s: f64,
+    resonance: Resonance,
+    opts: &KeyholeShotOptions,
+    cadence_seconds: f64,
+) -> Result<(ReturnSamplingPlan, KeyholeShot), KeyholeTargetError> {
+    if !(cadence_seconds.is_finite() && cadence_seconds > 0.0) {
+        return Err(KeyholeTargetError::InvalidInput(format!(
+            "cadence must be finite and > 0 (got {cadence_seconds})"
+        )));
+    }
+    let dir_norm = aiming.direction.norm();
+    if !(dir_norm.is_finite() && dir_norm > 0.0) {
+        return Err(KeyholeTargetError::Deflection(DeflectionError::NoDirection));
+    }
+    let shot = fly_keyhole_shot(scenario, ds, aiming, dv_m_s, resonance, opts)?;
+    let flown = shot
+        .flown_return
+        .as_ref()
+        .ok_or(KeyholeTargetError::NoReturn { dv_m_s })?;
+
+    let seed = ds
+        .nominal()
+        .state_at(scenario.epoch0())
+        .map_err(|e| KeyholeTargetError::Scenario(e.to_string()))?;
+    let plan = ReturnSamplingPlan {
+        campaign_start: scenario.epoch0(),
+        seed,
+        deflection_epoch: aiming.deflection_epoch,
+        impulse: (dv_m_s / dir_norm) * aiming.direction,
+        handoff_epoch: shot
+            .first_epoch
+            .shifted_by_seconds(opts.handoff_seconds_after_ca),
+        first_reduce_epoch: shot
+            .first_epoch
+            .shifted_by_seconds(-UNCERTAINTY_REDUCTION_LEAD_SECONDS),
+        second_reduce_epoch: flown
+            .epoch
+            .shifted_by_seconds(-UNCERTAINTY_REDUCTION_LEAD_SECONDS),
+        cadence_seconds,
+        mu_earth: aiming.frame.mu_earth,
+        earth_radius_m: aiming.earth_radius_m,
+    };
+    Ok((plan, shot))
+}
+
+/// Fly one perturbed seed through **both** encounters and read each at its fixed
+/// epoch — the sample a chained Jacobian differences.
+///
+/// The flight is deliberately the same shape as [`fly_keyhole_shot`]'s: campaign
+/// leg from the impulse out to the handoff, then the resonant-orbit leg, both
+/// under the scenario's own field at the plan's cadence. What differs is that
+/// nothing here searches for a closest approach — the epochs come from the plan —
+/// and that the seed is the caller's rather than the scenario's, which is the
+/// whole point.
+///
+/// **Cost: one flight.**
+pub fn chained_sample(
+    scenario: &RealFieldScenario,
+    plan: &ReturnSamplingPlan,
+    seed: StateVector,
+) -> Result<ChainedSample, KeyholeTargetError> {
+    let cad = plan.cadence_seconds;
+    let scen = |e: ScenarioError| KeyholeTargetError::Scenario(e.to_string());
+    let clocked = |e: crate::clock::ClockError| KeyholeTargetError::Scenario(e.to_string());
+
+    // Leg 0: campaign start → deflection epoch, skipped when they coincide (the
+    // shipping keyhole nudges at the campaign start, so this usually is a no-op).
+    let start_state = if plan.deflection_epoch.tdb_seconds_past_j2000()
+        > plan.campaign_start.tdb_seconds_past_j2000() + 1.0e-6
+    {
+        let n = snapshots_to(plan.campaign_start, plan.deflection_epoch, cad)?;
+        scenario
+            .propagate_free(plan.campaign_start, seed, cad, n)
+            .map_err(scen)?
+            .state_at(plan.deflection_epoch)
+            .map_err(clocked)?
+    } else {
+        seed
+    };
+    let kicked = crate::deflection::apply_impulse(start_state, plan.impulse);
+
+    // Leg 1: the campaign, through encounter 1, out to the fixed handoff.
+    let n1 = snapshots_to(plan.deflection_epoch, plan.handoff_epoch, cad)?;
+    let leg1 = scenario
+        .propagate_free(plan.deflection_epoch, kicked, cad, n1)
+        .map_err(scen)?;
+    let at_first = leg1.state_at(plan.first_reduce_epoch).map_err(clocked)?;
+    let hand = leg1.state_at(plan.handoff_epoch).map_err(clocked)?;
+
+    // Leg 2: the resonant orbit, out to the fixed return reduction.
+    let n2 = snapshots_to(plan.handoff_epoch, plan.second_reduce_epoch, cad)?;
+    let at_second = scenario
+        .propagate_free(plan.handoff_epoch, hand, cad, n2)
+        .map_err(scen)?
+        .state_at(plan.second_reduce_epoch)
+        .map_err(clocked)?;
+
+    let earth = EphemerisPerturber::new(scenario.ephemeris().clone(), EARTH_J2000);
+    let reduce = |t: Epoch, s: StateVector| -> Result<BPlaneEncounter, KeyholeTargetError> {
+        let e = earth
+            .state_at(t)
+            .map_err(|e| KeyholeTargetError::Scenario(e.to_string()))?;
+        BPlaneEncounter::from_relative_state(
+            s.position - e.position,
+            s.velocity - e.velocity,
+            plan.mu_earth,
+            plan.earth_radius_m,
+        )
+        .map_err(|e| KeyholeTargetError::Scenario(e.to_string()))
+    };
+    Ok(ChainedSample {
+        first: reduce(plan.first_reduce_epoch, at_first)?,
+        second: reduce(plan.second_reduce_epoch, at_second)?,
+    })
+}
+
+/// Snapshot count covering `[from, to]` at `cadence`, with a cadence of margin so
+/// `state_at(to)` is inside the span rather than exactly on its edge.
+fn snapshots_to(from: Epoch, to: Epoch, cadence: f64) -> Result<u32, KeyholeTargetError> {
+    let span = to.tdb_seconds_past_j2000() - from.tdb_seconds_past_j2000();
+    if !(span.is_finite() && span > 0.0) {
+        return Err(KeyholeTargetError::InvalidInput(format!(
+            "sampling span must be positive (got {span} s)"
+        )));
+    }
+    Ok(((span / cadence).ceil() + 1.0) as u32)
+}
+
+/// The covariance-independent half of a **return**-encounter Tier-3 answer: the
+/// nominal reduction, the frame it defines, and the 2×6 Jacobian about it.
+///
+/// The chaining is in the *propagation*, not in a matrix product. Each column
+/// flies a perturbed seed all the way through encounter 1 and on to the return,
+/// so the flyby's amplification is in the numbers rather than modelled — which is
+/// the only honest way to do it, because the amplification **is** the keyhole.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReturnSensitivity {
+    /// The plan every column was flown against.
+    pub plan: ReturnSamplingPlan,
+    /// The unperturbed chained sample — both encounters at their fixed epochs.
+    pub nominal: ChainedSample,
+    /// The orthonormal b-plane frame the Jacobian's rows are in, built from the
+    /// **return**. Deliberately the rotation-invariant
+    /// [`BPlaneBasis`](crate::uncertainty::BPlaneBasis) and not the Öpik frame:
+    /// the probability integral is invariant under any orthonormal choice, so the
+    /// pinned ξ,ζ convention buys nothing there. The Öpik split is a separate
+    /// readout ([`opik`](Self::opik)) because it answers a different question —
+    /// whether the *search* converged — and making one frame do both jobs is how
+    /// a convergence gauge ends up load-bearing for a probability.
+    pub basis: crate::uncertainty::BPlaneBasis,
+    /// `∂(return b-plane coordinates)/∂(seed state)`, metres per metre and per
+    /// m/s, in `basis`.
+    pub jacobian: nalgebra::Matrix2x6<f64>,
+    /// The steps the columns were differenced with.
+    pub steps: crate::uncertainty::FdSteps,
+}
+
+impl ReturnSensitivity {
+    /// Push a state covariance through to the return: `Σ_b = J Σ Jᵀ`, with the
+    /// **return's own** focused capture radius as the impact disc.
+    ///
+    /// The capture radius is the easy thing to get wrong here: it is set by
+    /// `v∞`, the return's `v∞` is not encounter 1's, and
+    /// [`KeyholeAiming::earth_radius_m`] travels through this whole module as a
+    /// constant that looks like it might be the disc. It is not — it is `R⊕`.
+    /// The disc comes from `nominal.second`.
+    pub fn map(
+        &self,
+        covariance: &crate::uncertainty::StateCovariance,
+    ) -> crate::uncertainty::BPlaneUncertainty {
+        crate::uncertainty::BPlaneUncertainty::from_jacobian(
+            &self.jacobian,
+            covariance,
+            &self.nominal.second,
+            self.basis,
+        )
+    }
+
+    /// The nominal return crossing in `basis`, metres.
+    pub fn mean(&self) -> Vector2<f64> {
+        self.basis.project(&self.nominal.second)
+    }
+
+    /// The return's own Öpik frame, built at the reduction epoch — the
+    /// convergence gauge, not the probability frame.
+    ///
+    /// `ζ₂` is the timing coordinate and Δv is a timing knob, so a converged
+    /// refinement has spent `ζ₂` and left the residual in the spatial `ξ₂`; see
+    /// the module doc. `None` if Earth's heliocentric state or the frame cannot
+    /// be built there.
+    pub fn opik(&self, ephemeris: &crate::ephemeris::Ephemeris) -> Option<OpikFrame> {
+        let (r_km, v_km) = ephemeris
+            .state_km_s(
+                EARTH_J2000,
+                SUN_J2000,
+                self.plan.second_reduce_epoch.as_hifitime(),
+            )
+            .ok()?;
+        let mu_sun = ephemeris.sun_gm_m3_s2().ok()?;
+        OpikFrame::new(
+            &self.nominal.second,
+            r_km * M_PER_KM,
+            v_km * M_PER_KM,
+            mu_sun,
+        )
+        .ok()
+    }
+}
+
+/// Build the chained-encounter sensitivity: 13 flights against a fixed plan.
+///
+/// **The steps are a required argument, not a default**, and that is the point of
+/// this function existing separately from `RealFieldScenario::bplane_sensitivity`.
+/// The shipping [`FdSteps`](crate::uncertainty::FdSteps) were measured to provoke
+/// a 10–20 km response at **encounter 1**. On the shipping 3:4 keyhole the flyby
+/// multiplies a seed perturbation by ~10⁴ on its way to the return, so that same
+/// velocity step provokes tens of thousands of kilometres there — a secant across
+/// several times the capture disc the answer is integrated over, returning a
+/// finite, symmetric, entirely plausible matrix. Choose the steps from a plateau
+/// study on *this* observable (`probe_keyhole_probability steps`), not by
+/// inheritance.
+///
+/// **Cost: 13 flights** — ~3 min on the shipping rock in release at a 1-day
+/// cadence. An on-demand worker or an example, never a build path.
+pub fn return_sensitivity(
+    scenario: &RealFieldScenario,
+    plan: &ReturnSamplingPlan,
+    steps: crate::uncertainty::FdSteps,
+) -> Result<ReturnSensitivity, crate::uncertainty::UncertaintyError> {
+    use crate::uncertainty::{bplane_jacobian_with_steps, BPlaneBasis, UncertaintyError};
+    let sample = |s: StateVector| -> Result<ChainedSample, UncertaintyError> {
+        chained_sample(scenario, plan, s).map_err(|e| UncertaintyError::SampleFailed {
+            column: None,
+            message: e.to_string(),
+        })
+    };
+    let nominal = sample(plan.seed)?;
+    let basis = BPlaneBasis::from_encounter(&nominal.second);
+    let jacobian =
+        bplane_jacobian_with_steps(plan.seed, steps, |s| Ok(basis.project(&sample(s)?.second)))?;
+    Ok(ReturnSensitivity {
+        plan: *plan,
+        nominal,
+        basis,
+        jacobian,
+        steps,
     })
 }
 

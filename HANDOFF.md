@@ -87,7 +87,14 @@ Read this table first, then the session that owns the layer you are touching.
    class of flyby, and a resonant return is in no truth table — leaving
    dop853-at-a-tighter-tolerance as the only oracle, which is what was run. See
    *The integrator, measured instead of replaced*.
-6. Phase 3.
+6. **One contradiction inside the repo, found 2026-09-06 and not resolved.** The
+   3:4 return's timing coordinate reproduces as **891 km** against a spatial 4 014 km
+   (`probe_integrator_convergence`, and the keyhole-targeting memory says the same),
+   while `core/src/keyhole_target.rs`'s own module-doc table says **786 km** against
+   4 013 km for the same refined shot. Two spellings of one measurement disagreeing —
+   the class of thing this project keeps catching, and cheap to settle by re-running
+   `probe_keyhole_return` and believing whichever the code prints.
+7. Phase 3.
 
 ---
 

@@ -24,6 +24,18 @@
 //! is the right *cost* proxy regardless: the work is propagate + scan + reduce, and
 //! which component of the seed moved does not change any of the three.
 //!
+//! # Reinterpreted 2026-09-06 — read this before quoting the cadence table
+//!
+//! The cadence numbers below are correct and reproduce. What they *mean* is not what
+//! this file concluded: the accuracy the cadence appears to buy is a **step-size**
+//! effect, and the forward error tolerance is what controls it. At `rtol = 1e-13`
+//! the 30-day cadence sits 0.5 m from the 1-day answer instead of 13.6 km. So a
+//! coarse cadence is not inherently inaccurate — it is inaccurate *at the shipping
+//! tolerance*, and the two have to be chosen together. See
+//! `probe_integrator_convergence` and `ImpactorConfig::forward_rtol`. The
+//! derivative conclusion this file reaches is untouched and was re-measured there:
+//! the column moves 0.0225 % across four decades of tolerance.
+//!
 //! Requires kernels.
 //!
 //!   cargo run -p asteroid_core --release --example probe_tier3_cost

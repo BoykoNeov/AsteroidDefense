@@ -523,18 +523,67 @@ func _process(delta: float) -> void:
 	_poll_tier3()
 	_tick_plan_debounce(delta)
 
-	if paused:
+	# The clock still advances while a build runs, but not while paused — and note
+	# this is an `if`, not the early `return` it used to be: the memo prime below
+	# has to happen on *both* paths. A paused frame draws exactly as much as a
+	# running one.
+	if not paused:
+		var prev := t
+		t = clampf(t + time_dir * WARP_STEPS[warp_idx] * delta, T_MIN, T_MAX)
+		# Fire an event only when the clock *advances* across it (time_dir > 0). Running
+		# time backward silently un-fires the events it passes, so advancing again
+		# re-plays them — no spam while reversing or scrubbing.
+		for ev in _events:
+			var passed: bool = t >= ev.t
+			if passed and not ev.fired and t > prev:
+				event_logged.emit(_stamp(ev.t) + "  " + ev.msg)
+			ev.fired = passed
+
+	# Last, because it needs the settled clock: priming at the top would fill the
+	# memo at the *previous* epoch and every consumer would miss it.
+	_prime_ephem_positions()
+
+
+## Fill the per-frame memo for every DE440-sourced body in one binding crossing.
+##
+## `Sim` is an autoload, so this runs before any view's `_process` and long before
+## any `_draw` — by the time a layer asks `pos_ecl` for a planet at the clock, the
+## answer is already sitting in `_pos_memo`.
+##
+## This is not a second cache. It fills the *existing* one (`name -> [t, pos]`,
+## same keys, same exact-epoch rule) through `body_positions_ecl_au`, so a caller
+## asking any other epoch still falls through to its own lookup and an unprimed
+## body is served exactly as it was before. What changes is the count: the twenty-
+## four ephemeris bodies the 3D view, the tag layer and the HUD all range every
+## frame cost **one** crossing between them instead of twenty-four.
+##
+## ZERO stays ZERO. The binding returns it for a body outside the kernel span, and
+## in this heliocentric frame that is the Sun's position, not a blank — priming
+## does not make that safe and does not pretend to. Callers gate on
+## `bodies_online` and the clock clamp exactly as they always did.
+func _prime_ephem_positions() -> void:
+	if not bodies_online:
 		return
-	var prev := t
-	t = clampf(t + time_dir * WARP_STEPS[warp_idx] * delta, T_MIN, T_MAX)
-	# Fire an event only when the clock *advances* across it (time_dir > 0). Running
-	# time backward silently un-fires the events it passes, so advancing again
-	# re-plays them — no spam while reversing or scrubbing.
-	for ev in _events:
-		var passed: bool = t >= ev.t
-		if passed and not ev.fired and t > prev:
-			event_logged.emit(_stamp(ev.t) + "  " + ev.msg)
-		ev.fired = passed
+	var ids := PackedInt64Array()
+	var names: Array[String] = []
+	for el in planets:
+		ids.append(el.naif_id)
+		names.append(el.name)
+	for el in asteroids:
+		ids.append(el.naif_id)
+		names.append(el.name)
+	if ids.is_empty():
+		return
+	ffi_calls += 1
+	var out := mission.body_positions_ecl_au(ids, tdb(t))
+	# A short answer would slide every body past the gap onto its neighbour's
+	# position — say so rather than draw it. The binding's contract is one slot per
+	# id, misses included, and it has a test.
+	if out.size() != names.size():
+		push_error("body_positions_ecl_au returned %d for %d ids" % [out.size(), names.size()])
+		return
+	for i in names.size():
+		_pos_memo[names[i]] = [t, out[i]]
 
 
 ## Console timestamp. "E-nnnn" is days-to-impact — meaningful only when there is

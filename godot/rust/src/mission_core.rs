@@ -1376,6 +1376,41 @@ impl MissionCore {
             .map(icrf_km_to_ecliptic_au)
     }
 
+    /// [`body_position_ecl_au`](Self::body_position_ecl_au) for many bodies at
+    /// **one** epoch, in the order asked. Element `i` is `None` for exactly the
+    /// reasons the single-body call returns `None`; the vector is always
+    /// `naif_ids.len()` long, so a caller can zip it back against its own list
+    /// without tracking which lookups survived.
+    ///
+    /// **This makes no lookup faster.** It is the same per-body ephemeris query,
+    /// and the `Epoch` conversion it hoists out of the loop is nanoseconds against
+    /// a ~11 µs lookup. What it removes is on the *other* side of the binding: the
+    /// 3D view asks for twenty-five bodies at the clock every frame, and each ask
+    /// was a separate GDExtension crossing with its own argument marshalling and
+    /// `Vector3` return. One crossing for the set costs the same ephemeris work and
+    /// a twenty-fifth of the traffic.
+    ///
+    /// Kept here rather than written straight into the `#[func]` so the "batch
+    /// agrees with the singles" property has somewhere to be tested — the binding
+    /// layer needs a live Godot to construct a `PackedInt64Array`, and this does
+    /// not.
+    pub fn body_positions_ecl_au(
+        &self,
+        naif_ids: &[i32],
+        tdb_seconds: f64,
+    ) -> Vec<Option<Vector3<f64>>> {
+        let epoch = Epoch::from_tdb_seconds_past_j2000(tdb_seconds).as_hifitime();
+        naif_ids
+            .iter()
+            .map(|id| {
+                self.ephemeris
+                    .position_km(Frame::from_ephem_j2000(*id), SUN_J2000, epoch)
+                    .ok()
+                    .map(icrf_km_to_ecliptic_au)
+            })
+            .collect()
+    }
+
     /// Heliocentric **ecliptic-J2000 AU** from an SSB-relative position in
     /// **metres** (the frame the integrated asteroid `Clock` stores), at `epoch`.
     ///
@@ -4268,6 +4303,59 @@ mod tests {
         );
     }
 
+    /// Kernel-gated. The batch lookup must return **bit-for-bit** what the
+    /// singles return, in order, including the `None`s.
+    ///
+    /// Exactness is the assertion, not a tolerance: the batch exists to remove
+    /// binding crossings, not to approximate anything, so any difference at all
+    /// means it took a different path through the ephemeris and the frontend
+    /// would be drawing two different solar systems depending on which call site
+    /// asked. Two epochs because a single one cannot catch an implementation that
+    /// hoisted the wrong thing out of the loop — the epoch conversion moves out of
+    /// the per-body work here, and a stale-epoch bug is invisible if you only ever
+    /// ask once.
+    ///
+    /// The list deliberately mixes the eight drawn planets with two ids that do
+    /// **not** resolve (Mars 499, absent from de440s; 2000001, a small body with no
+    /// kernel mounted), because the failure mode this guards is a batch that
+    /// silently *drops* misses and shortens the vector — which would slide every
+    /// body after the gap onto the wrong planet's position.
+    #[test]
+    fn batched_positions_equal_the_individual_lookups() {
+        if !have_kernels() {
+            eprintln!("skipping batched_positions_*: no DE kernel");
+            return;
+        }
+        let mc = MissionCore::load().expect("load kernels");
+        let ids: [i32; 10] = [199, 299, 399, 4, 5, 6, 7, 8, 499, 2_000_001];
+
+        for t in [0.0, 1.0e9] {
+            let batch = mc.body_positions_ecl_au(&ids, t);
+            assert_eq!(
+                batch.len(),
+                ids.len(),
+                "the batch must answer every id asked, misses included"
+            );
+            for (i, id) in ids.iter().enumerate() {
+                assert_eq!(
+                    batch[i],
+                    mc.body_position_ecl_au(*id, t),
+                    "batch element {i} (NAIF {id}) at TDB {t:.0} disagrees with the                      single-body lookup"
+                );
+            }
+            // Not vacuous: the eight planets really did resolve, so the equality
+            // above compared positions and not ten `None`s.
+            assert!(
+                batch[..8].iter().all(Option::is_some),
+                "the eight drawn planets must all resolve at TDB {t:.0}"
+            );
+            assert!(
+                batch[8].is_none() && batch[9].is_none(),
+                "the two unresolvable ids must come back as None, holding their slots"
+            );
+        }
+    }
+
     /// Kernel-gated. The discovered span must be genuinely usable at both edges
     /// and genuinely exhausted just outside them — the property the frontend's
     /// clock clamp relies on. Asserts the *shape* (a sane multi-century window
@@ -5066,6 +5154,120 @@ mod tests {
             None,
             "an unknown term is unavailable, not a silent 0"
         );
+    }
+
+    /// **Where the startup wait actually goes.** Reported, never asserted to a
+    /// magnitude — the point is the split, and the split is what decides whether
+    /// running the build worker's phases concurrently is worth anything.
+    ///
+    /// Run it with `--nocapture`:
+    /// ```text
+    /// ASTEROID_REQUIRE_KERNELS=1 cargo test -p asteroid_gdext --release     ///     build_phase_timings -- --nocapture --ignored
+    /// ```
+    ///
+    /// `#[ignore]`d because it is minutes of propagation whose only output is
+    /// prose. It is a measuring instrument, not a gate.
+    ///
+    /// **Why the forward half is measured by re-flying rather than by reading a
+    /// clock inside `build_with`.** `RealFieldScenario::build_with` does two
+    /// expensive things back to back — a 12-yr back-propagation at `rtol 1e-12`,
+    /// then a forward nominal flight it runs *itself* as the round-trip hit check
+    /// — and neither is separately timed from outside. `nominal_encounter_with`
+    /// re-flies exactly the second one: same seed, same stepper, same cadence and
+    /// snapshot count, same encounter scan (see
+    /// `RealFieldScenario::with_toggled_field`). So the forward half is timed
+    /// directly and the back half falls out as the remainder. That costs one extra
+    /// forward flight, which is the price of not putting a stopwatch in core for a
+    /// frontend question.
+    ///
+    /// The mount is timed twice on purpose. It reads a 646 MB kernel, so the first
+    /// call pays the disk and every later one is served from the OS page cache;
+    /// quoting one number for it would describe either a cold boot or a warm one
+    /// and not say which.
+    #[test]
+    #[ignore = "minutes of propagation; a measurement, not a gate"]
+    fn build_phase_timings() {
+        if !have_kernels() {
+            eprintln!("skipping build_phase_timings: no DE kernel");
+            return;
+        }
+        let k = asteroid_core::kernels::resolve_for_test("build_phase_timings")
+            .expect("kernels resolve");
+        let mc = MissionCore::load().expect("load kernels");
+
+        // --- The mount, cold then warm -------------------------------------
+        match k.small_bodies.as_ref() {
+            Some(sb) => {
+                let t0 = std::time::Instant::now();
+                let _cold = mount_small_bodies(&k.bsp, &k.pca, sb).expect("mount cold");
+                let cold = t0.elapsed();
+                let t1 = std::time::Instant::now();
+                let _warm = mount_small_bodies(&k.bsp, &k.pca, sb).expect("mount warm");
+                let warm = t1.elapsed();
+                println!(
+                    "mount sb441:      cold {:>8.3} s   warm {:>8.3} s",
+                    cold.as_secs_f64(),
+                    warm.as_secs_f64()
+                );
+            }
+            None => println!("mount sb441:      absent (optional 646 MB kernel not resolved)"),
+        }
+
+        // --- The build, and the forward half inside it ----------------------
+        let eph = mc.ephemeris_arc();
+        let t0 = std::time::Instant::now();
+        let built = BuiltScenario::build(Arc::clone(&eph), &ImpactorConfig::default(), false)
+            .expect("scenario builds");
+        let build_total = t0.elapsed();
+
+        let t1 = std::time::Instant::now();
+        built
+            .scenario_ref()
+            .nominal_encounter_with(&Tier2Config::default())
+            .expect("forward re-fly");
+        let forward = t1.elapsed();
+
+        // --- The comet ------------------------------------------------------
+        let t2 = std::time::Instant::now();
+        let comet = seed_orrery_body(
+            &eph,
+            built.scenario_ref(),
+            display_comet::NAME,
+            display_comet::KIND,
+            display_comet::elements(),
+            built.epoch0(),
+            display_comet::CADENCE_SECONDS,
+            display_comet::N_SNAPSHOTS,
+        )
+        .expect("comet flies");
+        let comet_dt = t2.elapsed();
+        assert_eq!(comet.name, display_comet::NAME);
+
+        let back = build_total.as_secs_f64() - forward.as_secs_f64();
+        println!(
+            "BuiltScenario:    {:>8.3} s total  = back-prop {:>8.3} s (remainder)              + forward {:>8.3} s (re-flown)",
+            build_total.as_secs_f64(),
+            back,
+            forward.as_secs_f64()
+        );
+        println!("comet:            {:>8.3} s", comet_dt.as_secs_f64());
+        println!(
+            "ceiling on overlapping the comet with the forward half: {:.3} s",
+            comet_dt.as_secs_f64().min(forward.as_secs_f64())
+        );
+
+        // The only assertion: the remainder is a real phase and not an artefact of
+        // the forward re-fly costing more than the whole build (which would mean
+        // this measurement's premise — that the re-fly reproduces the flight inside
+        // `build_with` — is wrong).
+        assert!(
+            back > 0.0,
+            "the forward re-fly ({:.3} s) came out longer than the whole build              ({:.3} s) — the re-fly is not the same work as the flight inside              build_with, and the split above means nothing",
+            forward.as_secs_f64(),
+            build_total.as_secs_f64()
+        );
+        // Not vacuous about the core it loaded, either.
+        assert!(mc.usable_span_tdb().1 > 0.0);
     }
 
     #[test]

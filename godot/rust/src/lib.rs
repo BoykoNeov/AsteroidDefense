@@ -2110,6 +2110,46 @@ impl Mission {
         }
     }
 
+    /// [`body_position_ecl_au`](Self::body_position_ecl_au) for a whole list of
+    /// NAIF ids at **one** epoch — one binding crossing instead of one per body.
+    ///
+    /// Returns a `PackedVector3Array` the same length and in the same order as
+    /// `naif_ids`, with `Vector3::ZERO` wherever the single-body call would have
+    /// returned `Vector3::ZERO`. **The contract is deliberately identical**,
+    /// including the trap: ZERO in this heliocentric frame is *the Sun*, not a
+    /// blank, so callers gate on `bodies_online` / the body's own span exactly as
+    /// they always have. A batch that quietly dropped its misses would be worse
+    /// than the trap — every body after a gap would take the previous one's
+    /// position.
+    ///
+    /// **Why it exists.** The 3D view asks for twenty-five bodies at the clock
+    /// every frame and paid twenty-five crossings for it, each marshalling two
+    /// arguments and a `Vector3` back. The ephemeris work is unchanged (~11 µs a
+    /// body either way); what this removes is the traffic, which `Sim.ffi_calls`
+    /// counts and `tests/_perf.gd` prices.
+    #[func]
+    fn body_positions_ecl_au(
+        &self,
+        naif_ids: PackedInt64Array,
+        tdb_seconds: f64,
+    ) -> PackedVector3Array {
+        let Some(core) = self.core.as_ref() else {
+            // Not loaded: the same answer the singles give, one per id, so the
+            // caller's zip against its own list still lines up.
+            return PackedVector3Array::from(vec![Vector3::ZERO; naif_ids.len()]);
+        };
+        let ids: Vec<i32> = naif_ids.as_slice().iter().map(|&i| i as i32).collect();
+        let out: Vec<Vector3> = core
+            .body_positions_ecl_au(&ids, tdb_seconds)
+            .into_iter()
+            .map(|p| match p {
+                Some(v) => Vector3::new(v.x as f32, v.y as f32, v.z as f32),
+                None => Vector3::ZERO,
+            })
+            .collect();
+        PackedVector3Array::from(out)
+    }
+
     /// Minimum along-track Δv (m/s) to lift the b-plane perigee to
     /// `target_perigee_m`, applied `lead_seconds` before impact. `-1.0` if the
     /// scenario is not built or the solve fails.

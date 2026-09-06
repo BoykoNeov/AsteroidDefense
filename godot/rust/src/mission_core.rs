@@ -2054,6 +2054,25 @@ impl MissionCore {
         Ok(self.bodies.len() - 1)
     }
 
+    /// Adopt one orrery body that was already flown, off-thread, in the field of
+    /// the scenario currently installed.
+    ///
+    /// The sibling of [`add_synthetic_body`](Self::add_synthetic_body), and split
+    /// off it for one reason: that one *flies* the body inline, and the display
+    /// comet's flight is ~4 s. Landing an already-flown body is a `push`. Both end
+    /// in the same `self.bodies`, so nothing downstream — the catalog accessors,
+    /// the frontend reading them — can tell which route a body took.
+    ///
+    /// The caller owns the question of whether the body was flown in *this*
+    /// scenario's field, because nothing here can check it: an [`OrreryBody`] is a
+    /// table of states and does not remember what produced it. The binding keeps
+    /// that promise by refusing a threat rebuild while the flight is in flight,
+    /// rather than by testing the body on arrival.
+    pub fn adopt_orrery_body(&mut self, body: OrreryBody) -> usize {
+        self.bodies.push(body);
+        self.bodies.len() - 1
+    }
+
     /// Number of bodies in the orrery catalog.
     pub fn catalog_count(&self) -> usize {
         self.bodies.len()
@@ -5278,14 +5297,29 @@ mod tests {
         }
         let mut mc = MissionCore::load().expect("load kernels");
 
-        // Exactly what `begin_build_scenario`'s worker does, in order.
-        let eph = mc.ephemeris_arc();
-        let built = BuiltScenario::build(Arc::clone(&eph), &ImpactorConfig::default(), false)
+        // Exactly what the binding does, in order — and the order is the point.
+        // The comet no longer rides the build worker: the scenario installs first,
+        // so the threat comes online without it, and the comet is flown afterwards
+        // against the INSTALLED scenario and adopted. The empty catalog in between
+        // is a real state the frontend sees and re-reads out of.
+        let built = BuiltScenario::build(mc.ephemeris_arc(), &ImpactorConfig::default(), false)
             .expect("scenario builds");
         let epoch0 = built.epoch0();
+        mc.install(built, Vec::new());
+        assert_eq!(
+            mc.catalog_count(),
+            0,
+            "the comet must not arrive with the threat — that wait is what moving it off bought"
+        );
+
+        // Read the field back from the core, not from before `install`: installing a
+        // scenario is what swaps the mounted almanac in, and the comet must fly in
+        // the field the threat was flown in, not the one that preceded it.
+        let eph = mc.ephemeris_arc();
+        let scenario = mc.scenario_arc().expect("a scenario is installed");
         let comet = seed_orrery_body(
             &eph,
-            built.scenario_ref(),
+            &scenario,
             display_comet::NAME,
             display_comet::KIND,
             display_comet::elements(),
@@ -5293,8 +5327,12 @@ mod tests {
             display_comet::CADENCE_SECONDS,
             display_comet::N_SNAPSHOTS,
         )
-        .expect("comet flies in the built field");
-        mc.install(built, vec![comet]);
+        .expect("comet flies in the installed field");
+        assert_eq!(
+            mc.adopt_orrery_body(comet),
+            0,
+            "the comet lands at the index the catalog accessors below read"
+        );
 
         assert_eq!(mc.catalog_count(), 1);
         assert_eq!(mc.catalog_name(0), Some(display_comet::NAME));

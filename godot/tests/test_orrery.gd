@@ -145,20 +145,34 @@ func _init() -> void:
 
 	# The b-plane view lights WITH the threat (3C-2c): its geometry is the same
 	# `EncounterFrame` the scenario build produces, so it is real exactly when the
-	# threat is. The comet lights too as of 3D — but on its own gate, set from what
-	# the catalog actually holds, not alongside `mission_online`. The interceptor
-	# stays dark: still no Lambert solver behind its cosmetic bezier. This is why
-	# there are four flags and not one.
+	# threat is. The comet does NOT, and that is what its own gate is for: its ~4 s
+	# flight came off the build worker so the threat solution would stop waiting on
+	# scenery, so it starts when the scenario installs and lands seconds later. The
+	# interceptor stays dark: still no Lambert solver behind its cosmetic bezier.
+	# This is why there are four flags and not one.
 	_check(sim.encounter_online,
 		"the b-plane view lights with the threat — same frame, same propagation")
-	_check(sim.comet_online,
-		"the comet lights from the catalog the worker flew alongside the threat")
+	_check(not sim.comet_online,
+		"the comet is NOT online with the threat — it flies on a worker of its own")
 	_check(not sim.interceptor_online,
 		"the interceptor stays dormant on its own gate (no Lambert solver behind it)")
 
+	# Now drive the comet's worker exactly as `_process` does. This wait is the one
+	# the threat solution used to pay and no longer does: every check above was
+	# reachable while the comet was still flying. Bounded, because a comet that
+	# never lands has to fail the check rather than hang the suite.
+	var t_comet := Time.get_ticks_msec()
+	while sim._comet_pending and Time.get_ticks_msec() - t_comet < 120000:
+		sim._poll_catalog()
+		OS.delay_msec(20)
+	_check(sim.comet_online,
+		"the comet lights from its own worker, %d ms after the threat"
+		% (Time.get_ticks_msec() - t_comet))
+
 	# --- The comet is the core's integration, gated on its own span ---------
-	# It rode the build worker through the same validated field as the threat, so
-	# it is drawable exactly where it was flown — and nowhere else. The gate is the
+	# It flew on a worker of its own but in the same validated field as the threat
+	# — the scenario it is seeded against is the installed one — so it is drawable
+	# exactly where it was flown, and nowhere else. The gate is the
 	# point: outside the span the binding returns ZERO, and ZERO here is the SUN.
 	_check(sim.comet_el.source == "catalog" and not sim.comet_el.has("m0"),
 		"the comet is a catalog body, not a GDScript Kepler ellipse")

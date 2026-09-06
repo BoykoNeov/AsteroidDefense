@@ -74,6 +74,11 @@ var mission_online := false
 ## such*: a designed orbit, honestly propagated, not a real object.
 var comet_online := false
 
+## The comet is still flying on its own worker and has not reached the catalog
+## yet. Distinct from `not comet_online`, which is also the resting state of a
+## build that has no comet at all — this one means "ask again next frame".
+var _comet_pending := false
+
 ## The interceptor is dormant. Its cruise path is a cosmetic bezier with no
 ## Lambert solver behind it — the one piece of this display that was never
 ## physics. It stays off until it is, rather than drawing a spacecraft on a
@@ -520,6 +525,7 @@ func _process(delta: float) -> void:
 	# operator who pauses mid-edit still wants their verdict solved, and the Tier-2
 	# measurement (kicked from the menu) must land whatever the clock is doing.
 	_poll_build()
+	_poll_catalog()
 	_poll_tier2_preview()
 	_poll_porkchop()
 	_poll_cell_verify()
@@ -688,6 +694,34 @@ func _begin_build() -> void:
 
 ## Drain the build. `poll_build()` is true while the worker is still running; it
 ## installs the scenario into the core on the frame it lands.
+## Pump the display comet's flight, and re-read the catalog once it lands.
+##
+## The comet used to arrive with the threat, on the same worker. It costs ~4 s of
+## integration and the threat solution has no use for it, so it now flies on its
+## own worker started at install and turns up here a few seconds later.
+##
+## `mission_ready` is re-emitted, not a narrower signal, because the thing that
+## changed is exactly what that signal exists for: the 3D view builds one node per
+## catalog body in its handler, and when it last fired there was no comet to build
+## one for. The handler has been idempotent since threat rebuilds started firing
+## this signal a second time.
+##
+## A comet that never flies is not an error here. The binding warns and leaves the
+## catalog without one; `_install_catalog` then leaves `comet_online` false, which
+## is the same resting state as a build with no comet in it, and every consumer
+## already gates on that flag.
+func _poll_catalog() -> void:
+	if not _comet_pending:
+		return
+	if mission.poll_catalog():
+		return
+	_comet_pending = false
+	_install_catalog()
+	mission_ready.emit()
+	if comet_online:
+		event_logged.emit(_stamp(t) + "  ORRERY CATALOG COMPLETE - COMET TRACKING")
+
+
 func _poll_build() -> void:
 	if build_state != Build.RUNNING:
 		return
@@ -781,11 +815,15 @@ func _install_threat() -> void:
 	# The b-plane frame is built with the scenario, so the close-up is live the
 	# moment the threat is.
 	encounter_online = true
-	# The comet rode the same worker, in the same field — so it lands here too, and
-	# `comet_online` is set by what the catalog actually contains, not by assuming
-	# the worker did what it was asked. The interceptor flag stays dark: still no
-	# Lambert solver behind it.
+	# The catalog as it stands *now*: the real NEOs, which are file reads. The comet
+	# is not in it yet — its ~4 s flight was taken off the build worker so the threat
+	# solution would stop waiting on scenery, and it starts at this moment rather
+	# than ending at it. `_poll_catalog` re-reads the catalog when it lands.
+	# `comet_online` is still set by what the catalog actually contains, never by
+	# assuming a worker did what it was asked. The interceptor flag stays dark:
+	# still no Lambert solver behind it.
 	_install_catalog()
+	_comet_pending = mission.is_catalog_building()
 	_build_events()
 	mission_ready.emit()
 	# **After `mission_ready`, not inside `_invalidate_derived_views`.** These wake

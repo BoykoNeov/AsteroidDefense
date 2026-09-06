@@ -90,6 +90,13 @@ struct Mission {
     /// [`begin_build_scenario`](Mission::begin_build_scenario). `Some` exactly while
     /// a worker is running, so it doubles as the "is building" flag.
     build: Option<mpsc::Receiver<Result<(BuiltScenario, Vec<OrreryBody>), String>>>,
+    /// The display comet's ~4 s flight, if any — see
+    /// [`poll_catalog`](Mission::poll_catalog). It rode the build worker until the
+    /// phase split was measured: of `BuiltScenario::build`'s 11.8 s, 10.7 s is the
+    /// forward nominal flight, so the comet is the one job with somewhere to hide.
+    /// It now starts when the scenario is *installed* and lands into the catalog
+    /// afterwards, which takes it off the wait for the threat solution entirely.
+    comet_build: Option<mpsc::Receiver<Result<OrreryBody, String>>>,
     /// The in-flight on-demand Tier-2 shift measurement, if any — see
     /// [`begin_tier2_preview`](Mission::begin_tier2_preview). `Some` exactly while a
     /// preview worker is running; independent of `build` (a scenario is fully usable
@@ -507,35 +514,22 @@ impl Mission {
                 // (`begin_tier2_preview`), off the same scenario, so the threat lands as
                 // fast as it did before the menu existed.
                 .map_err(|e| e.to_string())
-                .and_then(|built| {
-                    // The orrery's scenery flies here, on this thread, in the field
-                    // that was just built — ~4 s of integration that would otherwise
-                    // land on the main thread, since `add_synthetic_body` is
-                    // inline-and-expensive by design.
-                    let comet = seed_orrery_body(
-                        &eph,
-                        built.scenario_ref(),
-                        display_comet::NAME,
-                        display_comet::KIND,
-                        display_comet::elements(),
-                        built.epoch0(),
-                        display_comet::CADENCE_SECONDS,
-                        display_comet::N_SNAPSHOTS,
-                    )
-                    .map_err(|e| e.to_string())?;
-
-                    // The real asteroids join the same catalog — but they cost no
+                .map(|built| {
+                    // The real asteroids join the catalog here — and they cost no
                     // integration at all. A `.neo` table already holds JPL's
-                    // trajectory, so this is a file read (milliseconds) beside the
-                    // comet's ~4 s of flying. It rides the worker because this is
-                    // where the catalog is assembled, not because it is expensive.
+                    // trajectory, so this is a file read (milliseconds). It rides
+                    // the worker because this is where the catalog is assembled,
+                    // not because it is expensive.
                     //
                     // Absent tables are the ordinary state of a fresh clone and
                     // produce an empty vector, exactly as an unmounted small-body
                     // kernel produces an empty asteroid list.
-                    let mut bodies = vec![comet];
-                    bodies.extend(load_neo_bodies());
-                    Ok((built, bodies))
+                    //
+                    // The display comet used to fly here too, and that was ~4 s the
+                    // threat solution waited on for a piece of scenery. It now flies
+                    // on its own worker, started once this scenario is installed —
+                    // see [`spawn_comet`](Self::spawn_comet).
+                    (built, load_neo_bodies())
                 });
             // A closed channel means the game quit mid-build. Dropping the result is
             // the right response; `send`'s Err must not become a panic on a detached
@@ -573,9 +567,11 @@ impl Mission {
             Err(mpsc::TryRecvError::Empty) => true,
             Ok(Ok((built, bodies))) => {
                 self.build = None;
+                let mut installed = false;
                 match self.core.as_mut() {
                     Some(core) => {
                         core.install(built, bodies);
+                        installed = true;
                         // A porkchop belongs to the scenario it was solved against —
                         // its axes come from that campaign's epochs and its cells
                         // from that nominal trajectory. Installing a new scenario
@@ -613,6 +609,13 @@ impl Mission {
                                 .into()
                     }
                 }
+                // The comet flies from HERE, against the scenario that was just
+                // installed — after the threat is online, not before it. Everything
+                // this call needs (the scenario, the field) is an `Arc` on the core,
+                // so it costs a refcount bump on this thread and ~4 s on another.
+                if installed {
+                    self.spawn_comet();
+                }
                 false
             }
             Ok(Err(message)) => {
@@ -627,6 +630,116 @@ impl Mission {
                 self.build = None;
                 self.build_failed = true;
                 self.error = "the scenario build thread died without reporting".into();
+                false
+            }
+        }
+    }
+
+    /// Fly the display comet on its own worker, in the field of the scenario that
+    /// was just installed.
+    ///
+    /// # Why it is not on the build worker any more
+    /// The build phases were measured (`build_phase_timings`, release): the
+    /// small-body mount is under a second, `BuiltScenario::build` is 11.8 s of
+    /// which 10.7 s is the forward nominal flight, and the comet is 4.1 s. The
+    /// comet was the only one of those with anywhere to go — the mount feeds the
+    /// build (`BuiltScenario::build` consumes the mounted almanac and the scenario
+    /// keeps it, which is what the force-model menu recomposes from), and the
+    /// forward flight *is* the build's own hit check. So the comet moved off the
+    /// path instead, where it costs the threat solution nothing at all.
+    ///
+    /// # A comet that does not fly is not a failed mission
+    /// It used to be. On the build worker the flight was fallible with `?`, so a
+    /// comet that would not fly took the whole threat solution down with it — over
+    /// a piece of scenery, and against what `sim.gd` has always documented
+    /// (`comet_online` is "set from what the catalog actually holds… the comet is a
+    /// separate body that can fail to fly on its own"). Here a failure warns and
+    /// leaves the catalog without a comet, the same stance the small-body mount
+    /// already took: a missing catalog beats a missing threat.
+    ///
+    /// Staleness is handled by refusal, not by a generation counter: this worker
+    /// holds an `Arc` of the installed scenario, and
+    /// [`busy_worker`](Self::busy_worker) names it, so a threat rebuild cannot
+    /// start underneath it and inherit a comet flown in the previous field.
+    fn spawn_comet(&mut self) {
+        let Some(core) = self.core.as_ref() else {
+            return;
+        };
+        // No scenario means nothing to fly the comet *in*. Unreachable from
+        // `poll_build`, which only calls this after a successful `install`, but this
+        // returns rather than unwraps: a panic here would cross the FFI.
+        let Some(scenario) = core.scenario_arc() else {
+            return;
+        };
+        let eph = core.ephemeris_arc();
+        let epoch0 = scenario.epoch0();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = seed_orrery_body(
+                &eph,
+                &scenario,
+                display_comet::NAME,
+                display_comet::KIND,
+                display_comet::elements(),
+                epoch0,
+                display_comet::CADENCE_SECONDS,
+                display_comet::N_SNAPSHOTS,
+            )
+            .map_err(|e| e.to_string());
+            // A closed channel means the game quit mid-flight, exactly as on the
+            // build worker: drop the result, never panic on a detached thread.
+            let _ = tx.send(result);
+        });
+        self.comet_build = Some(rx);
+    }
+
+    /// Whether the display comet is still flying on its worker.
+    #[func]
+    fn is_catalog_building(&self) -> bool {
+        self.comet_build.is_some()
+    }
+
+    /// Pump the comet's flight: add it to the catalog if it has landed. Returns
+    /// `true` while it is **still flying**, `false` once it is finished or was
+    /// never started.
+    ///
+    /// The frontend re-reads the catalog when this goes false, because the comet
+    /// was not in it when the threat came online. Nothing here can fail the
+    /// mission — see [`spawn_comet`](Self::spawn_comet) — so there is no
+    /// `last_build_failed` equivalent to ask afterwards; the catalog either has a
+    /// comet in it or does not, which is the question the frontend was already
+    /// asking.
+    ///
+    /// Non-blocking, so it is safe to call every frame.
+    #[func]
+    fn poll_catalog(&mut self) -> bool {
+        let Some(rx) = self.comet_build.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Ok(Ok(body)) => {
+                self.comet_build = None;
+                match self.core.as_mut() {
+                    Some(core) => {
+                        core.adopt_orrery_body(body);
+                    }
+                    // The kernels were dropped while it flew, so there is no catalog
+                    // to land in. Scenery, so it warns rather than failing anything.
+                    None => godot_warn!(
+                        "the display comet finished flying but the kernels are no longer loaded"
+                    ),
+                }
+                false
+            }
+            Ok(Err(message)) => {
+                self.comet_build = None;
+                godot_warn!("display comet not flown, the catalog will have no comet: {message}");
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.comet_build = None;
+                godot_warn!("the display comet's flight thread died without reporting");
                 false
             }
         }
@@ -1416,6 +1529,8 @@ impl Mission {
     fn busy_worker(&self) -> Option<&'static str> {
         if self.build.is_some() {
             Some("a scenario build")
+        } else if self.comet_build.is_some() {
+            Some("the display comet's flight")
         } else if self.anchor_build.is_some() {
             Some("the required-Δv anchor solve")
         } else if self.tier2_build.is_some() {

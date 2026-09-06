@@ -100,24 +100,40 @@ func _run() -> void:
 	#    propagated orbit it must be GONE, and specifically not sitting on the Sun,
 	#    which is what ZERO draws as in this heliocentric frame. Nothing else here
 	#    checks that, and no passive run scrubs past 22.6 years.
-	print("SHOT  comet_online=%s arc=%s" % [Sim.comet_online, Sim.comet_arc_label()])
-	Sim.paused = true
-	Sim.jump(Sim.T_IMPACT)                 # perihelion falls near the impact epoch
-	await _settle(4)
-	await _shot("comet_1_on_arc")
-	var p_on: Vector3 = Sim.pos_ecl(Sim.comet_el, Sim.t)
-	print("SHOT  comet on arc: t=%.0f d active=%s r=%.2f AU node_visible=%s"
-		% [Sim.t, Sim.catalog_active(Sim.comet_el, Sim.t), p_on.length(),
-			main.solar.comet_node.visible])
+	#    It also has to be WAITED for. `mission_online` no longer means the catalog
+	#    is complete: the comet flies on its own worker started at install, so every
+	#    shot above this point was taken while it was still in the air. Without this
+	#    wait the harness photographs an empty `comet_el`, drives `pos_ecl` into the
+	#    "no known source" guard and then a null node — and, because that happens
+	#    inside an `await` chain, the run does not fail, it HANGS until the runner
+	#    kills it, taking every later shot with it.
+	var t_comet := Time.get_ticks_msec()
+	while Sim._comet_pending and Time.get_ticks_msec() - t_comet < 120000:
+		await get_tree().process_frame
+	print("SHOT  comet_online=%s arc=%s (landed %d ms after the threat)"
+		% [Sim.comet_online, Sim.comet_arc_label(), Time.get_ticks_msec() - t_comet])
+	if not Sim.comet_online:
+		# Say so and carry on rather than crash: the comet is scenery, and the
+		# encounter and planner shots below are the ones that check physics.
+		print("SHOT  FAIL: the comet never reached the catalog - skipping its two shots")
+	else:
+		Sim.paused = true
+		Sim.jump(Sim.T_IMPACT)                 # perihelion falls near the impact epoch
+		await _settle(4)
+		await _shot("comet_1_on_arc")
+		var p_on: Vector3 = Sim.pos_ecl(Sim.comet_el, Sim.t)
+		print("SHOT  comet on arc: t=%.0f d active=%s r=%.2f AU node_visible=%s"
+			% [Sim.t, Sim.catalog_active(Sim.comet_el, Sim.t), p_on.length(),
+				main.solar.comet_node.visible])
 
-	Sim.jump(Sim.comet_el.t_max + 400.0)   # past the end of the propagated orbit
-	await _settle(4)
-	await _shot("comet_2_past_span_gone")
-	print("SHOT  comet past span: t=%.0f d active=%s node_visible=%s (must be false — ZERO is the Sun)"
-		% [Sim.t, Sim.catalog_active(Sim.comet_el, Sim.t), main.solar.comet_node.visible])
-	Sim.jump(0.0)
-	Sim.paused = false
-	await _settle(2)
+		Sim.jump(Sim.comet_el.t_max + 400.0)   # past the end of the propagated orbit
+		await _settle(4)
+		await _shot("comet_2_past_span_gone")
+		print("SHOT  comet past span: t=%.0f d active=%s node_visible=%s (must be false — ZERO is the Sun)"
+			% [Sim.t, Sim.catalog_active(Sim.comet_el, Sim.t), main.solar.comet_node.visible])
+		Sim.jump(0.0)
+		Sim.paused = false
+		await _settle(2)
 
 	# 0c. PHOSPHOR PERSISTENCE, which only shows while things move: at the top warp
 	#     step every inner body sweeps degrees of orbit per frame, so each should

@@ -174,7 +174,13 @@ count; use the micro numbers as a **gauge for whether two runs are comparable at
 **New traps.** (a) A **parse error in an autoload hangs a headless run forever** — stderr says "Failed
 to instantiate an autoload", stdout through a pipe never flushes, so it reads as "still working" (one
 sat 1 h at 30 s CPU). Launch via `Start-Process -RedirectStandardOutput` with a timeout; read the `.err`.
-Runner: `M:\claud_projects\temp\AsteroidDefense\runs\run_orrery.ps1`. (b) The gdext suite needs
+Runner: `M:\claud_projects\temp\AsteroidDefense\runs\run_orrery.ps1`. **`_shot.gd` hung the same way**, and it was the ONLY check that caught the comet split:
+it reaches its comet section on `mission_online`, which no longer means the catalog is complete, so it
+photographs an empty `comet_el` and dies inside an `await` chain — hanging instead of failing. It now
+waits on `Sim._comet_pending`. **Run `_shot.gd` for any frontend change: it is the only thing that
+proves a body is DRAWN** — `test_orrery.gd` proved `comet_online` flipped while the node could have
+been absent. It confirmed node_visible true on arc / false past span, and the threat unchanged through
+the new install path (|B|=14 639 km, cap=11 311 km). (b) The gdext suite needs
 **`-- --test-threads=4`**: 37 tests × a 646 MB kernel exhausts commit and dies with `memory allocation
 of 32726016 bytes failed`, which is not a test result. (c) `_ready()` blocks **~11 s in
 `mission.load_from` on a COLD file cache, on the main thread** — bigger than the whole comet win, outside

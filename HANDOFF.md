@@ -2994,6 +2994,36 @@ threaded build touches it: this is the 646 MB DE440 read, synchronous, before th
 build is even started. On a first launch after boot it is most of what the operator
 waits for. It is its own item, not part of Task 1.
 
+#### The shot harness had to be taught to wait, and that is the check that closed this out
+
+Ground rule 2 says look at the picture for every visual task, and Task 2's own
+verify line says *"pictures identical"*. Running `_shot.gd` was skipped until last,
+and it was the only check that failed: the harness reaches its comet section on
+`mission_online`, which **no longer means the catalog is complete**, so it
+photographed an empty `comet_el`, drove `pos_ecl` into the "every drawn body names
+a source" guard and then a null node. Because that happens inside an `await`
+chain it did not fail — it **hung** until the runner's timeout killed it, and took
+every later shot with it. The harness now waits on `_comet_pending` before that
+section and skips the two comet shots with a printed FAIL rather than crashing if
+the comet never lands.
+
+With that fixed, the full run confirms the three things only a picture can:
+
+- **The comet is drawn.** `comet_online=true … node_visible=true`, glyph and label
+  out in the field. This was the real risk of the split — the comet's node is now
+  built on a *second* `mission_ready`, ~8 s after the first in a windowed run, and
+  `test_orrery.gd` proves the catalog holds it but draws nothing.
+- **The span gate still holds.** Past the end of its arc, `node_visible=false` —
+  not sitting on the Sun.
+- **The threat is unchanged through the new install path.** `|B| = 14 639 km`,
+  `cap = 11 311 km`, `MISS - EARTH CLEAR` — the exact pair the plan names as the
+  check. Phosphor trails and the 2D traces survive the extra `mission_ready` (they
+  are cleared on it, and it now fires twice per boot).
+
+The duplicated `TRACKING`/`NO DEFLECTION PLAN` lines visible in the event log are
+**not** from the second emission: `jump()` re-arms every event later than the new
+clock (`sim.gd`), and the harness scrubs back to t=0 before the trails shot.
+
 #### Two operational notes
 
 - **The gdext suite needs `--test-threads=4`.** All 37 tests each load a 646 MB

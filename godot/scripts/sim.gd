@@ -593,6 +593,7 @@ func _poll_load() -> void:
 		kernel_error = "kernel load failed (%s): %s" % [
 			_pending_kernels.source, mission.last_error()]
 		_phase("adopt_field", t)
+		_build_events()
 		field_load_failed.emit()
 		return
 
@@ -619,6 +620,13 @@ func _poll_load() -> void:
 		T_MAX = (span[1] - EPOCH0_TDB) / DAY_S
 
 	bodies_online = true
+	# Rebuilt, not left as it was built in `_ready`. It reads `T_MIN`/`T_MAX` and
+	# branches on `bodies_online`, all three of which were placeholders back then —
+	# the same trap the clock assertions in `test_orrery.gd` fell into, one function
+	# over, and one nothing on screen would have shown: the span in the opening log
+	# line would simply have been the default -3650..40000 rather than the mounted
+	# kernel's.
+	_build_events()
 	_phase("adopt_field", t)
 	# **The build is started before the signal, not after.** `field_online`'s
 	# consumer is the boot POST, which reports `build_state` on the same screen as
@@ -1335,6 +1343,12 @@ func _build_events() -> void:
 			[2.0, "SOLAR FIELD LIVE - %d BODIES - DRAG TIMELINE TO SCRUB" % planets.size()],
 			[3.0, "INTEGRATING THREAT TRAJECTORY - REAL FIELD, STAND BY"],
 		]
+	elif field_loading:
+		# The third state again. This used to be unreachable — the read finished
+		# inside `_ready`, so by the time this ran the answer was known — and without
+		# it the log opens with "NO EPHEMERIS KERNEL" over a kernel that is merely
+		# still being read. `_poll_load` calls this again when it lands.
+		raw = [[1.0, "READING %s - STAND BY" % kernel_file]]
 	else:
 		raw = [[1.0, "NO EPHEMERIS KERNEL - SOLAR FIELD OFFLINE"]]
 	for r in raw:

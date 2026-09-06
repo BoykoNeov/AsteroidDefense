@@ -3201,6 +3201,23 @@ rebuilds the same way, clamping the focus index rather than resetting it.
 next thing that builds too early says so in one line instead of through a frozen
 belt.
 
+#### A third consumer of the placeholders, found by auditing the ordering rather than by a test
+
+`_ready` still calls `_build_events()`, and it moved from *after* the synchronous
+load to *before* the threaded one. `_build_planets()` survives that move because it
+is pure data; `_build_events()` does not. It branches on `bodies_online` and prints
+`year_at(T_MIN)`/`year_at(T_MAX)`, so at scene load it now takes its **last** branch
+and opens the event log with `NO EPHEMERIS KERNEL - SOLAR FIELD OFFLINE` over a
+kernel that is merely still being read.
+
+Two fixes, both matching what the rest of this batch does: a `field_loading` branch
+that says `READING DE440S.BSP - STAND BY`, and a rebuild from `_poll_load` on both
+outcomes. Worth noting what the failure would have looked like if only the second
+half had been wrong: the log line would have carried the placeholder span
+(`-3650..40000` days, i.e. 2018–2137) instead of the mounted kernel's 1849–2150 —
+a plausible-looking pair of years on a time bar nobody measures, which is the same
+shape as the clock assertions below and equally invisible to a screenshot.
+
 #### The check that was quietly deleted, and put back
 
 `test_orrery.gd` asserts `date_string() == "2028-01-01"` and `T_IMPACT ≈ 4383`
@@ -3244,6 +3261,16 @@ who sees it red knows to check the machine first.
 file would lay it out contiguously and cut the cold read substantially. That is a
 machine-local action on a machine-local file, so it is recorded here rather than
 done.
+
+#### What was not seen
+
+One of the eighteen shots, `enc_8_planner_keyhole`, was **not** rendered with the
+fix in place: the run reached the end of the keyhole sweep and its 900 s budget
+expired during the golden-section refinement, on a machine that was by then taking
+86–140 s just to reach the first frame. Every sweep rung printed a normal result,
+and the shot is reached long after `mission_online`, so the field wiring this batch
+changed cannot get at it — but it is unverified rather than verified-clean, and is
+recorded that way.
 
 **Files touched:** `godot/rust/src/lib.rs` (`field_load`, `begin_load`,
 `is_loading`, `poll_load`), `godot/scripts/sim.gd` (`ready_phase_ms`, `_phase`,

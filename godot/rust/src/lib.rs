@@ -296,7 +296,6 @@ impl Mission {
         self.field_load.is_some()
     }
 
-
     /// Pump the kernel read: adopt the core if it has landed. Returns `true` while
     /// it is **still reading**, `false` once it has finished or was never started —
     /// the same shape as [`poll_catalog`](Self::poll_catalog), so the frontend

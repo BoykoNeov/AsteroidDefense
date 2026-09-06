@@ -28,6 +28,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **Integrator convergence** — the forward tolerance swept `1e-9…1e-13` against the 12-yr campaign and the 15-yr keyhole return, crossed with the snapshot cadence; the bit-for-bit determinism gate; the flyby's amplification measured | **done 2026-09-06**; every published number is converged, but because the 1-day cadence **caps the step** — the same tolerance uncapped is 129 km off. **IAS15 retired, not deferred** (no oracle exists for it) | `core/examples/probe_integrator_convergence.rs`, `ImpactorConfig::forward_rtol` |
 | Godot frontend: DE440 orrery, real NEO scenery, planner, b-plane view (with the keyhole map, `[H]`), launch-window map, Tier-2 force menu, tractor bench, threat-orbit knob | done; keyhole overlay **seen on screen 2026-09-05** and its captions budgeted | `godot/`, `godot/rust/` |
 | Godot visual/perf pass: 3D world in its own viewport with 4× MSAA and phosphor persistence (peak-hold trails), per-frame position memo, cached 2D orbit traces, the `_perf.gd` frame-time harness and `run_harness.ps1` | done 2026-09-05; the 2D map went 18.9 → 7.1 ms/frame, native calls/frame 764 → 29; follow-ups in `docs/plans/2026-09-05-visuals-performance-followups.md` | `godot/scripts/main.gd`, `godot/shaders/phosphor_persist.gdshader`, `godot/tests/` |
+| **Frontend speed**: the display comet flown on its own worker instead of the build worker, and every DE440 body served by one batched binding call filled on demand | **done 2026-09-06**; time to a threat solution 34.0 -> 25.2 s, native calls/frame in the 3D views 29 -> 6 | `godot/rust/src/lib.rs`, `godot/scripts/sim.gd` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -111,7 +112,15 @@ Read this table first, then the session that owns the layer you are touching.
    i.e. essentially zero, which *strengthens* the module's spatial-floor claim.
    And the search's own reported Δv window is its iteration budget, not a door
    width. See *The floor that was a stopping distance*.
-7. Phase 3.
+7. **The synchronous kernel load in `_ready()`.** `mission.load_from` reads the
+   646 MB DE440 on the **main thread** before the threaded build is even started,
+   and on a cold file cache that is ~11 s — larger than the whole ceiling the
+   comet split just claimed, and outside the worker entirely. Warm it is ~0, which
+   is why it went unseen: it only bites on the first launch after a boot, and every
+   development run is warm. Caught 2026-09-06 as a one-off `test_orrery.gd` failure
+   (`_ready 10927 ms` against a 3 s bound) on the first run after a launch that had
+   died at parse time and so never warmed the kernels. See *Frontend speed*.
+8. Phase 3.
 
 ---
 
@@ -1590,12 +1599,13 @@ PNG, and the harness that produced them ships.
   (it ran twice as fast on a 120 Hz display).
 
 Follow-ups, sized and ordered for a smaller model, are in
-`docs/plans/2026-09-05-visuals-performance-followups.md`: parallelising the
-independent jobs in the build worker (the sb441 mount and the comet flight
-beside the 10 s threat propagation) to cut the startup wait, a batched
-position lookup across the FFI, label de-collision in the tag layer and on the
-keyhole map, a persistence control, polyline drawing for the encounter tracks,
-and the Tier-3 ellipse on the b-plane view.
+`docs/plans/2026-09-05-visuals-performance-followups.md`. **Tasks 1, 2 and 7 are
+done** (the startup wait, the batched position lookup, and the Tier-3 ellipse) —
+though tasks 1 and 2 did not land as that document describes them, and it has now
+been wrong about the code on three separate premises; read *Frontend speed* before
+trusting any mechanism it states. What is left: label de-collision in the tag
+layer and on the keyhole map, a persistence control, and polyline drawing for the
+encounter tracks.
 
 
 ### Keyhole targeting, and the corollary on the panel — 2026-09-05 session (aim at any resonance, fly it, read the return in its own frame, and print how many doors away the plan is)
@@ -2855,3 +2865,151 @@ the nominal 0.05 km apart, one ellipse.
 - `core/src/uncertainty.rs` — `BPlaneBasis::rotation_to`, shared with
   `core/examples/probe_keyhole_map.rs`, plus the kernel-free
   `a_rotation_between_two_frames_of_one_plane_moves_the_angle_and_not_the_axes`.
+
+### Frontend speed — 2026-09-06 session (the startup wait cut a quarter, one binding crossing for two dozen bodies, and two plan premises that did not survive being measured)
+
+Tasks 1 and 2 of `docs/plans/2026-09-05-visuals-performance-followups.md`. Both
+landed; neither landed as written, and the reason is the same in both cases —
+the plan described a mechanism, the code disagreed, and measuring first is what
+found it.
+
+#### Task 2: twenty-four lookups a frame became one crossing
+
+`body_positions_ecl_au` takes a `PackedInt64Array` of NAIF ids and returns a
+`PackedVector3Array`, one slot per id **including the misses** — a shortened
+answer would slide every body past the gap onto its neighbour's position, so the
+contract is pinned by a kernel-gated test that asks for eight resolvable planets
+and two unresolvable ids and checks each slot against the single-body lookup at
+two epochs. It makes no individual lookup faster (still ~11 µs); it removes the
+traffic.
+
+Native calls per frame, measured on this machine with the fill off and on:
+
+| view | off | on |
+|---|---|---|
+| 3d_system, 3d_earth_closeup, 3d_planner_open, 3d_max_warp | 29 | 6 |
+| map2d | 5 | 2 |
+| encounter_keyholes, encounter_zoomed_out | 2 | 2 |
+| porkchop | 0 | 0 |
+
+The 2026-09-05 baseline row of "29 for every view" no longer describes the *off*
+state, which is why the off column was re-measured rather than quoted.
+
+**Two defects shipped in the first commit of this**, and both are worth keeping
+on the record:
+
+- **It did not parse.** `var out := mission.body_positions_ecl_au(...)` cannot
+  infer a type through the untyped `mission`, so Godot refused to load the `Sim`
+  autoload and the pushed commit had no working frontend at all. The Rust half
+  was green and that was taken for the whole. `test_orrery.gd` catches it in one
+  run — the launch dies at `_init` with *"Failed to instantiate an autoload"* —
+  and running it before committing is already ground rule 4 of the plan.
+- **It was eager.** Calling the fill at the end of `_process` meant every frame
+  of every view paid a crossing and twenty-four lookups whether or not anything
+  would ask. The proof needs no timing at all: **in the porkchop view, which asks
+  for no DE440 body, `ffi/frame` went 0 → 1.** The same waste ran through the
+  whole build wait, where nothing is drawn yet, competing with the build worker
+  for the same almanac — time to `mission_online` was 34.0 s with the fill off and
+  56.0 s and 52.1 s with it eager.
+
+It is now triggered by the first `pos_ecl` miss for an ephemeris body **at the
+live clock**, and only there: an orbit walk or a trail asking one arbitrary epoch
+would otherwise drag twenty-three bodies it has no use for across the binding.
+`_primed_t` claims the epoch *before* the batch call, so the short-answer error
+path cannot send the remaining twenty-three bodies back in for a batch each, and
+it is cleared with the memo rather than compared against the clock — a paused
+clock holds `t` still while the memo underneath it keeps emptying.
+
+**No frame-time claim is made in either direction, deliberately.** Across four
+runs of identical code paths a raw Earth lookup read 12.6, 84.6, 161.9 and
+68.5 µs and one Earth orbit line 2.2 to 10.1 ms, while the memo hit stayed flat
+at 1.3–1.5 µs throughout. The machine drifted on an axis that has nothing to do
+with this change. The crossing count is deterministic and is the only number here
+worth reading — which is also what made it the right evidence for the eager-fill
+defect.
+
+#### Task 1: the comet came off the critical path, and the wait fell 34.0 s → 25.2 s
+
+The plan proposed running the build worker's *"three independent jobs"* — threat
+propagation, sb441 mount, comet flight — concurrently. Measured
+(`build_phase_timings`, an `#[ignore]`d timing test, release):
+
+| phase | cost |
+|---|---|
+| mount sb441 | 0.6 s (warm) |
+| `BuiltScenario::build` | **11.8 s** = 10.7 s forward nominal flight + 1.1 s remainder |
+| comet | 4.1 s |
+
+Two premises fail. **The mount is not independent** — `BuiltScenario::build`
+consumes the mounted almanac and the scenario keeps it, which is what the `[P]`
+force menu recomposes its perturbers from; building on the unmounted almanac
+would leave that menu pointing at a field the threat was never flown in. That is
+structural and needs no timing to establish. **And the comet had nowhere to
+overlap**: the plan wanted it to run beside the "frame + perigee scan", which is
+cache reads costing milliseconds — by then both expensive propagations have
+finished, because `build_with` re-flies the nominal as its own round-trip hit
+check, and *that* is the 10.7 s.
+
+So the comet moved **off** the path rather than onto a parallel branch of it. The
+scenario installs with the NEO tables only (file reads), the threat comes online,
+and the comet flies on a worker started at install, landing into the catalog a few
+seconds later. `scenario_arc()` already existed for exactly this shape — the
+Tier-2 preview worker is handed the same `Arc` — so **nothing in `core/` changed**
+and no scenario crosses a thread boundary by reference.
+
+    time to mission_online   34.0 s → 25.2 s   (−8.8 s, −26 %)
+
+Both runs had a healthy machine gauge (raw Earth lookup 12.6 and 11.8 µs, one
+Earth orbit line 2.2 and 2.1 ms), which is the check that says the pair is
+comparable at all. `test_orrery.gd` now reports the other half of the trade
+directly: *"the comet lights from its own worker, 3740 ms after the threat"*, and
+every check the suite makes between those two moments is reachable while the
+comet is still flying.
+
+**One failure mode is deliberately relaxed rather than preserved.** On the build
+worker the comet's flight was fallible with `?`, so a comet that would not fly
+took the entire threat solution down with it — over scenery, and against what
+`sim.gd` has documented since 3D (*"the comet is a separate body that can fail to
+fly on its own"*). It now warns and leaves the catalog without a comet: the stance
+the small-body mount already took, that a missing catalog beats a missing threat.
+Staleness is handled by refusal rather than a generation counter, matching
+`begin_rebuild_scenario`'s existing rule — `busy_worker` names the comet flight,
+so a threat rebuild cannot start underneath it and inherit a comet flown in the
+previous field.
+
+**Not claimed: a cold mount time.** The test reported 0.621 s cold and 0.685 s
+warm — warm *slower* than cold, which means neither was cold on a machine that had
+been reading those kernels all session. The plan's 5.7 s is neither confirmed nor
+refuted here, and the decision never depended on it.
+
+#### A separate item this batch uncovered and did not fix
+
+**`_ready()` blocks ~11 s in `mission.load_from` on a cold file cache, on the main
+thread.** It surfaced as a one-off `test_orrery.gd` failure — the worker-thread
+check reading `_ready 10927 ms` against its 3 s bound — on the first run after a
+launch that had died at parse time and so never warmed the kernels. It passes warm
+and it passed on every subsequent run. But it is **larger than Task 1's entire
+ceiling**, it sits outside the worker Task 1 parallelizes, and nothing about the
+threaded build touches it: this is the 646 MB DE440 read, synchronous, before the
+build is even started. On a first launch after boot it is most of what the operator
+waits for. It is its own item, not part of Task 1.
+
+#### Two operational notes
+
+- **The gdext suite needs `--test-threads=4`.** All 37 tests each load a 646 MB
+  kernel; running them at full default parallelism exhausts the commit charge on
+  this machine and the run dies with `memory allocation of 32726016 bytes failed`,
+  which looks nothing like a test result and is not one.
+- **A parse error in an autoload hangs a headless run indefinitely** rather than
+  exiting. The engine reports *"Failed to instantiate an autoload"* on stderr and
+  then sits there; with stdout redirected through a pipe nothing is flushed, so
+  the run reads as "still working". One sat for an hour at 30 s of CPU. Launch
+  these through `Start-Process -RedirectStandardOutput` with a timeout, and read
+  the `.err` file when a run produces no output.
+
+**Files touched:** `godot/rust/src/lib.rs` (`body_positions_ecl_au`,
+`spawn_comet` / `poll_catalog` / `is_catalog_building`, `busy_worker`),
+`godot/rust/src/mission_core.rs` (`MissionCore::body_positions_ecl_au`,
+`adopt_orrery_body`, `build_phase_timings`, and the comet test rewritten to the
+new order), `godot/scripts/sim.gd` (`_prime_ephem_positions`, `_poll_catalog`),
+`godot/tests/test_orrery.gd` (84 checks now, not 83).

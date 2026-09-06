@@ -61,6 +61,20 @@ for the threat solution): **25–33 s** on the debug DLL with the machine loaded
 
 ## Task 1 — Cut the startup wait by running the worker's independent jobs in parallel
 
+> **DONE 2026-09-06 — but not by this design; three of the claims below are wrong.**
+> Measured first (`build_phase_timings`): the mount is 0.6 s warm, not 5.7 s, and it
+> is **not independent** — `BuiltScenario::build` consumes the mounted almanac and
+> the scenario keeps it, which is what the `[P]` force menu recomposes from, so
+> step 2 would break that menu. Step 3 is wrong too: the comet cannot overlap the
+> "frame + perigee scan", because that step is cache reads costing milliseconds and
+> both expensive propagations have already finished — `build_with` re-flies the
+> nominal as its own hit check, and that is 10.7 s of the 11.8 s. Step 5 is wrong
+> about the *existing* behaviour: a failed comet flight took the whole threat
+> solution down with it, it did not leave `comet_online` false. What shipped
+> instead: the comet flies on its own worker started **after** the scenario is
+> installed, off the critical path entirely. Time to `mission_online` 34.0 -> 25.2 s.
+> See *Frontend speed* in `HANDOFF.md`.
+
 **Why.** The threat solution takes 10 s (quiet machine) to 30 s (loaded) to
 land, and until it does the planner, the b-plane view and the threat are all
 offline. The build worker runs three *independent* jobs one after another:
@@ -104,6 +118,16 @@ gdext tests green *and* taking tens of seconds (not 0.02 s).
 `|B|=14639 km` in `enc_2_band_miss`).
 
 ## Task 2 — One native call for all body positions
+
+> **DONE 2026-09-06.** Native calls per frame in the 3D views 29 -> 6, map2d 5 -> 2,
+> porkchop 0 -> 0. Two corrections. The baseline table above is **stale**: with the
+> fill off, today's run reads map2d 5, encounter 2, porkchop 0 — not 29 everywhere.
+> And step 3 as written ("after `_pos_memo.clear()`… one batch call") is what
+> shipped first and it was wrong: filling on a schedule makes every frame of every
+> view pay a crossing whether or not anything asks, which showed up as porkchop's
+> count going 0 -> 1 and as the build wait stretching 34 -> 56 s. The fill is now
+> triggered by the first `pos_ecl` miss for an ephemeris body at the live clock.
+> See *Frontend speed* in `HANDOFF.md`.
 
 **Why.** The 3D view makes 29 native calls a frame at 7–11 µs each plus
 GDScript marshalling; 25 of them are "position of NAIF body X at the clock".

@@ -147,3 +147,35 @@ now asserts `_ready()` < 3 s (measured 22 ms). 83/83.
 (parallelise mount+comet in the build worker to cut the 10–30 s startup wait; batched FFI positions; tag
 de-collision; keyhole-caption vs b-caption collision; persistence key + belt smear at max warp; encounter
 polylines; Tier-3 ellipse on the b-plane).
+
+**Frontend speed — 2026-09-06 (plan tasks 1+2, neither as written).** **Startup wait 34.0 → 25.2 s
+(−26%)** by flying the display comet on its OWN worker started *after* `install`, not on the build
+worker. Measured first (`build_phase_timings`, `#[ignore]`d, release): mount 0.6 s warm ·
+`BuiltScenario::build` 11.8 s = **10.7 s forward flight + 1.1 s remainder** · comet 4.1 s. The plan's
+premises were wrong three ways — the mount is **not independent** (`build` consumes the mounted almanac
+and the scenario keeps it; the `[P]` menu recomposes from it), the comet had **nowhere to overlap**
+(`build_with` re-flies the nominal as its own hit check, so both propagations are done before the
+"frame + scan" milliseconds), and a failed comet used to kill the whole threat solution (now warns;
+`busy_worker` names the flight so a rebuild can't inherit a stale comet). `scenario_arc()` already
+existed for this — **zero `core/` change**. `test_orrery.gd` now prints the trade: "the comet lights
+from its own worker, 3740 ms after the threat"; 84 checks.
+**Batched positions:** `body_positions_ecl_au(PackedInt64Array) -> PackedVector3Array`, one slot per id
+**including misses** (a short answer slides every body onto its neighbour). ffi/frame 3D 29 → 6, map2d
+5 → 2. **Shipped broken twice, both instructive:** (1) `var out := mission.…` cannot infer a type
+through the untyped `mission` → autoload refused to load → **the pushed commit had no frontend at all**;
+caught in one `test_orrery.gd` run. (2) Filling on a schedule (end of `_process`) made every frame pay a
+crossing — proof needs no timing, **porkchop ffi/frame went 0 → 1** — and 24 lookups/frame through the
+whole build wait fought the build worker: 34 s → 56 s. Now demand-driven from the first `pos_ecl` miss
+**at the live clock only**; `_primed_t` claims the epoch *before* the batch, cleared with the memo (a
+paused clock holds `t` still while the memo empties).
+**Never claimed a frame-time result:** identical code paths read 12.6 / 84.6 / 161.9 / 68.5 µs for one
+Earth lookup across four runs while the memo hit stayed 1.3–1.5 µs. Use the deterministic crossing
+count; use the micro numbers as a **gauge for whether two runs are comparable at all**.
+**New traps.** (a) A **parse error in an autoload hangs a headless run forever** — stderr says "Failed
+to instantiate an autoload", stdout through a pipe never flushes, so it reads as "still working" (one
+sat 1 h at 30 s CPU). Launch via `Start-Process -RedirectStandardOutput` with a timeout; read the `.err`.
+Runner: `M:\claud_projects\temp\AsteroidDefense\runs\run_orrery.ps1`. (b) The gdext suite needs
+**`-- --test-threads=4`**: 37 tests × a 646 MB kernel exhausts commit and dies with `memory allocation
+of 32726016 bytes failed`, which is not a test result. (c) `_ready()` blocks **~11 s in
+`mission.load_from` on a COLD file cache, on the main thread** — bigger than the whole comet win, outside
+the worker, ~0 warm so it only bites on the first launch after a boot. Now HANDOFF next-item 7.

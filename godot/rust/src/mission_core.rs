@@ -235,10 +235,18 @@ impl KeyholeCircleRow {
 /// **This is a map coordinate, not a prediction.** `core::keyhole`'s module doc
 /// puts the closed form's absolute placement error at `δa'/a' ≈ 1.3e-4`: over an
 /// `h`-year return that is hours of arrival slip, ~10^6 km of Earth's motion,
-/// against a keyhole tens of kilometres wide. What the closed form *is* good for
-/// is the gradient, and the width is the gradient, so `widths_away` — distance
-/// measured in keyhole widths — is the number that survives; the kilometres are
-/// for reading beside the drawn circle. Only a flown return says what happens.
+/// against a keyhole tens of kilometres wide. Only a flown return says what
+/// happens.
+///
+/// **Which of these numbers to rank by** changed on 2026-09-07, and this doc used
+/// to give the wrong answer: it said `widths_away` was "the number that survives"
+/// and the kilometres were only for reading beside the drawn circle. Five flown
+/// doors (`probe_keyhole_placement`) say otherwise — the width is trustworthy to
+/// within 1.44×, but the placement error is an *additive* 2.0 to 26.8 km that a
+/// ratio divides away at a wide door and inflates at a narrow one. So `margin_km`
+/// (kilometres outside this door) is the risk number, `widths_away` describes one
+/// circle rather than ordering two, and the kilometres were never merely
+/// decorative.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KeyholePlanRow {
     pub h: u32,
@@ -255,8 +263,14 @@ pub struct KeyholePlanRow {
     pub distance_km: f64,
     /// The keyhole's full width at the point of the circle the plan is nearest, km.
     pub width_km: f64,
-    /// `|distance| / (width/2)` — how many keyhole half-widths of aiming error.
+    /// `|distance| / (width/2)` — how many keyhole half-widths of aiming error
+    /// against *this* circle. Describes one row; does not order two (see the type
+    /// doc).
     pub widths_away: f64,
+    /// `|distance| − width/2` — kilometres from being **inside this door**,
+    /// negative once inside it. The number the panel cuts its alert on, and the
+    /// key `KeyholeReadout::at_risk` is the minimum of.
+    pub margin_km: f64,
     /// Whether the plan lies inside the keyhole band, i.e. the map says this plan
     /// sets up the `h:k` return.
     pub inside: bool,
@@ -275,6 +289,7 @@ impl KeyholePlanRow {
             distance_km: k.signed_distance / M_PER_KM,
             width_km: k.keyhole.width / M_PER_KM,
             widths_away: k.widths_away(),
+            margin_km: k.margin() / M_PER_KM,
             inside: k.inside(),
             closest_point_km: (k.closest_point.x / M_PER_KM, k.closest_point.y / M_PER_KM),
         }
@@ -285,10 +300,19 @@ impl KeyholePlanRow {
 /// against which resonant return.
 ///
 /// Two circles are named because they answer different questions and are not
-/// always the same one: `nearest` is the closest locus in kilometres (the one to
-/// read beside the drawn map), `tightest` is the one the plan is nearest *in
-/// keyhole widths* — a wide far keyhole 200 km away is a likelier return than a
-/// 25 km one 50 km away, and the far keyholes are the wide ones.
+/// always the same one: `nearest` is the closest *locus* in kilometres — the one
+/// to print beside the drawn map — and `at_risk` is the closest *door edge*, the
+/// circle whose keyhole the plan is fewest kilometres from being inside. They
+/// differ when a wider door slightly further out beats the nearest circle's own,
+/// and the second is what an alert has to be cut on.
+///
+/// Until 2026-09-07 the second row was `tightest`, ranked by keyhole *widths*,
+/// and this doc argued for it with "a wide far keyhole 200 km away is a likelier
+/// return than a 25 km one 50 km away". The five-door placement campaign
+/// retired that argument: the placement error is additive, so dividing by a
+/// door's width is exactly the operation that hides it. `core` keeps
+/// `tightest_keyhole` — the widths comparison is still legible — but nothing
+/// on screen ranks by it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyholeReadout {
     /// The plan's b-point in the pinned frame, `(ξ, ζ)` km.
@@ -302,10 +326,10 @@ pub struct KeyholeReadout {
     /// where the census was truncated, not a fact about the plan. Say so instead
     /// of quoting it.
     pub beyond_mapped_region: bool,
-    /// Closest in kilometres.
+    /// Closest circle, in kilometres.
     pub nearest: KeyholePlanRow,
-    /// Closest in keyhole widths.
-    pub tightest: KeyholePlanRow,
+    /// Closest *door*: the smallest `margin_km` in the census.
+    pub at_risk: KeyholePlanRow,
 }
 
 /// Discover the loaded kernel's usable coverage window by bisecting on whether
@@ -1781,14 +1805,14 @@ impl MissionCore {
         let b_max = 60.0 * f.capture_radius;
         let circles = f.resonant_circles(2..=max_years.max(2), 24, b_max);
         let nearest = f.nearest_keyhole(&circles, p)?;
-        let tightest = f.tightest_keyhole(&circles, p)?;
+        let at_risk = f.smallest_margin_keyhole(&circles, p)?;
         Some(KeyholeReadout {
             plan_point_km: (p.x / M_PER_KM, p.y / M_PER_KM),
             b_km: enc.impact_parameter / M_PER_KM,
             mapped_b_max_km: b_max / M_PER_KM,
             beyond_mapped_region: enc.impact_parameter > b_max,
             nearest: KeyholePlanRow::from_proximity(f, p, &nearest),
-            tightest: KeyholePlanRow::from_proximity(f, p, &tightest),
+            at_risk: KeyholePlanRow::from_proximity(f, p, &at_risk),
         })
     }
 
@@ -5698,10 +5722,16 @@ mod tests {
     /// that returns to Earth. Pinned here so the slack is a measurement rather
     /// than an assumption — if it moves, the copy has to move with it.
     ///
+    /// **That calibration is looked up explicitly, on the 3:4 row.** It used to be
+    /// read off whichever row a ranking returned, which made a measurement from the
+    /// flown campaign depend on a ranking decision — and the ranking changed on
+    /// 2026-09-07. The number belongs to the 3:4 door and to nothing else.
+    ///
     /// The rest is the self-consistency the readout claims: the named resonance
     /// is one the drawn map contains, the closest point really sits on that
-    /// circle, and the two rankings — nearest in kilometres, nearest in keyhole
-    /// widths — are each the minimum of their own key over the same census.
+    /// circle, and the two rankings — nearest circle in kilometres, nearest door
+    /// edge in kilometres — are each the minimum of their own key over the same
+    /// census.
     #[test]
     fn the_keyhole_readout_finds_the_three_four_door_the_probe_flew() {
         if !have_kernels() {
@@ -5728,43 +5758,72 @@ mod tests {
             .keyhole_readout(7)
             .expect("a readout for a plan with a b-point");
         println!(
-            "flown 3:4 plan: b {:.0} km at (xi {:.0}, zeta {:.0}); tightest {}:{} \
-             d {:.1} km, width {:.1} km, {:.3} widths, inside {}; nearest {}:{} d {:.1} km",
+            "flown 3:4 plan: b {:.0} km at (xi {:.0}, zeta {:.0}); nearest {}:{} \
+             d {:.1} km (margin {:.1} km); at_risk {}:{} d {:.1} km, width {:.1} km, \
+             margin {:.1} km, {:.3} widths, inside {}",
             r.b_km,
             r.plan_point_km.0,
             r.plan_point_km.1,
-            r.tightest.h,
-            r.tightest.k,
-            r.tightest.distance_km,
-            r.tightest.width_km,
-            r.tightest.widths_away,
-            r.tightest.inside,
             r.nearest.h,
             r.nearest.k,
-            r.nearest.distance_km
+            r.nearest.distance_km,
+            r.nearest.margin_km,
+            r.at_risk.h,
+            r.at_risk.k,
+            r.at_risk.distance_km,
+            r.at_risk.width_km,
+            r.at_risk.margin_km,
+            r.at_risk.widths_away,
+            r.at_risk.inside
         );
         assert!(!r.beyond_mapped_region, "the flown plan is on the map");
         assert_eq!(
-            (r.tightest.h, r.tightest.k),
+            (r.at_risk.h, r.at_risk.k),
             (3, 4),
-            "the flown Δv aims at the 3:4 return; the readout named {}:{}",
-            r.tightest.h,
-            r.tightest.k
+            "the flown Δv aims at the 3:4 return; the readout's risk row named {}:{}",
+            r.at_risk.h,
+            r.at_risk.k
+        );
+
+        // The flown-door calibration, on the 3:4 row by name. Looked up straight out
+        // of the census rather than taken from whichever row a ranking returned:
+        // this is a measurement from the flown campaign, and it must not move the
+        // day the ranking does.
+        let f_look = mc.opik.as_ref().expect("frame");
+        let p_look = f_look.project(
+            &mc.plan
+                .as_ref()
+                .expect("plan")
+                .encounter
+                .expect("encounter")
+                .b_vector,
+        );
+        let circles_look = f_look.resonant_circles(2..=7, 24, 60.0 * f_look.capture_radius);
+        let three_four = f_look
+            .keyhole_proximities(&circles_look, p_look)
+            .into_iter()
+            .find(|k| k.circle.resonance.h == 3 && k.circle.resonance.k == 4)
+            .expect("the 3:4 circle is in the readout's own census");
+        let tf_d_km = three_four.signed_distance / M_PER_KM;
+        let tf_w_km = three_four.keyhole.width / M_PER_KM;
+        println!(
+            "  3:4 by name: d {:.1} km, width {:.1} km, {:.3} widths, margin {:.1} km",
+            tf_d_km,
+            tf_w_km,
+            three_four.widths_away(),
+            three_four.margin() / M_PER_KM
         );
         assert!(
-            (1.2..2.2).contains(&r.tightest.widths_away),
+            (1.2..2.2).contains(&three_four.widths_away()),
             "the flown keyhole Δv sits {:.2} half-widths from the 3:4 circle; 1.64 was \
              measured, and this rock returns to Earth from there. Outside that band the \
              closed-form map and the flown return have parted company, and the panel's \
-             \"N widths off\" copy is no longer calibrated against anything",
-            r.tightest.widths_away
+             placement band is no longer calibrated against anything",
+            three_four.widths_away()
         );
         assert!(
-            (18.0..23.0).contains(&r.tightest.distance_km.abs())
-                && (22.0..28.0).contains(&r.tightest.width_km),
-            "3:4 door: {:.1} km away, {:.1} km wide (20.4 / 24.9 measured)",
-            r.tightest.distance_km,
-            r.tightest.width_km
+            (18.0..23.0).contains(&tf_d_km.abs()) && (22.0..28.0).contains(&tf_w_km),
+            "3:4 door: {tf_d_km:.1} km away, {tf_w_km:.1} km wide (20.4 / 24.9 measured)"
         );
 
         // |B| is the same number the verdict reads, and the point plots there.
@@ -5820,10 +5879,10 @@ mod tests {
             (f_def.v_inf - f_nom.v_inf) / f_nom.v_inf,
             d_centre,
             d_radius,
-            r.tightest.width_km
+            tf_w_km
         );
         assert!(
-            d_centre + d_radius < 0.25 * r.tightest.width_km,
+            d_centre + d_radius < 0.25 * tf_w_km,
             "rebuilding the Öpik frame from the deflected encounter moves the 3:4 circle by \
              {:.1} km (centre) + {:.1} km (radius) against a {:.1} km keyhole. The readout \
              places the deflected b-point on the NOMINAL frame's circles so the panel and the \
@@ -5831,12 +5890,12 @@ mod tests {
              distance is partly frame error",
             d_centre,
             d_radius,
-            r.tightest.width_km
+            tf_w_km
         );
 
         // The rows are self-consistent, and consistent with the drawn circles.
         let circles = mc.keyhole_circles(7);
-        for row in [&r.nearest, &r.tightest] {
+        for row in [&r.nearest, &r.at_risk] {
             let c = circles
                 .iter()
                 .find(|c| c.h == row.h && c.k == row.k)
@@ -5853,18 +5912,28 @@ mod tests {
                 row.h,
                 row.k
             );
+            assert!(
+                (row.margin_km - (row.distance_km.abs() - 0.5 * row.width_km)).abs() < 1e-9,
+                "margin_km must be |distance| - width/2, the one definition the panel cuts on"
+            );
             println!(
-                "  {}:{}  d {:.2} km  |da'| {:.3e} AU  (width {:.2} km, {:.3} widths)",
+                "  {}:{}  d {:.2} km  |da'| {:.3e} AU  (width {:.2} km, {:.3} widths, \
+                 margin {:.2} km)",
                 row.h,
                 row.k,
                 row.distance_km,
                 (row.plan_a_prime_au - row.a_prime_au).abs(),
                 row.width_km,
-                row.widths_away
+                row.widths_away,
+                row.margin_km
             );
         }
 
-        // Each ranking is the minimum of its own key, over the same census.
+        // Each ranking is the minimum of its own key, over the same census. The
+        // margin key is checked against the core's own proximities rather than
+        // re-derived from the drawn circles, because a door's width is evaluated at
+        // the point of the circle the plan is nearest and a drawn circle carries no
+        // width.
         for c in &circles {
             let dx = r.plan_point_km.0;
             let dy = r.plan_point_km.1 - c.center_zeta_km;
@@ -5878,6 +5947,35 @@ mod tests {
                 r.nearest.distance_km.abs()
             );
         }
+        for k in f_look.keyhole_proximities(&circles_look, p_look) {
+            assert!(
+                r.at_risk.margin_km <= k.margin() / M_PER_KM + 1e-6,
+                "{}:{} sits {:.1} km outside its door, beating the reported {:.1} km",
+                k.circle.resonance.h,
+                k.circle.resonance.k,
+                k.margin() / M_PER_KM,
+                r.at_risk.margin_km
+            );
+        }
+        // Whether the two rankings actually part company on a plan the frontend can
+        // reach is a measurement, not a claim — printed, not asserted, because a
+        // census in which they agree everywhere is a fact about this rock, not a
+        // failure.
+        println!(
+            "  rankings {} on the flown plan: nearest {}:{} (margin {:.1} km), \
+             at_risk {}:{} (margin {:.1} km)",
+            if (r.at_risk.h, r.at_risk.k) == (r.nearest.h, r.nearest.k) {
+                "agree"
+            } else {
+                "DISAGREE"
+            },
+            r.nearest.h,
+            r.nearest.k,
+            r.nearest.margin_km,
+            r.at_risk.h,
+            r.at_risk.k,
+            r.at_risk.margin_km
+        );
 
         // And the frontend's own default plan — one period of lead, 0.2 m/s — is
         // a *different* place on the map, so the readout is reading the plan and
@@ -5885,19 +5983,28 @@ mod tests {
         mc.set_plan(mc.period_seconds(), -0.2).expect("plan solves");
         let d = mc.keyhole_readout(7).expect("readout");
         println!(
-            "default plan: b {:.0} km; tightest {}:{} d {:.1} km ({:.2} widths)",
-            d.b_km, d.tightest.h, d.tightest.k, d.tightest.distance_km, d.tightest.widths_away
+            "default plan: b {:.0} km; nearest {}:{} d {:.1} km; at_risk {}:{} d {:.1} km \
+             (margin {:.1} km, {:.2} widths)",
+            d.b_km,
+            d.nearest.h,
+            d.nearest.k,
+            d.nearest.distance_km,
+            d.at_risk.h,
+            d.at_risk.k,
+            d.at_risk.distance_km,
+            d.at_risk.margin_km,
+            d.at_risk.widths_away
         );
         assert!(
             (d.plan_point_km.1 - r.plan_point_km.1).abs() > 1.0,
             "two different plans must not land on the same b-point"
         );
         assert!(
-            d.tightest.widths_away > r.tightest.widths_away,
-            "the flown-keyhole Δv must be closer to its door ({:.2} widths) than the \
-             default plan is to any ({:.2})",
-            r.tightest.widths_away,
-            d.tightest.widths_away
+            d.at_risk.margin_km > r.at_risk.margin_km,
+            "the flown-keyhole Δv must be nearer a door ({:.1} km outside it) than the \
+             default plan is to any ({:.1} km)",
+            r.at_risk.margin_km,
+            d.at_risk.margin_km
         );
     }
 

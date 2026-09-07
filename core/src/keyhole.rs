@@ -468,12 +468,36 @@ impl KeyholeProximity {
     }
 
     /// `|signed_distance| / half_width` — how many keyhole half-widths of aiming
-    /// error the plan carries. Dimensionless, so it survives a comparison the
-    /// absolute placement does not: `< 1` is inside the door, `10` is ten doors
-    /// away. This, not the metres, is the honest way to rank two keyholes
-    /// against each other.
+    /// error the plan carries against **this** circle: `< 1` is inside the door,
+    /// `10` is ten doors away.
+    ///
+    /// **Do not rank two circles by it.** That is what this doc claimed until
+    /// 2026-09-07, and `probe_keyhole_placement`'s five flown doors falsified it.
+    /// The *width* calibrates — the linearised door is conservative by at most
+    /// 1.44× — but the *placement* error is 2.0 to 26.8 km, is not proportional
+    /// to the width, and follows none of the three laws tried, so it behaves as
+    /// an additive unknown that lands on every circle alike. Divided by a wide
+    /// door that unknown vanishes; divided by a narrow one it dominates. The
+    /// ratio therefore ranks a 200 km-wide door 300 km away ahead of a 25 km one
+    /// 60 km away, when the second is the one within reach of the placement
+    /// error. Rank by [`margin`](Self::margin) instead.
     pub fn widths_away(&self) -> f64 {
         self.signed_distance.abs() / self.half_width()
+    }
+
+    /// How far **outside its own door** the queried point lies, metres:
+    /// `|signed_distance| − half_width`. Negative inside the door, zero on its
+    /// edge.
+    ///
+    /// The quantity to rank circles by and to cut an alert on, because the
+    /// closed form's placement error is additive (see
+    /// [`widths_away`](Self::widths_away)): a kilometre of margin means the same
+    /// thing at a wide door as at a narrow one, and each door's own width has
+    /// already been taken out. `−∞` at a near-tangency circle, whose width is
+    /// infinite — those never reach a caller, being filtered out of
+    /// [`keyhole_proximities`](OpikFrame::keyhole_proximities).
+    pub fn margin(&self) -> f64 {
+        self.signed_distance.abs() - self.half_width()
     }
 }
 
@@ -775,10 +799,14 @@ impl OpikFrame {
             })
     }
 
-    /// The circle of `circles` the point is nearest **in keyhole widths** — the
-    /// one it is most at risk of actually being in, which is not always the one
-    /// nearest in kilometres: a wide far keyhole 200 km away is a likelier return
-    /// than a 25 km one 50 km away.
+    /// The circle of `circles` the point is nearest **in keyhole widths**.
+    ///
+    /// Kept because "which door is wide relative to how far away it is" is a
+    /// legible quantity and because its disagreement with
+    /// [`smallest_margin_keyhole`](Self::smallest_margin_keyhole) is itself
+    /// informative — but it is **not** the risk ranking, and this doc used to say
+    /// it was. See [`KeyholeProximity::widths_away`] for why a ratio is the wrong
+    /// key once the placement error is known to be additive.
     pub fn tightest_keyhole(
         &self,
         circles: &[ResonantCircle],
@@ -789,6 +817,30 @@ impl OpikFrame {
             .min_by(|a, b| {
                 a.widths_away()
                     .partial_cmp(&b.widths_away())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }
+
+    /// The circle of `circles` whose **door** the point is nearest — the minimum
+    /// of [`KeyholeProximity::margin`], i.e. the fewest kilometres from being
+    /// inside a keyhole.
+    ///
+    /// This is the risk ranking, and the one to cut an alert on. It pairs with
+    /// [`nearest_keyhole`](Self::nearest_keyhole) as an edge pairs with a locus:
+    /// `nearest_keyhole` is the closest *circle*, the number to print beside the
+    /// drawn map; this is the closest *door edge*, the number to compare against
+    /// the placement band. The two name the same circle unless a wider door
+    /// slightly further out beats the nearest circle's own.
+    pub fn smallest_margin_keyhole(
+        &self,
+        circles: &[ResonantCircle],
+        p: Vector2<f64>,
+    ) -> Option<KeyholeProximity> {
+        self.keyhole_proximities(circles, p)
+            .into_iter()
+            .min_by(|a, b| {
+                a.margin()
+                    .partial_cmp(&b.margin())
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
     }
@@ -1226,25 +1278,62 @@ mod tests {
     fn the_nearest_keyhole_is_the_nearest_circle_and_widths_rank_differently() {
         let mut seed = 20260905;
         let mut saw_disagreement = false;
-        for _ in 0..60 {
+        let mut margin_disagreements = 0usize;
+        let mut queries = 0usize;
+        // How much better the smallest-margin circle's margin is than the nearest
+        // circle's, in capture radii — 0 whenever the two are the same circle.
+        let mut worst_gap: f64 = 0.0;
+        // And the number that says whether "they never disagree" is structure or
+        // luck: how close the runner-up ever came to beating the nearest circle's
+        // margin, in capture radii. A swap is exactly this going negative.
+        let mut closest_call = f64::INFINITY;
+        // The scale to read that against: the widest half-width anywhere, same
+        // units. A door far narrower than the gaps between circles cannot reorder
+        // them, which is the structural reason to expect no disagreement at all.
+        let mut widest_door: f64 = 0.0;
+        // 2 000 geometries, not the 60 this swept until 2026-09-07. The count is
+        // load-bearing for what the printed line below is allowed to mean: at 60 a
+        // rare disagreement is indistinguishable from none, and the whole reason
+        // the line is printed rather than asserted is that "never" is a claim about
+        // the census, not about the sample size. Costs ~0.4 s.
+        for _ in 0..2000 {
             let (f, _) = random_frame(&mut seed);
             let circles = f.resonant_circles(1..=20, 24, 60.0 * f.capture_radius);
             if circles.len() < 2 {
                 continue;
             }
-            // A b-point somewhere in the mapped region.
-            let p = Vector2::new(
-                f.capture_radius * (6.0 * lcg(&mut seed) - 3.0),
-                f.capture_radius * (6.0 * lcg(&mut seed) - 3.0),
-            );
+            // A b-point somewhere in the mapped region — log-uniform in radius
+            // across [0.5, 40] capture radii, because the census runs out to 60 and
+            // sampling a box of ±3 (which this did until 2026-09-07) asks only about
+            // the crowded near field. Keyhole widths grow with distance, so which
+            // circle wins a ranking is a question about the far field.
+            let r_q = f.capture_radius * 0.5 * (80.0f64).powf(lcg(&mut seed));
+            let th = std::f64::consts::TAU * lcg(&mut seed);
+            let p = Vector2::new(r_q * th.cos(), r_q * th.sin());
             let all = f.keyhole_proximities(&circles, p);
             assert!(all.iter().all(|k| k.keyhole.width.is_finite()));
             let near = f.nearest_keyhole(&circles, p).expect("a nearest circle");
             let tight = f.tightest_keyhole(&circles, p).expect("a tightest keyhole");
+            let risk = f
+                .smallest_margin_keyhole(&circles, p)
+                .expect("a smallest-margin circle");
             // Each selector really is the minimum of its own key.
             for k in &all {
                 assert!(near.signed_distance.abs() <= k.signed_distance.abs() * (1.0 + 1e-12));
                 assert!(tight.widths_away() <= k.widths_away() * (1.0 + 1e-12));
+                // Margins go negative inside a door, so the tolerance has to be
+                // additive on the scale of the circles, not a relative slack on a
+                // quantity whose sign changes.
+                assert!(risk.margin() <= k.margin() + 1e-6 * f.capture_radius);
+            }
+            // `margin` is the definition the frontend cuts on, spelled out once
+            // more here so a change to it has to be made in two places.
+            for k in &all {
+                assert!(
+                    (k.margin() - (k.signed_distance.abs() - 0.5 * k.keyhole.width)).abs()
+                        <= 1e-9 * f.capture_radius
+                );
+                assert!(k.inside() == (k.margin() <= 0.0));
             }
             // The proximity is self-consistent: the closest point is on its
             // circle, at exactly |signed_distance| from the query.
@@ -1260,10 +1349,34 @@ mod tests {
             if near.circle.resonance != tight.circle.resonance {
                 saw_disagreement = true;
             }
+            queries += 1;
+            for k in &all {
+                widest_door = widest_door.max(k.half_width() / f.capture_radius);
+                if k.circle.resonance != near.circle.resonance {
+                    closest_call =
+                        closest_call.min((k.margin() - near.margin()) / f.capture_radius);
+                }
+            }
+            if near.circle.resonance != risk.circle.resonance {
+                margin_disagreements += 1;
+                worst_gap = worst_gap.max((near.margin() - risk.margin()) / f.capture_radius);
+            }
         }
         assert!(
             saw_disagreement,
             "kilometres and keyhole widths never disagreed — then one selector is redundant"
+        );
+        // Reported, not asserted. Whether the nearest circle is also the one whose
+        // door the point is nearest is a fact about how the widths grow across a
+        // census, and it is allowed to come out "always" — `smallest_margin_keyhole`
+        // is the principled key either way, being the one the placement band is
+        // additive in. What would not be honest is claiming a disagreement without
+        // having watched for one.
+        println!(
+            "margin vs kilometres: {margin_disagreements} of {queries} queries named a \
+             different circle; the runner-up came within {closest_call:.3e} capture \
+             radii of winning (worst actual gain {worst_gap:.3}), against a widest \
+             door anywhere of {widest_door:.3e}"
         );
     }
 

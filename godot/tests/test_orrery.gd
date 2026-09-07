@@ -545,6 +545,65 @@ func _init() -> void:
 		"it minimises the deflected track, not the nominal (%d vs %d km)"
 		% [int(min_defl), int(min_r)])
 
+	# --- the keyhole row's two rankings, on a readout built by hand ---------
+	#
+	# `keyhole_readout` names two circles: `nearest` (closest locus, kilometres)
+	# and `at_risk` (closest *door edge*, the smallest `margin_km` in the census).
+	# The panel's alerting line, its blink and its note line all branch on whether
+	# those are the same circle - and on this rock they always have been, in 2 000
+	# random geometries in the core sweep and on every plan the frontend can dial.
+	# So the branch has never once executed, which is exactly the state a wrong
+	# branch hides in.
+	#
+	# These four checks execute it, by handing the readouts a dictionary rather
+	# than a solved plan. That is legitimate because `plan_keyhole` is plain data
+	# the core hands over and the readouts do nothing but format it; what is being
+	# checked is the formatting rule, not the physics that produced the numbers.
+	# A real plan is still live underneath, so `has_plan()` and the solving/clean
+	# -miss gates are answered by the real thing.
+	sim.set_plan(sim.threat_period_d(), 0.2, true)
+	sim._tick_plan_debounce(1.0)
+	var saved_keyhole: Dictionary = sim.plan_keyhole
+	# Same circle both ways: the ordinary case, and the one that ships.
+	var agree_row := {
+		"h": 3, "k": 4, "distance_km": 40.0, "width_km": 25.0, "margin_km": 27.5,
+	}
+	sim.plan_keyhole = {
+		"b_km": 14639.0, "mapped_b_max_km": 678660.0, "beyond_mapped_region": false,
+		"nearest": agree_row, "at_risk": agree_row,
+	}
+	_check(sim.keyhole_note().begins_with("CIRCLE PLACED TO"),
+		"one circle both ways -> the placement caveat, not a disagreement line (%s)"
+		% sim.keyhole_note())
+	# Now a wider door 60 km further out whose edge is nearer: 300 km away with a
+	# 500 km door is 50 km outside it, against the near circle's 27.5 km... so the
+	# near one still wins. Make the far door wide enough to actually win.
+	sim.plan_keyhole = {
+		"b_km": 14639.0, "mapped_b_max_km": 678660.0, "beyond_mapped_region": false,
+		"nearest": agree_row,
+		"at_risk": {
+			"h": 5, "k": 8, "distance_km": 300.0, "width_km": 560.0, "margin_km": 20.0,
+		},
+	}
+	_check(sim.keyhole_note() == "20 KM FROM THE WIDER 5:8 DOOR",
+		"a wider door further out is named by the note (%s)" % sim.keyhole_note())
+	_check(sim.keyhole_label().contains("5:8") and sim.keyhole_alert(),
+		"the alert and the line it prints name the SAME circle - the one the alert "
+		+ "is cut on (%s, alert=%s)" % [sim.keyhole_label(), sim.keyhole_alert()])
+	# And inside that wider door, which the old widths rule would have called
+	# 1.07 half-widths away and the additive band calls in.
+	sim.plan_keyhole = {
+		"b_km": 14639.0, "mapped_b_max_km": 678660.0, "beyond_mapped_region": false,
+		"nearest": agree_row,
+		"at_risk": {
+			"h": 5, "k": 8, "distance_km": 300.0, "width_km": 700.0, "margin_km": -50.0,
+		},
+	}
+	_check(sim.keyhole_note() == "INSIDE THE 5:8 DOOR - WIDER, FURTHER OUT",
+		"a negative margin reads as inside, not as a negative distance (%s)"
+		% sim.keyhole_note())
+	sim.plan_keyhole = saved_keyhole
+
 	sim.free()
 	print("----")
 	print("%d failure(s)" % fails)

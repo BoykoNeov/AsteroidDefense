@@ -382,12 +382,25 @@ func _run() -> void:
 		# that shipped until 2026-09-07 (alert when <= 4.0 half-widths), and the
 		# claim that the additive band catches plans that rule called CLEAR is
 		# only worth making if both numbers come off the same plan.
-		var row: Dictionary = Sim.plan_keyhole.get("nearest", {})
+		var row: Dictionary = Sim.plan_keyhole.get("at_risk", {})
+		var near: Dictionary = Sim.plan_keyhole.get("nearest", {})
 		print("SHOT  closest a player can dial: dv=%.5f at %d d (margin %.1f km, d %.3f km, door %.3f km, old rule %.2f half-widths vs cut 4.0) -> %s (alert=%s)"
 			% [best_dv, int(Sim.plan_lead_d), best_w,
 				absf(row.get("distance_km", INF)), float(row.get("width_km", 0.0)),
 				float(row.get("widths_away", INF)),
 				Sim.keyhole_label(), Sim.keyhole_alert()])
+		# Which circle each ranking names, printed off the same plan. The note's
+		# disagreement branch only ever fires when these two differ, so a run in
+		# which they agree is a run that never exercised it — say so here rather
+		# than reading the fallback text as evidence the branch works.
+		print("SHOT  rankings: nearest %d:%d (margin %.1f km) | at_risk %d:%d (margin %.1f km) -> %s"
+			% [int(near.get("h", 0)), int(near.get("k", 0)),
+				Sim.keyhole_margin_km(near),
+				int(row.get("h", 0)), int(row.get("k", 0)),
+				Sim.keyhole_margin_km(row),
+				"NO ROWS" if near.is_empty() or row.is_empty()
+					else ("DISAGREE" if int(near.get("h", 0)) != int(row.get("h", 0))
+						or int(near.get("k", 0)) != int(row.get("k", 0)) else "agree")])
 		print("SHOT  keyhole note: %s" % Sim.keyhole_note())
 
 	get_tree().quit(0)
@@ -396,12 +409,16 @@ func _run() -> void:
 ## Solve one plan at the longest allowed lead and report how far outside the
 ## nearest resonant return's door it lands, kilometres. INF when there is
 ## nothing to measure against (no b-point, no map). Minimising the same
-## quantity the panel is cut on keeps the picture and the wording agreeing.
+## quantity the panel is cut on keeps the picture and the wording agreeing —
+## which is why this reads the `at_risk` row and not the `nearest` one: the
+## alert is cut on the smallest margin in the whole census, so a search that
+## minimised the nearest circle's margin would be optimising a different number
+## from the one it is trying to make the panel print.
 func _keyhole_margin_at(dv: float) -> float:
 	Sim.set_plan(Sim.LEAD_MAX, dv, true)
 	Sim._tick_plan_debounce(1.0)
 	await _settle(1)
-	return Sim.keyhole_margin_km(Sim.plan_keyhole.get("nearest", {}))
+	return Sim.keyhole_margin_km(Sim.plan_keyhole.get("at_risk", {}))
 
 
 ## Press one mapped action the way a player does — through `_unhandled_input`, so

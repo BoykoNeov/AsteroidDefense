@@ -2714,11 +2714,19 @@ impl Mission {
     /// unmeasured — say that rather than printing a blank).
     ///
     /// Otherwise: `plan_xi_km`, `plan_zeta_km`, `b_km`, `mapped_b_max_km`,
-    /// `beyond_mapped_region`, and two sub-dictionaries `nearest` (closest locus
-    /// in kilometres) and `tightest` (closest in keyhole widths — not always the
-    /// same circle), each with `h`, `k`, `a_prime_au`, `plan_a_prime_au`,
-    /// `distance_km` (signed, + outside the circle), `width_km`, `widths_away`,
-    /// `inside`, `closest_xi_km`, `closest_zeta_km`.
+    /// `beyond_mapped_region`, and two sub-dictionaries — `nearest`, the closest
+    /// *locus* in kilometres (the circle to name beside the drawn map), and
+    /// `at_risk`, the closest *door edge* (the circle this plan is fewest
+    /// kilometres from being inside, which is what an alert is cut on). Each row
+    /// carries `h`, `k`, `a_prime_au`, `plan_a_prime_au`, `distance_km` (signed,
+    /// + outside the circle), `width_km`, `widths_away`, `margin_km`, `inside`,
+    /// `closest_xi_km`, `closest_zeta_km`.
+    ///
+    /// The second row was `tightest` — ranked by keyhole *widths* — until
+    /// 2026-09-07. Five flown doors put the map's placement error at an additive
+    /// 2 to 27 km that a width ratio divides away at a wide door, so the ranking
+    /// moved to `margin_km` (`|distance| − width/2`) and the key changed name with
+    /// it rather than quietly meaning something else.
     ///
     /// **The kilometres are a map coordinate, not a prediction of a return** —
     /// see `MissionCore::keyhole_readout`. Closed-form; safe on `plan_changed`.
@@ -2738,7 +2746,7 @@ impl Mission {
         d.set("mapped_b_max_km", r.mapped_b_max_km);
         d.set("beyond_mapped_region", r.beyond_mapped_region);
         d.set("nearest", &Self::keyhole_row(&r.nearest));
-        d.set("tightest", &Self::keyhole_row(&r.tightest));
+        d.set("at_risk", &Self::keyhole_row(&r.at_risk));
         d
     }
 
@@ -2753,6 +2761,7 @@ impl Mission {
         d.set("distance_km", r.distance_km);
         d.set("width_km", r.width_km);
         d.set("widths_away", r.widths_away);
+        d.set("margin_km", r.margin_km);
         d.set("inside", r.inside);
         d.set("closest_xi_km", r.closest_point_km.0);
         d.set("closest_zeta_km", r.closest_point_km.1);

@@ -2219,13 +2219,19 @@ func try_commit() -> void:
 ## The keyhole line the planner prints — the thesis' corollary in one row:
 ## *a miss can be worse than a hit if it is the wrong miss.*
 ##
-## Names the resonance the plan is nearest **in keyhole widths**, not in
-## kilometres, because that is the comparison the closed form actually supports:
-## the map's absolute placement carries ~1.3e-4 in a', which over a multi-year
-## return is a million kilometres of Earth's motion, while its *gradient* — which
-## is what a keyhole width is — is trustworthy. So "2.6 doors away" survives and
-## "41 km" is only a coordinate to read beside the drawn circle. The kilometres
-## are printed too, second, for exactly that.
+## Names a resonance **in kilometres**, not in keyhole widths. This docstring
+## argued the reverse until 2026-09-07 while the body had already stopped doing
+## it: widths look like the comparison the closed form supports, because its
+## gradient is trustworthy where its absolute placement is not — but five flown
+## doors put the placement error at an additive 2 to 27 km, and dividing an
+## additive error by a door's width is exactly the operation that hides it at the
+## wide doors. So kilometres are the yardstick and the width is a correction to
+## them (`KEYHOLE_PLACEMENT_KM`).
+##
+## Which circle gets named follows which question is being answered: the alerting
+## line names the circle the alert is cut on — the nearest *door*, `at_risk` —
+## and the clear line names the nearest *circle*. They are usually the same one,
+## and when they are not the note line says so.
 func keyhole_label() -> String:
 	if plan_solving:
 		return "SOLVING..."
@@ -2242,15 +2248,16 @@ func keyhole_label() -> String:
 	if plan_keyhole.get("beyond_mapped_region", false):
 		return "PAST THE MAPPED RETURNS (>%s KM)" % group_num(
 			int(plan_keyhole.get("mapped_b_max_km", 0.0)))
-	# The circle nearest in kilometres, not the one nearest in widths. Five flown
-	# keyholes put the placement error at tens of kilometres regardless of how
-	# wide the door is, so kilometres are the yardstick and the width is the
-	# correction — see `KEYHOLE_PLACEMENT_KM`.
-	var r: Dictionary = plan_keyhole.get("nearest", {})
-	if r.is_empty():
+	# Two rows, because they answer two questions. `nearest` is the closest circle
+	# in kilometres — the one to name beside the drawn map. `at_risk` is the
+	# closest *door edge*: a wider door slightly further out can be the one this
+	# plan is nearest to being inside, and that is the one worth shouting about.
+	# The alert is cut on the same row this line names, so the blink and the text
+	# can never name different resonances.
+	var near: Dictionary = plan_keyhole.get("nearest", {})
+	var risk: Dictionary = plan_keyhole.get("at_risk", near)
+	if near.is_empty():
 		return "NO RESONANT RETURN IN REACH"
-	var name := "%d:%d" % [int(r.get("h", 0)), int(r.get("k", 0))]
-	var km := group_num(int(abs(r.get("distance_km", 0.0))))
 	# Two registers, not three. The old third one said "IN THE KEYHOLE - RETURN
 	# SET UP" when the plan landed inside the drawn door, and that claim is now
 	# known to be unsupported: of the five keyholes flown to a return impact,
@@ -2258,18 +2265,32 @@ func keyhole_label() -> String:
 	# drawn band is neither necessary nor sufficient, so the panel does not
 	# promise a return — it reports a distance and whether that distance is
 	# small enough that the map cannot tell.
-	if keyhole_margin_km(r) <= KEYHOLE_PLACEMENT_KM:
-		return "** %s KM OFF %s - INSIDE THE PLACEMENT BAND" % [km, name]
-	return "CLEAR - NEAREST %s IS %s KM OFF" % [name, km]
+	if keyhole_margin_km(risk) <= KEYHOLE_PLACEMENT_KM:
+		return "** %s KM OFF %s - INSIDE THE PLACEMENT BAND" % [
+			group_num(int(abs(risk.get("distance_km", 0.0)))), keyhole_name(risk)]
+	return "CLEAR - NEAREST %s IS %s KM OFF" % [
+		keyhole_name(near), group_num(int(abs(near.get("distance_km", 0.0))))]
+
+
+## One readout row as "h:k". The panel formats either row with it, so the two can
+## never be printed in different shapes.
+func keyhole_name(row: Dictionary) -> String:
+	return "%d:%d" % [int(row.get("h", 0)), int(row.get("k", 0))]
 
 
 ## How far outside a circle's own door a plan lies, kilometres — negative when
 ## the plan is inside the drawn door. The quantity both the wording and the
 ## blink are cut on, so they can never disagree.
+##
+## Read off the row rather than recomputed from `distance_km` and `width_km`:
+## the core ranks the census by this same quantity to choose `at_risk`, and a
+## second copy of the formula here could rank one way while the row it is handed
+## was chosen the other. The binding test pins that `margin_km` is
+## `|distance| - width/2`.
 func keyhole_margin_km(row: Dictionary) -> float:
 	if row.is_empty():
 		return INF
-	return absf(row.get("distance_km", INF)) - 0.5 * float(row.get("width_km", 0.0))
+	return float(row.get("margin_km", INF))
 
 
 ## Whether the plan is close enough to a resonant return that the panel should
@@ -2280,12 +2301,18 @@ func keyhole_margin_km(row: Dictionary) -> float:
 ## once you account for the return's own spatial offset — but the *centre* it
 ## draws is wrong by tens of kilometres, so `inside` reads false for four of the
 ## five keyholes that actually returned the rock to Earth.
+##
+## Cut on `at_risk`, the row with the smallest margin in the whole census, not on
+## the nearest circle: the nearest circle's door is not necessarily the nearest
+## door, and an alert asked only about the former could miss a wider one slightly
+## further out. On this rock the two rows have named the same circle on every plan
+## measured so far — this is the principled key, not a caught miss.
 func keyhole_alert() -> bool:
 	if plan_solving or not has_plan() or plan_clean_miss or plan_keyhole.is_empty():
 		return false
 	if plan_keyhole.get("beyond_mapped_region", false):
 		return false
-	return keyhole_margin_km(plan_keyhole.get("nearest", {})) <= KEYHOLE_PLACEMENT_KM
+	return keyhole_margin_km(plan_keyhole.get("at_risk", {})) <= KEYHOLE_PLACEMENT_KM
 
 
 ## The caveat that has to travel with `keyhole_label`, in the same spirit as the
@@ -2296,17 +2323,22 @@ func keyhole_note() -> String:
 		return ""
 	if plan_clean_miss:
 		return "THE WIDE KEYHOLES ARE THE FAR ONES"
-	var r: Dictionary = plan_keyhole.get("tightest", {})
+	var risk: Dictionary = plan_keyhole.get("at_risk", {})
 	var near: Dictionary = plan_keyhole.get("nearest", {})
-	# When the circle the label names is not the one with the fewest half-widths
-	# of aiming error, say so - that disagreement IS the lesson, now read the
-	# other way round: the label follows kilometres because placement dominates,
-	# so the widths answer is the one that needs naming when it differs.
-	if not r.is_empty() and not near.is_empty() and (
-			int(near.get("h", 0)) != int(r.get("h", 0))
-			or int(near.get("k", 0)) != int(r.get("k", 0))):
-		return "TIGHTEST IN WIDTHS IS %d:%d - WIDER DOOR" % [
-			int(r.get("h", 0)), int(r.get("k", 0))]
+	# When the nearest circle is not the nearest door, say which one the verdict
+	# is actually about. This branch used to compare kilometres against keyhole
+	# *widths*, and a plan could be told the "tightest in widths" circle was some
+	# far wide one it was in no danger of - the ratio divides out an error that
+	# does not scale with the door. Now both rows are kilometres, so the two can
+	# only differ when a wider door genuinely is closer to being entered.
+	if not risk.is_empty() and not near.is_empty() and (
+			int(near.get("h", 0)) != int(risk.get("h", 0))
+			or int(near.get("k", 0)) != int(risk.get("k", 0))):
+		var m := keyhole_margin_km(risk)
+		if m <= 0.0:
+			return "INSIDE THE %s DOOR - WIDER, FURTHER OUT" % keyhole_name(risk)
+		return "%s KM FROM THE WIDER %s DOOR" % [
+			group_num(int(m)), keyhole_name(risk)]
 	return "CIRCLE PLACED TO +/-%d KM - ONLY A FLOWN RETURN CONFIRMS" % int(
 		KEYHOLE_PLACEMENT_KM)
 

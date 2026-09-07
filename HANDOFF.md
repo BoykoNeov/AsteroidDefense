@@ -33,6 +33,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **Frontend startup**: the DE kernel read moved onto its own worker, the boot POST given a third state to report it, and `_ready` split into timed phases | **done 2026-09-07**; `_ready` 29 -> 2 ms, and the roadmap item's "646 MB DE440" turned out to be a 32 MB file on a fragmented spinning disk | `godot/rust/src/lib.rs`, `godot/scripts/{sim,boot,solar_system,main}.gd` |
 | **Frontend legibility + the b-plane's frame cost**: tags and captions placed instead of drawn where they fall, the encounter tracks as runs of polyline, a persistence control on `[I]` | **done 2026-09-07**; b-plane view 10.1 -> 9.1 ms, and a single frame-ms number caught producing two opposite wrong conclusions | `godot/scripts/{tag_layer,encounter,main,solar_system,hud}.gd`, `godot/tests/_shot.gd` |
 | **The two drawn claims nobody had measured**: the b-plane view's resonant circles clipped to the viewport and tessellated to a pixel budget, and the Tier-3 ellipse's *shape* put through the ±3σ shell along its own axes | **done 2026-09-07**; the old whole-circle tessellation drew the widest resonance **59.9 px** off inside a 720 px view (now 0.113 px, and 3 points instead of 256), and the drawn ellipse holds everywhere the σ knob reaches — but the linearity scalar that was supposed to say so reads **130× too small** on the axis that matters | `godot/scripts/plot_geometry.gd`, `godot/tests/test_geometry.gd`, `core/examples/probe_tier3_drawn_shape.rs`, `core/tests/tier3_drawn_shape.rs` |
+| **The ranking that was a ratio**: resonant circles ranked by kilometres from their own *door* (`margin`) instead of by keyhole *widths*, the planner's alert cut on that same row, and the note branch nobody had seen fire finally executed | **done 2026-09-07**; the width ratio divides away exactly the additive placement error the five-door batch measured — though on this rock the two rankings never actually parted company, in 2 000 random geometries or on any plan the planner can dial | `core/src/keyhole.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/sim.gd`, `godot/tests/{test_orrery,_shot}.gd` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -90,7 +91,11 @@ Read this table first, then the session that owns the layer you are touching.
    that did (`KEYHOLE_ALERT_WIDTHS = 4.0`, which missed three of the five) is
    replaced by an additive band, `|distance| ≤ 100 km + width/2`. The 1.64
    half-widths this line called a conservative width was never a width — it was
-   the placement error. See *Five keyholes flown*.
+   the placement error. See *Five keyholes flown*. **Its two loose ends closed
+   2026-09-07**: the core no longer ranks circles by a width ratio (which divides
+   away the very error the batch measured), and the note branch that had never
+   been seen to fire is now executed by a test. See *The ranking that was a
+   ratio*.
 5. ~~**dop853 → IAS15 crossover.**~~ **RETIRED 2026-09-06 — measured, and no second
    integrator is warranted.** Three corrections to that line. (a) The premise was
    wrong: it leaned on the 15.1 km residual vs JPL, which is *unmodelled forces*
@@ -3551,7 +3556,8 @@ km, so sampling `b(dv)` once on a 28-rung ladder and inverting it cost nothing.
 
 #### What this leaves
 
-The core's `tightest_keyhole` still selects by half-widths, which this finding
+**[Closed 2026-09-07 - see *The ranking that was a ratio*.]** The core's
+`tightest_keyhole` still selects by half-widths, which this finding
 makes the wrong metric - it will systematically prefer wide circles over close
 ones. The frontend now works around it by naming `nearest` instead, so nothing
 on screen is wrong, but the core API answers a question that no longer matters
@@ -3561,7 +3567,9 @@ km-nearest one, and now that the label follows kilometres **that branch is the
 common case rather than the exception**. It is not visibly wrong - the harness
 run printed the fallback text every time - but it is a mostly-live branch now,
 not a mostly-dead one, and it will start firing as soon as the two metrics part
-company. Second, the placement error is measured at exactly one `xi` per circle;
+company. **[Closed 2026-09-07: both rows are kilometres now, the branch is
+executed by `test_orrery.gd`, and the two rankings are measured never to part
+company on this rock.]** Second, the placement error is measured at exactly one `xi` per circle;
 whether it varies along a circle is unknown, and that is what a sixth campaign
 should ask. Third, nothing here explains *why* the placement error is what it
 is - it is bounded and characterised, not derived.
@@ -3748,3 +3756,146 @@ Seven separate calls would have been seven plans.
 - `cargo clippy -D warnings` reports three pre-existing `neg_cmp_op_on_partial_ord`
   lints in `core/src/sbdb.rs` (628, 736). CI does not pass `-D warnings`, so it
   stays green; nothing in this batch touches that file.
+
+### The ranking that was a ratio - 2026-09-07 session (the two live threads the placement batch left)
+
+The five-door placement campaign closed roadmap item 4 and left two notes about
+its own aftermath. They are the same thing seen from two sides: `core` still
+ranked resonant circles by **keyhole widths** (`tightest_keyhole`), which the
+campaign's central finding makes the wrong key, and the planner's note line still
+printed that ranking's disagreement with kilometres - a branch the batch recorded
+as "a mostly-live branch now, not a mostly-dead one", i.e. one that had never
+been seen to fire and was about to start.
+
+#### Why a ratio is the wrong key, in one line
+
+The campaign measured two things about a linearised door and got opposite
+verdicts. The **width** calibrates: at most 1.44x conservative across five flown
+doors. The **placement** does not: the door centres sit 2.0 to 26.8 km from their
+own circles, following none of the three laws tried. So the placement error is
+*additive* - a number of kilometres that lands on every circle alike - which is
+exactly why the frontend's alert is `|distance| <= 100 km + width/2` and not a
+multiple of anything.
+
+Dividing an additive error by a door's width is the one operation guaranteed to
+hide it. `widths_away` ranks a 200 km-wide door 300 km away (1.5 widths) ahead of
+a 25 km door 60 km away (2.4 widths), when the second is the one inside reach of
+a 100 km placement error and the first is nowhere near it. The doc on
+`widths_away` said the opposite in as many words - *"This, not the metres, is the
+honest way to rank two keyholes against each other"* - and that sentence had been
+copied into four more places, including `keyhole_label`'s own docstring, which
+claimed it named a resonance "in keyhole widths" while its body had already
+switched to kilometres and an inline comment three lines below said so.
+
+#### What shipped
+
+`KeyholeProximity::margin()` is the key: `|signed_distance| - half_width`,
+kilometres outside a door, negative once inside it. Same units as the placement
+band, with each door's own width already taken out, so a kilometre of margin
+means the same thing at a wide door as at a narrow one.
+`OpikFrame::smallest_margin_keyhole` ranks by it and pairs with `nearest_keyhole`
+as an edge pairs with a locus: nearest *circle* is the number to print beside the
+drawn map, nearest *door edge* is the number an alert is cut on. The binding row
+gains `margin_km` and the readout's second row is **renamed** `tightest` ->
+`at_risk`, renamed rather than quietly redefined so that nothing reads a key
+whose meaning moved under it. `sim.gd`'s `keyhole_margin_km` now *reads*
+`margin_km` off the row instead of recomputing `|distance| - width/2`, because a
+second copy of the formula could rank one way while the row it was handed was
+chosen the other; the binding test pins that the two agree.
+
+`tightest_keyhole` stays, with an honest doc. Deleting it would cost the only
+comparison the note line has to make, and "which door is wide relative to how far
+away it is" is still legible - it is just not the risk ranking.
+
+#### The measurement that stopped this being written up as a bug fix
+
+The obvious claim is that the old alert could miss a door: it was cut on the
+*nearest circle's* margin, so a wider door slightly further out - a smaller
+margin, elsewhere in the census - would not have fired it. True of the code, and
+worth fixing. Not, on this rock, something anyone could have hit.
+
+The core sweep now runs **2 000 random Öpik geometries** and, across all of them,
+**the nearest circle was also the nearest door every single time**. Two rankings,
+zero disagreements. The same holds on both plans the binding test flies (the
+flown 3:4 keyhole: nearest 3:4 at 7.9 km outside its door, at_risk 3:4, the same
+circle; the default plan: 3:5 both ways) and on the closest plan `_shot.gd` can
+dial (5:8 both ways, margin 1.5 km).
+
+That is **reported by the test, not asserted by it**. An assertion that they
+*must* disagree is what the first draft contained, and it failed - which was the
+useful outcome, because it forced the honest statement to be the measured one.
+
+"Never", though, is a near-tie and not a structural fact. The runner-up came
+within **9.026e-6 capture radii** of winning, against doors as wide as
+**5.327e-2** in the same units - at the shipping encounter's 11 311 km capture
+radius, about **0.1 km against 600 km**. The orderings are not the same ordering;
+they simply never parted company in the sample. So `smallest_margin_keyhole` is
+the principled key rather than a caught miss, and the code says so where it
+matters rather than implying a bug was found.
+
+**A sampling trap surfaced on the way, and it is the reason the first sweep found
+nothing.** That test had been drawing its b-points from a box of +/-3 capture
+radii while the census it queries reaches **60** - so it only ever asked about the
+crowded near field, and keyhole widths grow with distance, which makes the far
+field the only place the two rankings could plausibly differ. It is now
+log-uniform in radius over [0.5, 40]. Widening it did not change the answer; not
+widening it would have meant the answer was never asked for.
+
+#### The branch nobody had seen fire
+
+`keyhole_note`'s disagreement line was recorded in the previous batch as a branch
+that would start firing and had never been observed. Per the above it still never
+fires on this rock - so `test_orrery.gd` now executes it directly, by handing the
+readouts a hand-built `plan_keyhole` dictionary instead of a solved plan. That is
+legitimate because `plan_keyhole` is plain data the core hands over and the
+readouts do nothing but format it; what is under test is the formatting rule, not
+the physics that produced the numbers, and a real plan stays live underneath so
+`has_plan()` and the solving / clean-miss gates are still answered by the real
+thing. (It needs `_tick_plan_debounce` drained first, or the readouts correctly
+answer `SOLVING...` and every check reads an empty string - which is how the
+first run of them failed.)
+
+Four checks, and the first text this branch has ever produced:
+
+```text
+PASS  one circle both ways -> the placement caveat, not a disagreement line
+        (CIRCLE PLACED TO +/-100 KM - ONLY A FLOWN RETURN CONFIRMS)
+PASS  a wider door further out is named by the note (20 KM FROM THE WIDER 5:8 DOOR)
+PASS  the alert and the line it prints name the SAME circle - the one the alert is
+        cut on (** 300 KM OFF 5:8 - INSIDE THE PLACEMENT BAND, alert=true)
+PASS  a negative margin reads as inside, not as a negative distance
+        (INSIDE THE 5:8 DOOR - WIDER, FURTHER OUT)
+```
+
+The third of those is a change in behaviour and not only in wording: the alerting
+line used to name the nearest *circle* while the blink was cut on that same
+circle's margin, so the two could not disagree - but neither of them was the row
+that would fire first. Both now read `at_risk`.
+
+`_shot.gd` prints which circle each ranking named and whether they agreed, so a
+future run printing the fallback text is distinguishable from one that exercised
+the branch. On the closest plan a player can dial it reports `nearest 5:8 (margin
+1.5 km) | at_risk 5:8 (margin 1.5 km) -> agree`, and every other number in that
+line is unchanged from the previous session (dv 0.13313 at 900 d, d 1.845 km,
+door 0.718 km, old rule 5.14 half-widths) - which is the correct outcome for a
+change that reorders nothing here.
+
+#### One calibration moved out of the ranking's way
+
+The binding test's `(1.2..2.2).contains(widths_away)` is the only place the flown
+3:4 measurement lives - 1.64 half-widths from the circle, on a door this rock
+demonstrably returns through, which is what says the linearised width is
+conservative by about 1.6x. It was being read off *whichever row a ranking
+returned*, so a physics measurement from the flown campaign was riding on a
+ranking decision. It now looks the 3:4 up by name in the readout's own census
+(1.636 widths, 20.4 km from a 24.9 km door). Had it not been moved, this batch
+would have silently repointed it.
+
+**Checks:** core 27/27 (`-p asteroid_core --lib keyhole`), the kernel-gated
+binding test green in 51 s (a 0.02 s run means it skipped), `test_orrery.gd`
+**0 FAIL** with the four new checks among the passes, `_shot.gd` windowed writing
+`enc_8_planner_keyhole.png` and printing the keyhole block with no FAIL line, and
+`cargo fmt --check` clean. The pass *count* is deliberately not quoted: this run
+prints 89 against the 83 recorded above, the four checks here account for four of
+the difference, and the rest was not chased - a number in this file is supposed to
+be a measurement, and that one would not have been.

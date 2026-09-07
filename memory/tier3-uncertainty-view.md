@@ -48,7 +48,9 @@ same direction; the ellipse is the first place it is visible rather than tabulat
 `sigma_distance` (on its own it reads as "how many σ from a hit" and inverts the
 answer — the designed hit is ~8 200 σ *with* P = 1, so `p_impact` and `capture_km`
 are printed together and never apart); a **3σ ring** (the linearity check that
-would vouch for it is 25 propagations and was not paid — still open); and a
+would vouch for it was 25 propagations and was not paid at the time; it has since
+been run — see the 2026-09-07/08 note below — and the ring is still not drawn,
+because the answer was that the 1σ picture is already sound); and a
 **deflected** ellipse (the Jacobian is about the nominal seed, and an ellipse on
 the cross beside a bare diamond would read as "the deflection is certain"). The
 panel says **synthetic** because the rock is invented and its covariance is a
@@ -95,3 +97,44 @@ Evidence: `godot/rust/src/mission_core.rs` (`Tier3View`, `Tier3Ellipse`, and
 above), `godot/rust/src/lib.rs` (the eighth worker channel), `godot/scripts/sim.gd`,
 `godot/scripts/encounter.gd`, and three shots in `godot/tests/_shot.gd`. See also
 [[tier3-uncertainty]] for the core layer this draws, and [[godot-visual-layer]].
+
+**2026-09-07/08 — the number that was supposed to vouch for the drawn shape.** The
+±3σ shell was finally pointed at the *drawn ellipse* and the answer is reassuring:
+the shape holds everywhere the σ knob reaches (worst 0.561 of the drawn half-width,
+at the top stop). But the scalar that was meant to say so, `max_relative_residual`,
+reads **0.0043** where the axis that matters reads **0.561**.
+
+That factor of 130 is **not the ellipse's 205:1 aspect ratio**, and assuming it was
+put a wrong sentence into this module's own docs before it was measured.
+`shell_scale` — the scalar's denominator — is the largest *flown* displacement over
+twelve shell points that are the **state** covariance's principal axes, and their
+b-plane images do not line up with the mapped ellipse's axes: measured, the shell
+reaches **0.693** of the 3σ half-length, i.e. **143×** the half-width. So the
+under-reading is `143 × 0.90`, geometry times the fraction of the residual lying
+across the needle rather than along it. Both factors are printed by the guard test
+so the doc quotes a measured line.
+
+Since 2026-09-08 the per-axis number is `LinearityReport::shape_residual` in
+`core/src/uncertainty.rs` rather than two private copies (one in the probe, one in
+the test). `holds_within` is deliberately unchanged — the scalar is the right test
+for the *probability*, which the major axis dominates — and `ShapeResidual` has its
+own sibling verdict. Nothing reaches the frontend: the report has never crossed the
+binding, and that is still by choice.
+
+**The catch the guard test could not make.** That test prints no angle, so it never
+touches the axis `shape_residual` returns - and `symmetric_eigen` hands back either
+end of an eigenvector. The move flipped it: the drawn angle read **-90.26 degrees**
+against this file's own recorded **89.736**, the same line printed as a different
+ellipse, with every ratio identical because they are absolute dot products. The
+sign is now pinned in the module (first non-zero component positive, tested at
+eight rotations) *and* the probe folds its printed angle into a half-turn, because
+the pinning does not survive the rotation into the display frame. A refactor that
+preserves every number a test prints can still change a number no test prints.
+
+Two traps worth keeping. **The guard test measures nothing without
+`ASTEROID_REQUIRE_KERNELS=1`** — it returns in 0 s and passes, which is exactly the
+failure mode for a refactor that reorders an eigenvector. And **`cargo fmt` can
+join a `\`-continued string literal and bake the indentation into it**, so a
+verdict line printed with eighteen spaces in it; reproduced on a minimal file, but
+it hit only one of the two such strings written that day, so read the output rather
+than the source.

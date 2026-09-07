@@ -8,14 +8,18 @@
 //!
 //! **Why the shipping scalar cannot answer it.** [`LinearityReport`] normalises the
 //! worst residual against `shell_scale`, the largest flown displacement anywhere on
-//! the shell. On a 205:1 ellipse that scale *is* the major axis, so a residual of a
+//! the shell. On a 205:1 ellipse that scale is a *length* — 0.693 of the 3σ
+//! half-length here, since the shell points are the state covariance's principal
+//! axes and their images do not line up with this ellipse's — so a residual of a
 //! few kilometres — enough to be several times the 0.82 km minor axis and to turn
 //! the needle into something with real width — divides down to a per-cent number
 //! and reads as "linear". The scalar is right for what it was built for (the
 //! probability, which the major axis dominates) and blind to the shape.
 //!
 //! So this probe decomposes the same residuals **along the drawn ellipse's own
-//! axes**:
+//! axes**, through `LinearityReport::shape_residual` — which lived here as an
+//! inline eigen block when it was first measured, and moved into the module once
+//! `core/tests/tier3_drawn_shape.rs` turned out to hold a second copy of it:
 //!
 //!   * `major` — residual projected on the major axis, against `n_sigma · σ_major`.
 //!     The number the existing scalar approximates.
@@ -52,7 +56,6 @@
 
 use anise::constants::frames::{EARTH_J2000, SUN_J2000};
 use asteroid_core::{ImpactorConfig, OpikFrame, RealFieldScenario, StateCovariance};
-use nalgebra::Vector2;
 use std::time::Instant;
 
 /// The three covariance constants the frontend draws with, mirrored from
@@ -177,31 +180,27 @@ fn main() {
     let mut worst_minor = 0.0_f64;
     let mut rows: Vec<(f64, f64, f64)> = Vec::new(); // scale, |residual| km, of_minor
     for (scale, (unc, report)) in scales.iter().zip(checked.iter()) {
-        // The drawn ellipse: axis lengths from the module's own accessor (invariant
-        // under the rotation), orientation from the rotated covariance.
-        let (sig_major, sig_minor) = unc.sigma_axes();
-        let cov_xz = rot * unc.covariance * rot.transpose();
-        let eig = cov_xz.symmetric_eigen();
-        let i_major = usize::from(eig.eigenvalues[1] > eig.eigenvalues[0]);
-        let major_hat = Vector2::new(
-            eig.eigenvectors[(0, i_major)],
-            eig.eigenvectors[(1, i_major)],
-        );
-        let minor_hat = Vector2::new(-major_hat.y, major_hat.x);
-        let angle_deg = major_hat.y.atan2(major_hat.x).to_degrees();
-
-        // The residuals, rotated into the display frame and resolved on those axes.
-        // `predicted` and `flown` are both displacements from the same mean in the
-        // sensitivity's basis, so their difference rotates like a vector.
-        let mut max_major = 0.0_f64;
-        let mut max_minor = 0.0_f64;
-        for s in &report.samples {
-            let r = rot * (s.predicted - s.flown);
-            max_major = max_major.max(r.dot(&major_hat).abs());
-            max_minor = max_minor.max(r.dot(&minor_hat).abs());
+        // The decomposition itself is the core's, and needs no rotation: the
+        // residual and the axis live in the same basis, so their dot product is
+        // invariant. What the rotation is for is the printed *angle* — the axis
+        // carried into the frame the view actually draws in.
+        let shape = report
+            .shape_residual(unc)
+            .expect("the drawn ellipse is not degenerate");
+        let (sig_major, sig_minor) = (shape.sigma_major, shape.sigma_minor);
+        // The axis has no direction, and the rotation can land it on either side, so
+        // fold the angle into a half-turn before printing it. Without this the
+        // published map's 89.736 comes back as -90.26 and reads as a different
+        // ellipse. `shape.major_hat` is sign-pinned in the module; that pinning does
+        // not survive an arbitrary rotation, which is the point of folding here.
+        let major_xz = rot * shape.major_hat;
+        let mut angle_deg = major_xz.y.atan2(major_xz.x).to_degrees();
+        if angle_deg <= -90.0 {
+            angle_deg += 180.0;
+        } else if angle_deg > 90.0 {
+            angle_deg -= 180.0;
         }
-        let of_major = max_major / (N_SIGMA * sig_major);
-        let of_minor = max_minor / (N_SIGMA * sig_minor);
+        let (of_major, of_minor) = (shape.major_ratio, shape.minor_ratio);
         worst_minor = worst_minor.max(of_minor);
         rows.push((*scale, report.max_residual / M_PER_KM, of_minor));
 

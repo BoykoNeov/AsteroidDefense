@@ -814,6 +814,9 @@ impl ShellSample {
     /// signal reports 100 % bending in a direction that contributes nothing to the
     /// ellipse. [`LinearityReport`] normalises against the shell's *largest*
     /// displacement instead, which is the scale the covariance actually has.
+    ///
+    /// That choice has its own blind spot — it cannot see the ellipse's *width*.
+    /// [`LinearityReport::shape_residual`] is the number that can.
     pub fn residual(&self) -> f64 {
         (self.predicted - self.flown).norm()
     }
@@ -847,6 +850,15 @@ pub struct LinearityReport {
     /// `max_residual / shell_scale` — how much the map bent, as a fraction of how
     /// far the shell reaches. This, not a per-sample ratio, is the number that says
     /// whether the ellipse is honest.
+    ///
+    /// Honest *as a probability*, which is what this module was built for. On an
+    /// elongated ellipse `shell_scale` is a *length* scale — not the major axis
+    /// itself (the twelve shell offsets are the state covariance's principal axes,
+    /// and their b-plane images do not line up with the mapped ellipse's own: on
+    /// the shipping drawn ellipse the shell reaches 350.9 km against a 3σ
+    /// half-length of 506.1 km) but the same order as it. So this says nothing
+    /// about the minor axis — see [`LinearityReport::shape_residual`], which on the
+    /// same shipping ellipse divides by a half-width 143× smaller.
     pub max_relative_residual: f64,
     /// Index into `samples` of the largest residual.
     pub worst_index: usize,
@@ -912,6 +924,133 @@ impl LinearityReport {
     /// than hiding one.
     pub fn holds_within(&self, tolerance: f64) -> bool {
         self.max_relative_residual <= tolerance
+    }
+
+    /// The same residuals resolved along the mapped ellipse's **own** principal
+    /// axes — the question [`max_relative_residual`] structurally cannot answer.
+    ///
+    /// That scalar divides by `shell_scale`, the largest displacement anywhere on
+    /// the shell, which on an elongated ellipse is a *length* — so a residual
+    /// several times the minor axis, big enough to mean the needle is not that thin
+    /// and its drawn *width* is a claim the linearisation does not support, still
+    /// divides down to a per-mil number and reads as "linear". The under-reading is
+    /// `shell_scale / (n_sigma · sigma_minor)` times the fraction of the residual
+    /// lying across the needle rather than along it, and the first of those is 143
+    /// on the shipping drawn ellipse. Measured there at the σ knob's top stop: the
+    /// scalar says 0.0043 where the minor axis says 0.561. The scalar is right for
+    /// the probability, which the major axis dominates, and blind to the shape;
+    /// this is the shape.
+    ///
+    /// Frame-independent, which is not obvious. The residual and the axis are
+    /// expressed in the same b-plane basis, and a common rotation leaves their dot
+    /// product alone — so the two ratios are invariant under the sensitivity's
+    /// arbitrary-but-deterministic basis choice even though an ellipse's
+    /// *orientation* is not. [`ShapeResidual::major_hat`] is the thing that does
+    /// carry the basis, and it is returned so a caller that needs the drawn angle
+    /// can rotate one vector instead of redoing the eigendecomposition.
+    ///
+    /// `None` if either semi-axis is zero (a degenerate covariance), rather than
+    /// dividing into it — the same discipline [`LinearityReport::new`] applies to
+    /// `shell_scale`.
+    ///
+    /// [`max_relative_residual`]: LinearityReport::max_relative_residual
+    pub fn shape_residual(&self, mapped: &BPlaneUncertainty) -> Option<ShapeResidual> {
+        // One decomposition for both the lengths and the directions. `sigma_axes`
+        // would give the lengths, but then the directions come from a second
+        // decomposition and the pair are two derivations of one fact.
+        let eig = mapped.covariance.symmetric_eigen();
+        let i_major = usize::from(eig.eigenvalues[1] > eig.eigenvalues[0]);
+        let i_minor = 1 - i_major;
+        let sigma_major = eig.eigenvalues[i_major].max(0.0).sqrt();
+        let sigma_minor = eig.eigenvalues[i_minor].max(0.0).sqrt();
+        // `f64::max` above returns the finite side of a NaN pair, so a NaN
+        // eigenvalue arrives here as a zero axis and is caught by this same test.
+        if sigma_major <= 0.0 || sigma_minor <= 0.0 {
+            return None;
+        }
+        // An ellipse axis is a *line*: `symmetric_eigen` may hand back either end of
+        // it, and which one is not a property of the covariance. Left as-is that
+        // sign reaches anything that prints an angle, and flips it by 180° for no
+        // physical reason — which is exactly what happened when this block moved out
+        // of the probe that used to hold it (the drawn angle went 89.74° → −90.26°
+        // against a published map recording 89.736°). So pin it: first non-zero
+        // component positive, `x` before `y`.
+        let raw = Vector2::new(
+            eig.eigenvectors[(0, i_major)],
+            eig.eigenvectors[(1, i_major)],
+        );
+        let flip = if raw.x != 0.0 {
+            raw.x < 0.0
+        } else {
+            raw.y < 0.0
+        };
+        let major_hat = if flip { -raw } else { raw };
+        let minor_hat = Vector2::new(-major_hat.y, major_hat.x);
+
+        let mut max_major = 0.0_f64;
+        let mut max_minor = 0.0_f64;
+        for s in &self.samples {
+            let r = s.predicted - s.flown;
+            max_major = max_major.max(r.dot(&major_hat).abs());
+            max_minor = max_minor.max(r.dot(&minor_hat).abs());
+        }
+        Some(ShapeResidual {
+            max_major,
+            max_minor,
+            sigma_major,
+            sigma_minor,
+            major_ratio: max_major / (self.n_sigma * sigma_major),
+            minor_ratio: max_minor / (self.n_sigma * sigma_minor),
+            major_hat,
+        })
+    }
+}
+
+/// [`LinearityReport`]'s residual resolved on the ellipse it is about, so the
+/// *shape* can be judged and not just the scale.
+///
+/// Built by [`LinearityReport::shape_residual`]; see there for why the scalar
+/// beside it cannot say this.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapeResidual {
+    /// Largest residual component along the major axis, b-plane metres.
+    pub max_major: f64,
+    /// Largest residual component along the minor axis, b-plane metres.
+    pub max_minor: f64,
+    /// The ellipse's 1σ semi-major axis, metres.
+    pub sigma_major: f64,
+    /// The ellipse's 1σ semi-minor axis, metres.
+    pub sigma_minor: f64,
+    /// `max_major / (n_sigma · sigma_major)` — the residual as a fraction of the
+    /// drawn half-length. This is what [`LinearityReport::max_relative_residual`]
+    /// approximates.
+    pub major_ratio: f64,
+    /// `max_minor / (n_sigma · sigma_minor)` — the residual as a fraction of the
+    /// drawn half-**width**. Past 1.0 the ellipse is narrower than the error in
+    /// knowing where it lies, and its width is a precision nobody has.
+    pub minor_ratio: f64,
+    /// The major axis as a unit vector in the uncertainty's own basis. Returned so
+    /// a caller drawing the ellipse can rotate this one vector into its display
+    /// frame rather than repeating the eigendecomposition; the two ratios above
+    /// need no rotation at all.
+    ///
+    /// It is an **axis**, so its sign is a convention, not a result — pinned here
+    /// to first-non-zero-component-positive so the same covariance always gives the
+    /// same vector. A caller rotating it into another frame can still land on the
+    /// negative side and should fold a printed angle into a half-turn rather than
+    /// compare it to a recorded one directly.
+    pub major_hat: Vector2<f64>,
+}
+
+impl ShapeResidual {
+    /// Whether **both** axes are supported to `tolerance` — the shape sibling of
+    /// [`LinearityReport::holds_within`], which is deliberately left alone because
+    /// it is the right test for the probability.
+    ///
+    /// Takes the tolerance for the same reason that one does: a drawn width and a
+    /// quoted probability do not deserve the same threshold.
+    pub fn holds_within(&self, tolerance: f64) -> bool {
+        self.major_ratio.max(self.minor_ratio) <= tolerance
     }
 }
 
@@ -1607,6 +1746,201 @@ mod tests {
         // The absolute residual is still there for anyone who wants it.
         assert!(report.max_residual > 0.0);
         assert!(report.shell_scale > 1.0e4);
+    }
+
+    // --- the shape the scalar cannot see -------------------------------------
+
+    /// A needle ellipse bent purely **across** its own width. The shell scalar
+    /// divides that residual by the major axis and reads "linear"; the shape
+    /// residual divides it by the width it actually ate and reads what was put in.
+    ///
+    /// This is the whole reason [`LinearityReport::shape_residual`] exists, in a
+    /// case with a closed-form answer: the residual is planted at a known fraction
+    /// of the drawn half-width, so the test knows what the right number is instead
+    /// of pinning whatever came out.
+    #[test]
+    fn the_shape_residual_reads_a_width_the_scalar_divides_away() {
+        // σ_b0 = 1e8 · 5e-5 = 5 000 m along the major axis, σ_b1 = 27 · 10 = 270 m
+        // across: an 18.5:1 needle, diagonal, so the axes are the coordinate axes.
+        let mut j = Matrix2x6::zeros();
+        j[(0, 3)] = 1.0e8;
+        j[(1, 1)] = -27.0;
+        let cov = StateCovariance::from_sigmas([1.0, 10.0, 1.0, 5.0e-5, 1.0e-9, 1.0e-9]).unwrap();
+        let offsets = cov.sigma_shell(3.0);
+        let mapped = uncertainty(Vector2::zeros(), j * cov.matrix() * j.transpose(), 1.1e7);
+        let (sig_major, sig_minor) = mapped.sigma_axes();
+        assert!(approx(sig_major, 5.0e3, 1e-9), "major {sig_major}");
+        assert!(approx(sig_minor, 270.0, 1e-9), "minor {sig_minor}");
+
+        // Plant a residual of exactly 40 % of the drawn 3σ half-width, across.
+        // Not on the sample that *sets* `shell_scale` — put it on the direction
+        // that moves the b-plane least, so the scalar's denominator stays exactly
+        // the shell's own reach and the two numbers below can be compared in closed
+        // form rather than approximately.
+        const PLANTED: f64 = 0.4;
+        let bend = PLANTED * 3.0 * sig_minor;
+        let bend_index = offsets
+            .iter()
+            .enumerate()
+            .min_by(|a, b| (j * a.1).norm().total_cmp(&(j * b.1).norm()))
+            .map(|(i, _)| i)
+            .unwrap();
+        let flown: Vec<Vector2<f64>> = offsets
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                let lin = j * o;
+                if i == bend_index {
+                    lin + Vector2::new(0.0, bend)
+                } else {
+                    lin
+                }
+            })
+            .collect();
+        let report = LinearityReport::new(&j, &offsets, &flown, 3.0);
+        let shape = report
+            .shape_residual(&mapped)
+            .expect("non-degenerate ellipse");
+
+        assert!(
+            approx(shape.minor_ratio, PLANTED, 1e-12),
+            "minor ratio {} for a residual planted at {PLANTED}",
+            shape.minor_ratio
+        );
+        assert!(
+            shape.major_ratio < 1e-15,
+            "major ratio {}",
+            shape.major_ratio
+        );
+        // And the scalar, on the same report, divides that same 324 m by the 15 km
+        // the shell reaches along the ellipse's *length*. The gap between the two
+        // is therefore not a judgement call — it is exactly the aspect ratio, which
+        // is the whole mechanism: make the ellipse round and they agree, make it a
+        // needle and the scalar under-reads by however thin the needle is.
+        let aspect = sig_major / sig_minor;
+        assert!(
+            approx(
+                shape.minor_ratio / report.max_relative_residual,
+                aspect,
+                1e-12
+            ),
+            "shape {:.6} vs scalar {:.6} is not the {aspect:.4}:1 aspect ratio",
+            shape.minor_ratio,
+            report.max_relative_residual
+        );
+        assert!(report.holds_within(0.05));
+        assert!(!shape.holds_within(0.05));
+        assert!(shape.holds_within(0.5));
+    }
+
+    /// The two ratios must not depend on the sensitivity's arbitrary-but-
+    /// deterministic b-plane basis. Rotating the covariance and both halves of
+    /// every sample by a common angle is exactly that change of basis, and it must
+    /// move `major_hat` and nothing else.
+    #[test]
+    fn the_shape_ratios_survive_a_change_of_b_plane_basis() {
+        let mut j = Matrix2x6::zeros();
+        j[(0, 3)] = 1.0e8;
+        j[(1, 1)] = -27.0;
+        let cov = StateCovariance::from_sigmas([1.0, 10.0, 1.0, 5.0e-5, 1.0e-9, 1.0e-9]).unwrap();
+        let offsets = cov.sigma_shell(3.0);
+        let cov_b = j * cov.matrix() * j.transpose();
+        let flown: Vec<Vector2<f64>> = offsets
+            .iter()
+            .enumerate()
+            .map(|(i, o)| j * o + Vector2::new(0.0, if i == 0 { 300.0 } else { 0.0 }))
+            .collect();
+        let plain = LinearityReport::new(&j, &offsets, &flown, 3.0)
+            .shape_residual(&uncertainty(Vector2::zeros(), cov_b, 1.1e7))
+            .expect("non-degenerate");
+
+        let angle = 0.7_f64;
+        let (c, s) = (angle.cos(), angle.sin());
+        let r = Matrix2::new(c, -s, s, c);
+        let turned_j = r * j;
+        let turned_flown: Vec<Vector2<f64>> = flown.iter().map(|f| r * f).collect();
+        let turned = LinearityReport::new(&turned_j, &offsets, &turned_flown, 3.0)
+            .shape_residual(&uncertainty(
+                Vector2::zeros(),
+                r * cov_b * r.transpose(),
+                1.1e7,
+            ))
+            .expect("non-degenerate");
+
+        assert!(approx(turned.minor_ratio, plain.minor_ratio, 1e-9));
+        assert!(approx(turned.sigma_minor, plain.sigma_minor, 1e-9));
+        assert!(approx(turned.max_minor, plain.max_minor, 1e-9));
+        // The direction is the one thing that *does* carry the basis — which is why
+        // it is returned rather than left for the caller to re-derive.
+        let expected = r * plain.major_hat;
+        assert!(
+            (turned.major_hat - expected)
+                .norm()
+                .min((turned.major_hat + expected).norm())
+                < 1e-9,
+            "major axis {:?} is not the rotation of {:?}",
+            turned.major_hat,
+            plain.major_hat
+        );
+    }
+
+    /// The returned axis must not depend on which end of it the eigensolver picks.
+    /// Caught in the field, not in review: moving this decomposition out of
+    /// `probe_tier3_drawn_shape` flipped the drawn angle from 89.74° to −90.26°
+    /// against a published map, with every ratio unchanged because they are
+    /// absolute dot products. The sign is a convention and this pins it.
+    #[test]
+    fn the_major_axis_sign_is_pinned_so_a_drawn_angle_cannot_flip() {
+        let mut j = Matrix2x6::zeros();
+        j[(0, 3)] = 1.0e8;
+        j[(1, 1)] = -27.0;
+        let cov = StateCovariance::from_sigmas([1.0, 10.0, 1.0, 5.0e-5, 1.0e-9, 1.0e-9]).unwrap();
+        let offsets = cov.sigma_shell(3.0);
+        let flown: Vec<Vector2<f64>> = offsets.iter().map(|o| j * o).collect();
+        let report = LinearityReport::new(&j, &offsets, &flown, 3.0);
+        let cov_b = j * cov.matrix() * j.transpose();
+
+        // Turn the same ellipse to every quarter of the circle. Whatever the
+        // eigensolver hands back, the axis must come out on the x > 0 side, and it
+        // must still be the true major direction up to that sign.
+        for k in 0..8 {
+            let angle = std::f64::consts::PI * f64::from(k) / 4.0 + 0.3;
+            let (c, s) = (angle.cos(), angle.sin());
+            let r = Matrix2::new(c, -s, s, c);
+            let shape = report
+                .shape_residual(&uncertainty(
+                    Vector2::zeros(),
+                    r * cov_b * r.transpose(),
+                    1.1e7,
+                ))
+                .expect("non-degenerate");
+            assert!(
+                shape.major_hat.x > 0.0,
+                "axis {:?} at {angle:.3} rad is on the wrong side of the convention",
+                shape.major_hat
+            );
+            let truth = r * Vector2::new(1.0, 0.0); // the mapped ellipse's major axis
+            assert!(
+                approx(shape.major_hat.dot(&truth).abs(), 1.0, 1e-9),
+                "axis {:?} is not parallel to {truth:?}",
+                shape.major_hat
+            );
+        }
+    }
+
+    /// A covariance with no width has no width to judge, and the answer is `None`
+    /// rather than a division by zero dressed up as infinite bending.
+    #[test]
+    fn a_degenerate_ellipse_has_no_shape_residual() {
+        let mut j = Matrix2x6::zeros();
+        j[(0, 3)] = 1.0e8;
+        let cov = StateCovariance::from_sigmas([1.0, 1.0, 1.0, 5.0e-5, 1.0e-12, 1.0e-12]).unwrap();
+        let offsets = cov.sigma_shell(3.0);
+        let flown: Vec<Vector2<f64>> = offsets.iter().map(|o| j * o).collect();
+        let report = LinearityReport::new(&j, &offsets, &flown, 3.0);
+        // A rank-one b-plane covariance: all the spread along one line.
+        let flat = uncertainty(Vector2::zeros(), Matrix2::new(1.0e8, 0.0, 0.0, 0.0), 1.1e7);
+        assert!(report.shape_residual(&flat).is_none());
     }
 
     #[test]

@@ -3,18 +3,20 @@
 //! `LinearityReport::max_relative_residual` has always answered "did the linear
 //! map survive to 3σ?" for the quantity the module was built for, the impact
 //! probability. It normalises the worst residual against the largest displacement
-//! anywhere on the shell, which on a 205:1 ellipse is the **major** axis — so a
+//! anywhere on the shell, which on a 205:1 ellipse is a **length** scale (0.693 of
+//! the 3σ half-length, measured — the shell points are the *state* covariance's
+//! principal axes, and their b-plane images do not line up with this ellipse's) — so a
 //! residual several times the 0.82 km minor axis still divides down to a per-mil
 //! number and reads as "linear". Every number the frontend draws that is *not* the
 //! probability — the minor axis, and therefore the drawn width of the needle —
 //! lives inside that blind spot.
 //!
-//! So this resolves the same residuals along the ellipse's **own** axes.
-//! Frame-independently: both the residual and the axis are expressed in the same
-//! b-plane basis, and a common rotation leaves their dot product alone, so no Öpik
-//! rotation is needed here. (It *is* needed to draw the ellipse — an orientation is
-//! not invariant — which is what `Tier3View` does and what
-//! `probe_tier3_drawn_shape` prints.)
+//! So this resolves the same residuals along the ellipse's **own** axes, through
+//! `LinearityReport::shape_residual`. Frame-independently: both the residual and
+//! the axis are expressed in the same b-plane basis, and a common rotation leaves
+//! their dot product alone, so no Öpik rotation is needed here. (It *is* needed to
+//! draw the ellipse — an orientation is not invariant — which is what `Tier3View`
+//! does and what `probe_tier3_drawn_shape` prints.)
 //!
 //! Measured 2026-09-07 by that probe, over the σ knob's whole `10^±3` range:
 //!
@@ -38,7 +40,6 @@
 
 use asteroid_core::uncertainty::StateCovariance;
 use asteroid_core::{ImpactorConfig, RealFieldScenario};
-use nalgebra::Vector2;
 
 /// The covariance the frontend draws, mirrored from `TIER3_ALONG_TRACK_SIGMA_MS`,
 /// `TIER3_VELOCITY_ANISOTROPY` and `TIER3_POSITION_SIGMA_M` in
@@ -64,29 +65,20 @@ const KNOB_TOP_LIMIT: f64 = 0.85;
 
 /// The largest residual component along each principal axis of the mapped
 /// ellipse, as a fraction of that axis' `n_sigma` half-width: `(major, minor)`.
+///
+/// This lived here as a private helper when it was first measured, and moved into
+/// `LinearityReport::shape_residual` once `probe_tier3_drawn_shape` turned out to
+/// hold a second copy of the same eigen block. The unit tests beside it in
+/// `uncertainty.rs` pin it against a planted residual, which is a thing this
+/// kernel-gated test cannot do.
 fn axis_ratios(
     unc: &asteroid_core::uncertainty::BPlaneUncertainty,
     report: &asteroid_core::uncertainty::LinearityReport,
 ) -> (f64, f64) {
-    let (sig_major, sig_minor) = unc.sigma_axes();
-    let eig = unc.covariance.symmetric_eigen();
-    let i_major = usize::from(eig.eigenvalues[1] > eig.eigenvalues[0]);
-    let major_hat = Vector2::new(
-        eig.eigenvectors[(0, i_major)],
-        eig.eigenvectors[(1, i_major)],
-    );
-    let minor_hat = Vector2::new(-major_hat.y, major_hat.x);
-    let mut max_major = 0.0_f64;
-    let mut max_minor = 0.0_f64;
-    for s in &report.samples {
-        let r = s.predicted - s.flown;
-        max_major = max_major.max(r.dot(&major_hat).abs());
-        max_minor = max_minor.max(r.dot(&minor_hat).abs());
-    }
-    (
-        max_major / (N_SIGMA * sig_major),
-        max_minor / (N_SIGMA * sig_minor),
-    )
+    let shape = report
+        .shape_residual(unc)
+        .expect("the drawn ellipse is not degenerate");
+    (shape.major_ratio, shape.minor_ratio)
 }
 
 /// ~37 propagations (one sensitivity, two shells), about a minute.
@@ -127,6 +119,31 @@ fn the_drawn_ellipse_shape_survives_the_shell_at_both_ends_of_the_sigma_knob() {
          knob top: major {maj_top:.4}, minor {min_top:.4} (scalar {:.4})",
         checked[0].1.max_relative_residual, checked[1].1.max_relative_residual
     );
+
+    // Why the scalar under-reads, in two factors, so the docs quote a measured
+    // number instead of "the major axis dominates". `shell_scale` is the scalar's
+    // denominator; the shape number's is the drawn half-width. Their ratio is the
+    // *most* the scalar can miss by, before the direction of the residual is taken
+    // into account — and it is not the aspect ratio, because the twelve shell
+    // offsets are the state covariance's principal axes and their b-plane images do
+    // not line up with the mapped ellipse's own.
+    //
+    // Printed at *both* ends of the knob on purpose: scaling the covariance scales
+    // the shell and the ellipse together, so the factor should come out the same
+    // number twice. That is what licenses quoting the shipping figure to explain a
+    // gap measured at the top stop.
+    for (label, (unc, report)) in ["shipping", "knob top"].iter().zip(checked.iter()) {
+        let (major, minor) = unc.sigma_axes();
+        let shell = report.shell_scale;
+        println!(
+            "{label} shell reaches {:.1} km = {:.3} of the {N_SIGMA}σ half-length ({:.1} km), and {:.0}x its half-width ({:.3} km)",
+            shell / 1e3,
+            shell / (N_SIGMA * major),
+            N_SIGMA * major / 1e3,
+            shell / (N_SIGMA * minor),
+            N_SIGMA * minor / 1e3
+        );
+    }
 
     assert!(
         min_ship < SHIPPING_LIMIT,

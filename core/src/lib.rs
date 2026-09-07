@@ -102,8 +102,8 @@ pub use scenario::{
 pub use state::StateVector;
 pub use uncertainty::{
     bplane_jacobian, bplane_jacobian_with_steps, BPlaneBasis, BPlaneSensitivity, BPlaneUncertainty,
-    FdSteps, LinearityReport, ShellSample, StateCovariance, UncertaintyError, FD_STEP_POSITION_M,
-    FD_STEP_VELOCITY_MS, SAMPLE_CADENCE_DAYS,
+    FdSteps, LinearityReport, ShapeResidual, ShellSample, StateCovariance, UncertaintyError,
+    FD_STEP_POSITION_M, FD_STEP_VELOCITY_MS, SAMPLE_CADENCE_DAYS,
 };
 
 /// Crate version string, surfaced so the viewer/validation layers can report

@@ -36,6 +36,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **The ranking that was a ratio**: resonant circles ranked by kilometres from their own *door* (`margin`) instead of by keyhole *widths*, the planner's alert cut on that same row, and the note branch nobody had seen fire finally executed | **done 2026-09-07**; the width ratio divides away exactly the additive placement error the five-door batch measured — though on this rock the two rankings never actually parted company, in 2 000 random geometries or on any plan the planner can dial | `core/src/keyhole.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/sim.gd`, `godot/tests/{test_orrery,_shot}.gd` |
 | **The calibration taken outside its own domain**: the same 3:4 door flown at four deflection lead times, the lead-sweep gate that made it affordable, and the placement band resized on what the planner can actually dial | **done 2026-09-07**; the door centre moves **+19.3 km -> +210.6 km -> +467.9 km -> no door at all** across leads 4383, 900, 450 and 150 days, and **only the first of those is not dialable** - so the five doors that set `KEYHOLE_PLACEMENT_KM = 100` were every one of them flown outside the range the constant is used in | `core/examples/probe_keyhole_placement.rs`, `core/src/keyhole.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/sim.gd` |
 | **The lead was the variable, and the crowded register fired**: the 3:4 door flown at 300 d and at 200 d, the frame proposed as the mechanism and falsified, and the several-doors register searched for on real physics | **done 2026-09-07**; of lead, Δv, ξ and the angle round the circle, **only the lead orders all five flown doors** — not the impulse (the 200 d door takes a *smaller* nudge and sits *further* out, +786.0 vs +648.2 km) and not the place on the circle (the 300 d and 12 yr doors are **0.48° of arc** apart with 34× the error). Rebuilding each flight's own Öpik frame makes the spread **worse**, 767 → 1375 km. `KEYHOLE_PLACEMENT_KM` 500 → **800**, and the width claim moves from ≤1.44× to **≤2.11×** on a door that is closing | `core/examples/probe_keyhole_placement.rs`, `godot/rust/src/mission_core.rs`, `godot/scripts/sim.gd`, `godot/tests/{test_orrery,_shot}.gd` |
+| **The shape number promoted out of its probe**: the per-axis linearity residual moved from two private copies into `LinearityReport::shape_residual`, with pure-math tests that know the right answer, and the blind scalar's under-reading factored | **done 2026-09-08**; behaviour identical (shipping minor 0.0007, top stop 0.5610, scalar 0.0043) and the 130x gap turns out **not** to be the 206:1 aspect ratio - it is 143 drawn half-widths of shell reach x 0.90 of the residual lying across the needle, because `shell_scale` is 0.693 of the 3sigma half-length, not equal to it. The move also flipped an eigenvector sign nothing tested - the drawn angle read **-90.26 against a published 89.736** with every ratio unchanged - now pinned in the module and folded into a half-turn at the print | `core/src/uncertainty.rs`, `core/tests/tier3_drawn_shape.rs`, `core/examples/probe_tier3_{drawn_shape,uncertainty}.rs` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -185,7 +186,13 @@ Read this table first, then the session that owns the layer you are touching.
    *major* axis of a 205:1 needle. And the first table's scariest row was not
    curvature at all: at the small-covariance end the residual is the integrator's
    own noise, which drops a hundredfold at a tighter tolerance while real
-   curvature does not move. See *The two drawn claims*.
+   curvature does not move. See *The two drawn claims*. **Its leftover closed 2026-09-08**: the per-axis number lived only in a
+   probe and a kernel-gated test, in two copies, while the one public verdict
+   read the blind scalar - it is now `LinearityReport::shape_residual`, pinned by
+   pure-math tests that know their own answer. And the 130x was **not** the
+   ellipse's 205:1 aspect ratio: `shell_scale` is 0.693 of the 3sigma half-length,
+   so the factor is 143 half-widths of shell reach times the 0.90 of the residual
+   that lies across the needle. See *The scalar's blindness*.
 9. Phase 3 — noting that its first bullet (plausible launch vehicles + payload
    mass budgets) is already built, in `core/src/launch_vehicle.rs` and the `[M]`
    readout. What is actually left there is orbital assembly, standing defence
@@ -4650,3 +4657,154 @@ circles is 200 d and up.
 168 were swept. A circle whose geometry puts its crossing at a small xi at a short
 lead is the place to look, and `xi_sweep` is cheap enough to screen the whole
 census before flying anything.
+
+---
+
+### The scalar's blindness, measured and moved into the module - 2026-09-08 session (item 8's leftover, and a factor that was never the aspect ratio)
+
+Item 8 closed on 2026-09-07 with a finding it did not act on: the number that was
+supposed to say whether the drawn uncertainty ellipse is still supported at 3 sigma
+reads **130x too small** on the axis that matters. What it left behind was not a
+wrong picture - nothing on screen was ever wrong - but a **shape number living in
+two copies outside the module**, one in `core/examples/probe_tier3_drawn_shape.rs`
+and one in `core/tests/tier3_drawn_shape.rs`, while the only public verdict
+anyone can call, `LinearityReport::holds_within`, still reads the blind scalar.
+A number that exists only inside the probe that discovered it is a finding, not a
+guard.
+
+#### What moved
+
+`LinearityReport::shape_residual(&BPlaneUncertainty) -> Option<ShapeResidual>`.
+It resolves the same shell residuals along the mapped ellipse's own principal
+axes and returns both ratios, both axis lengths, and the major axis as a unit
+vector. Four decisions inside it are worth naming.
+
+- **A method, not a constructor argument.** `LinearityReport::new` has three call
+  sites that build a report from a hand-made Jacobian with no `BPlaneUncertainty`
+  anywhere - the pure-math unit tests. A constructor that demanded an ellipse
+  would have forced those to fabricate one, and they exist precisely to test the
+  report without the propagator.
+- **One eigendecomposition.** Both copies used to take the *lengths* from
+  `sigma_axes()` and the *directions* from a second `symmetric_eigen()` beside it.
+  Two derivations of one fact that happened to agree.
+- **`Option`, not a division.** `sigma_axes` clamps eigenvalues at zero, so a
+  degenerate covariance gives an exactly zero half-width, and both old copies
+  divided straight into it. `new` already guards `shell_scale > 0.0`; this now
+  matches.
+- **`major_hat` returned.** Without it the probe still needs its own
+  eigendecomposition to print the ellipse's drawn angle, and the deduplication is
+  half done. With it the probe rotates one vector.
+
+`holds_within` is deliberately **unchanged**: its own doc argues the scalar is the
+right test for the probability, which the major axis dominates, and three
+assertions rest on that. `ShapeResidual::holds_within` is a sibling, not a
+replacement. Nothing was plumbed to Godot - the report has never reached the
+binding, and the previous batch's "nothing changed on screen for the ellipse,
+deliberately" still holds.
+
+#### The finding: 130 was never the aspect ratio
+
+The obvious reading of "the scalar normalises against the major axis" is that it
+under-reads the width by the ellipse's aspect ratio. On the shipping drawn ellipse
+that would be **205:1**, and the measured factor is **130**. The gap is not
+rounding, and chasing it turned up a wrong sentence in this batch's own first
+draft of the docs.
+
+`shell_scale` is **not** the major axis. It is the largest *flown* displacement
+across the twelve shell points, and those points are the **state** covariance's
+principal axes - six directions in the 6-D initial state, whose b-plane images do
+not line up with the 2-D mapped ellipse's own axes. Measured on the shipping
+covariance: the shell reaches **350.9 km** against a 3 sigma half-length of
+**506.1 km**, i.e. **0.693** of it, and **143x** the 2.455 km half-width.
+
+So the under-reading factors cleanly:
+
+```text
+  minor_ratio / scalar  =  shell_scale / (n_sigma * sigma_minor)  x  across-fraction
+        130             =              143                        x      0.909
+```
+
+- The first factor is **geometry** - how many drawn half-widths the shell reaches.
+  Measured **143 at both ends** of the sigma knob (0.693 and 0.695 of the half-length
+  at the shipping covariance and at the top stop), because scaling the covariance
+  scales the shell and the ellipse together. That is what licenses quoting a figure
+  taken at the shipping scale to explain a gap measured at the top stop; the guard
+  test prints it at both ends rather than leaving the invariance assumed.
+- The second is **direction** - what fraction of the worst residual lies across
+  the needle rather than along it. At the knob's top stop 0.90 of it does.
+
+Neither is the aspect ratio, and the aspect ratio is the number the first draft of
+`max_relative_residual`'s doc claimed. Both are now printed by the guard test
+(`shipping shell reaches 350.9 km ... (0.693 of it) and a half-width of 2.455 km
+(143x it)`) so the doc quotes a measured line rather than a plausible mechanism.
+
+#### The unit test that has a right answer
+
+The kernel-gated guard test can only pin what the real encounter happens to
+produce. The three new tests in `uncertainty.rs` are pure arithmetic and one of
+them knows the answer in advance: plant a residual at exactly 40 % of the drawn
+3 sigma half-width, **across** the needle and **not** on the sample that sets
+`shell_scale`, and the two numbers must then differ by *exactly* the aspect ratio -
+because with the residual purely across and the denominator exactly the shell's
+own reach, every other factor is 1. Asserted to 1e-12. The other two pin that the
+ratios survive a common rotation of the b-plane basis (they are dot products in a
+shared frame, so they must, while `major_hat` must rotate with it), and that a
+rank-one covariance returns `None` instead of dividing by a zero width.
+
+Together they say what the 60 s kernel test cannot: that the method computes the
+thing it claims to, rather than reproducing whatever it reproduced yesterday.
+
+#### Behaviour preserved, and how that was checked
+
+The guard test prints the same numbers as before the move - shipping minor
+**0.0007**, top stop **0.5610**, scalar **0.0043** - which is the check that
+discriminates here, because a refactor that reordered an eigenvector would compile
+clean and pass every pure-math test. It must be run as
+`ASTEROID_REQUIRE_KERNELS=1 cargo test ...`: without it `resolve_for_test` returns
+early and the test passes in 0 s having measured nothing.
+
+One cosmetic bug caught by running the probe rather than reading it: `cargo fmt`
+can **silently join a `\`-continued string literal and bake the indentation into
+the string**, so a verdict line printed with eighteen spaces in the middle of it.
+Reproduced on a two-line minimal file, and it is not conditioned on the joined
+line fitting - a 150-character result is joined too. It happened to one of the two
+such strings written in this batch and not the other (the guard test's survived),
+so it is not reliably predictable either way. Write `println!` strings on one line,
+and read the output after formatting rather than the source before it.
+
+#### The one thing the guard test could not have caught
+
+The guard test never prints an angle, so it exercises `shape_residual`'s *ratios*
+and not the axis it returns. Running the probe caught what that leaves open:
+`symmetric_eigen` hands back **either end** of an eigenvector, and which end is not
+a property of the covariance. Moving the decomposition out of the probe flipped the
+sign, and the drawn angle went **89.74 -> -90.26 degrees** against a published map
+recording 89.736 - the same line, printed as a different ellipse - while every
+ratio stayed identical to four decimals, because they are absolute dot products.
+
+Two fixes, because the sign has two lives. `shape_residual` now **pins** it (first
+non-zero component positive) so one covariance always yields one vector, with a
+unit test that turns the same ellipse to eight angles and checks both the side and
+the parallelism. And the probe **folds the printed angle into a half-turn**, because
+that pinning does not survive the arbitrary rotation into the display frame - an
+ellipse axis is a line, and an angle for it is only defined modulo 180 degrees.
+
+The general lesson is the one this file keeps recording in different clothes: a
+refactor that preserves every number a test prints can still change a number no
+test prints. The probe is the thing that prints it.
+
+#### What this leaves
+
+- **Still no shape verdict on screen.** `probe_tier3_uncertainty` now prints both
+  ratios and two verdicts, but the frontend prints neither, because the report
+  still does not cross the binding. That is unchanged by choice, not by oversight:
+  the drawn ellipse is about one pixel at the default zoom and the finding is that
+  it is sound.
+- **The three-place covariance duplication is untouched.** The frontend's drawn
+  covariance constants still exist in `mission_core.rs`, `probe_keyhole_map` and
+  this probe/test pair with nothing enforcing agreement.
+- `cargo clippy` reports **ten** pre-existing `neg_cmp_op_on_partial_ord` lints
+  across the crate, not the three in `sbdb.rs` the last batch recorded - the
+  others are in `keyhole.rs` (3), `sbdb.rs` (4 total), `deflection.rs`,
+  `keyhole_target.rs` and `probe_keyhole_floor.rs`. Nothing in this batch touches
+  them, and CI does not pass `-D warnings`.

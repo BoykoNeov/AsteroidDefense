@@ -226,11 +226,34 @@ fn main() {
     println!(
         "  {}",
         if report.holds_within(0.05) {
-            "the linear map still describes the encounter at 3σ — the ellipse is honest"
+            "the linear map still describes the encounter at 3σ — the probability is honest"
         } else {
             "the map has bent by 3σ — Σ_b = J Σ Jᵀ is an approximation here, not the truth"
         }
     );
+    // That verdict is about the *probability*, which the major axis dominates —
+    // the scalar above divides by the shell's largest displacement, so on an
+    // elongated ellipse it cannot see the width. Print the per-axis numbers beside
+    // it, or a reader takes a probability verdict for a verdict on the picture.
+    match report.shape_residual(&mapped) {
+        Some(shape) => {
+            println!(
+                "  along its own axes: {:.4} of the drawn half-length, {:.4} of the half-width",
+                shape.major_ratio, shape.minor_ratio
+            );
+            println!(
+                "  {}",
+                if shape.holds_within(0.05) {
+                    "and the drawn shape is supported too — both axes inside 5 %"
+                } else if shape.minor_ratio < 1.0 {
+                    "the drawn width is wider than the error in it, but not by much"
+                } else {
+                    "the drawn width is narrower than the error in it — a precision this linearisation does not have"
+                }
+            );
+        }
+        None => println!("  (the mapped ellipse is degenerate — no shape to judge)"),
+    }
     let worst = report.samples[report.worst_index];
     println!(
         "  worst: predicted ({:.1}, {:.1}) km vs flown ({:.1}, {:.1}) km",

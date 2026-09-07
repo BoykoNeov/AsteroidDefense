@@ -244,7 +244,9 @@ impl KeyholeCircleRow {
 /// to give the wrong answer: it said `widths_away` was "the number that survives"
 /// and the kilometres were only for reading beside the drawn circle. Five flown
 /// doors (`probe_keyhole_placement`) say otherwise — the width is trustworthy to
-/// within 2.11× over the ten doors now flown, but the placement error is an
+/// within 2.11× over the ten doors now flown (that ratio measured at the probe's
+/// aim point; at the plan's own closest point, which is what `width_km` below
+/// reports, the same door reads 2.07×), but the placement error is an
 /// *additive* 2.0 to 26.8 km at that lead (and up to 786.0 km at a dialable one)
 /// that a ratio divides away at a wide door and inflates at a narrow one. So
 /// `margin_km`

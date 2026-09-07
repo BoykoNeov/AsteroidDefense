@@ -4177,7 +4177,9 @@ plan **round the circle** (the along-track curve crosses the 3:4 at
 xi = +6104 km at 12 yr and at -52 860 km at 150 d), and it forces a **bigger
 impulse** for the same `b`. Every point measured before this session had all
 three moving together, so "the lead" was one of three candidate labels for the
-same ladder. Two flights separated them.
+same ladder. Two flights separate them - **in sequence, not independently**: the
+first rules out the position, and only then does the second rule out the
+impulse.
 
 **It is not where on the circle.** The 3:4 door flown at a **300 d** lead lands
 at xi = +5531 km; the 12 yr door lands at +6103 km. That is 572 km apart on a
@@ -4192,7 +4194,9 @@ and it survived the 300 d flight (dv had gone 0.2165 -> 2.8798 as the error went
 19 -> 648). It does not survive the **200 d** one. The dv a circle costs is
 *not* monotone in the lead - the 200 d door floors at **2.4785 m/s**, less than
 the 300 d door's 2.8798 - and its placement error is **larger**: **+786.0 km**
-against +648.2. Impulse down, error up, on the same circle.
+against +648.2. Impulse down, error up, on the same resonance. (**Not** at the
+same point of it - see the next paragraph, which is the whole reason this pair
+is second in the order and not first.)
 
 **The order of those two eliminations matters and the second does not stand
 alone.** The 200 d shot lands at xi = -21 412 km, so it is *not* at the same
@@ -4307,7 +4311,14 @@ trend is still climbing where the measurements run out.
 
 **The width claim moved too, and it is the first door to break it.** The
 linearised width had been within 0.89x-1.44x of the flown one over nine doors.
-The 200 d door is **11.812 km flown against 24.879 km drawn - 2.106x**. That is
+The 200 d door is **11.812 km flown against 24.879 km drawn - 2.106x**. The
+drawn width in every one of these ratios is `keyhole_at(circle, aim.target)`, i.e.
+evaluated at the **aim point** (the nominal encounter's own xi = 6690 km), which
+is the convention all ten doors were measured under and so the one the 0.89-2.11
+range belongs to. It is not the width the panel prints, which is evaluated at the
+plan's own closest point on the circle - the readout reports **24.4 km** for this
+plan, giving 2.066x. The two differ because the flown shot does not sit at the
+xi the aim held. That is
 where the 3:4 door is closing: it does not exist at all by 150 d, and its
 return's irreducible sideways offset `xi2` is already -10 300 km at 200 d. A
 closing door narrows faster than the linearisation knows. The formula stays

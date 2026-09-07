@@ -58,7 +58,10 @@ const KEYHOLE_MAX_YEARS := 7
 ## range. Ten doors have now been flown to a return impact and had both edges
 ## bisected, and the linearised width is between **0.89x and 2.11x** the flown one
 ## - it used to be 0.89x to 1.44x over the first nine. The 2.11x is the 200 d
-## door: 11.8 km flown against 24.9 km drawn. That is where the 3:4 door is
+## door: 11.8 km flown against 24.9 km drawn at the probe's **aim point**, which
+## is the convention all ten ratios use. It is not the width this panel prints -
+## that one is evaluated at the plan's own closest point on the circle and reads
+## 24.4 km for that plan, i.e. 2.07x. That is where the 3:4 door is
 ## closing (it does not exist at all by 150 d, and its return's irreducible
 ## sideways offset is already 10 300 km at 200 d), and a closing door narrows
 ## faster than the linearisation knows. The formula stays **conservative** - it
@@ -128,8 +131,10 @@ const KEYHOLE_MAX_YEARS := 7
 ## ~210 km because of it - but that piece is very nearly the SAME at every lead,
 ## so it sizes this constant without explaining its ladder.
 ##
-## So the variable is identified and the mechanism is not. Read the ladder as five
-## flown doors on one circle, not as a law.
+## So the variable is identified and the mechanism is not. Read the ladder above
+## as **five flown doors on the 3:4 circle** - which is what it is - and the "ten
+## doors" this constant quotes elsewhere as the whole flown set (those five plus
+## the five other resonances flown at the 12 yr lead). Neither is a law.
 ##
 ## Circle crowding used to bracket this from above and no longer does. **Careful
 ## with the old evidence for that**: the 402 / 83.6 / 8.3 km figures from

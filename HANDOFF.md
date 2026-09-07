@@ -8,7 +8,7 @@ This document is the starting context for continuing development in Claude Code.
 
 ---
 
-## Where things stand — 2026-09-06
+## Where things stand — 2026-09-07
 
 A dashboard, because §10's task list has been complete since the MVP and the
 truth has lived in the dated session sections at the end of this file since.
@@ -26,6 +26,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **Tier 3c: keyhole targeting** — aim at any resonance on either branch, fly it, refine to the floor, and read the return in **its own** Öpik frame; the planner's `KEYHOLE` row | **done 2026-09-05** | `core/src/keyhole_target.rs`, `godot/scripts/{sim,planner}.gd` |
 | **Tier 3d: P(impact) at the resonant return** — the covariance flown through *both* encounters (the chaining is in the propagation, not a matrix product), finite-difference steps re-measured on the return, the chained gain checked against the closed form to 14 % | **done 2026-09-06**; the answer is set by how well the orbit is known, not how well the impulse is aimed | `core/src/keyhole_target.rs`, `core/examples/probe_keyhole_probability.rs` |
 | **Integrator convergence** — the forward tolerance swept `1e-9…1e-13` against the 12-yr campaign and the 15-yr keyhole return, crossed with the snapshot cadence; the bit-for-bit determinism gate; the flyby's amplification measured | **done 2026-09-06**; every published number is converged, but because the 1-day cadence **caps the step** — the same tolerance uncapped is 129 km off. **IAS15 retired, not deferred** (no oracle exists for it) | `core/examples/probe_integrator_convergence.rs`, `ImpactorConfig::forward_rtol` |
+| **Tier 3f: keyhole doors flown** — five resonances aimed at, flown to a return impact, refined to the timing floor and both door edges bisected; the circle-crowding check in closed form | **done 2026-09-07**; the linearised *width* is conservative by ≤1.44×, but **four of the five doors do not contain their own circle** — placement is 1 to 28 half-widths off and follows no law, so the frontend's width-multiple alert became an additive 100 km band | `core/examples/probe_keyhole_placement.rs`, `core/src/keyhole_target.rs`, `godot/scripts/sim.gd` |
 | Godot frontend: DE440 orrery, real NEO scenery, planner, b-plane view (with the keyhole map, `[H]`), launch-window map, Tier-2 force menu, tractor bench, threat-orbit knob | done; keyhole overlay **seen on screen 2026-09-05** and its captions budgeted | `godot/`, `godot/rust/` |
 | Godot visual/perf pass: 3D world in its own viewport with 4× MSAA and phosphor persistence (peak-hold trails), per-frame position memo, cached 2D orbit traces, the `_perf.gd` frame-time harness and `run_harness.ps1` | done 2026-09-05; the 2D map went 18.9 → 7.1 ms/frame, native calls/frame 764 → 29; follow-ups in `docs/plans/2026-09-05-visuals-performance-followups.md` | `godot/scripts/main.gd`, `godot/shaders/phosphor_persist.gdshader`, `godot/tests/` |
 | **Frontend speed**: the display comet flown on its own worker instead of the build worker, and every DE440 body served by one batched binding call filled on demand | **done 2026-09-06**; time to a threat solution 34.0 -> 25.2 s, native calls/frame in the 3D views 29 -> 6 | `godot/rust/src/lib.rs`, `godot/scripts/sim.gd` |
@@ -72,21 +73,23 @@ Read this table first, then the session that owns the layer you are touching.
    resonant return's needle lies along. At the default zoom it is about **one
    pixel**, and the view says so rather than fattening it. See *The uncertainty
    ellipse on the b-plane*.
-4. **The keyhole width's order-unity slack, measured on more than one case.**
-   The flown 3:4 sits 1.64 half-widths from its own circle and still returns
-   inside Earth, so the linearised width is conservative by ~1.6× — on a sample
-   of one. Two or three more flown resonances would turn that into a calibration
-   the planner row could quote instead of hedging. **7:9 was the first attempt
-   and does not calibrate it**: its refined return floors at 46 608 km, 4.12
-   capture radii out, so it is a resonant return but not an impact keyhole for
-   this rock at this ξ — there is no "flew through the door" to measure the door
-   against. The next candidates need to be resonances whose circle passes near
-   the *impact* region, not merely near the b-point. **Partly answered 2026-09-06 by a
-   different route:** measuring the chained `∂ζ₂/∂ζ₁` on the flown trajectory
-   gives the door width directly — 29.09 km against the map's 24.92 km, so the
-   linearised width is conservative by **1.17×**, not ~1.6×. That is a
-   *differential* calibration and it does not touch the *placement* question the
-   1.64 half-widths describes, which is what still wants more flown resonances.
+4. ~~**The keyhole width's order-unity slack, measured on more than one case.**~~
+   **DONE 2026-09-07 — and the item was two questions wearing one name.** Five
+   resonances (3:4, 5:7, 7:10, 6:5, 2:3) were flown to return impacts and had
+   both door edges bisected. The *width* calibrates: the linearised door is
+   conservative by at most **1.44×** once you divide out how much of the return's
+   capture disc its own spatial offset `ξ₂` has already eaten — and that chord
+   model is not a fit, it is `b = 11 240 ± 60 km` measured at all **ten** door
+   edges. The *placement* does not calibrate, and that is the finding: the door
+   centres sit 2.0, 2.2, 7.2, 19.3 and 26.8 km from their circles, which is 1.0
+   to 27.8 half-widths, and **four of the five doors do not contain their own
+   circle**. The offset is not a fixed distance, not a fixed number of widths,
+   and not a fixed `a'` bias (`offset × |∇a'|` spans 196 to −5403). So the
+   planner row cannot quote a multiple of the width, and the frontend constant
+   that did (`KEYHOLE_ALERT_WIDTHS = 4.0`, which missed three of the five) is
+   replaced by an additive band, `|distance| ≤ 100 km + width/2`. The 1.64
+   half-widths this line called a conservative width was never a width — it was
+   the placement error. See *Five keyholes flown*.
 5. ~~**dop853 → IAS15 crossover.**~~ **RETIRED 2026-09-06 — measured, and no second
    integrator is warranted.** Three corrections to that line. (a) The premise was
    wrong: it leaned on the 15.1 km residual vs JPL, which is *unmodelled forces*
@@ -3396,3 +3399,130 @@ Plan tasks 3-6 are closed; task 8's four small items are not started. Two loose
 ends elsewhere are now on the *What is next* list rather than buried: the
 keyhole-map circle radius is unbounded, and the Tier-3 ellipse is drawn at 1
 sigma with the +/-3 sigma linearity shell never run against the drawn shape.
+
+### Five keyholes flown, and the door that is not where the map draws it - 2026-09-07 session (roadmap item 4)
+
+Roadmap item 4 asked for the keyhole width's order-unity slack on more than one
+flown resonance. The answer splits in two, and only one half is about the width.
+
+**The width is fine. The placement is not.** Five resonances were each aimed at,
+flown to a return impact, refined to their timing floor, and then had both edges
+of their door found by bisection - 5 keyholes, ~45 flights each, every number
+below a flown trajectory and not a formula.
+
+| resonance | grad a' | linearised door km | flown door km | door centre, km from the circle | in half-widths |
+|---|---|---|---|---|---|
+| 3:4 Minus  | 2.612e1 | 24.879 | 26.919 | +19.255 |  +1.5 |
+| 5:7 Minus  | 9.694e1 |  3.893 |  4.781 |  +2.020 |  +1.0 |
+| 7:10 Minus | 1.382e2 |  1.924 |  2.207 | -26.750 | -27.8 |
+| 6:5 Plus   | 2.425e3 |  0.183 |  0.083 |  -2.228 | -24.3 |
+| 2:3 Minus  | 2.640e2 |  3.413 |  4.846 |  +7.248 |  +4.2 |
+
+**The headline, stated so it cannot be missed: four of the five doors do not
+contain their own circle.** The intervals are `[+5.796, +32.715]`, `[-0.370,
++4.411]`, `[-27.853, -25.647]`, `[-2.269, -2.186]` and `[+4.825, +9.671]` km.
+Only the 5:7 straddles zero. Everywhere else the map draws the circle outside
+the door it is supposed to mark, which means the map can call a point CLEAR
+while a rock flown from that point returns and hits Earth. The 1.64 half-widths
+recorded for the 3:4 was never a conservative width - it was the placement
+error, and it reproduces here at 1.548.
+
+**The placement error obeys none of the three laws it could have obeyed.** It is
+not a fixed distance (2.0 to 26.8 km), not a fixed number of half-widths (1.0 to
+27.8), and - the discriminator worth running - not a fixed bias in `a'` either:
+`offset x |grad a'|` comes out 503, 196, -3697, -5403 and +1914, a 30x spread
+with both signs. So there is no constant to quote, and in particular **no
+multiple of the width can express it**, because the placement error does not
+shrink when the door does. The 7:10's door is 2.2 km wide and sits 26.8 km from
+its circle; the 6:5's is 83 m wide and sits 2.2 km off.
+
+**Why the widths differ from the prediction, and how that was proved rather than
+fitted.** The refinement drives the return's timing coordinate to zero, so the
+door is the chord the return can sweep in `zeta2` at whatever spatial offset
+`xi2` it is stuck with. That predicts a shrink factor `sqrt(1 - (xi2/b_cap)^2)`.
+The proof is not a curve fit: **b at all ten measured edges came out 11 240 +/-
+60 km** - the returns preserve `v_inf`, so every one of them has to hit a disc
+of the same size, and `sqrt(xi2^2 + zeta2^2) = b_cap` at an edge *is* the chord
+statement, measured on ten independent flights. Divide the factor out and the
+five width ratios collapse from 0.45-1.42 to **1.00-1.44**. The one case where
+the linearised door is *wider* than the flown one (the 6:5) is entirely this:
+its return sits 10 040 km off axis on an 11 250 km disc, so only 45% of the
+chord is available. Consequence: since `b_cap` is common to all five, the
+`zeta2` width is fully determined by `xi2`, so the residual 1.00-1.44 slack
+cannot live in the return geometry - it is in the `b1 -> zeta2` amplification,
+i.e. in `|grad a'|` itself. **That is the calibration item 4 asked for: the
+linearised width is conservative by at most 1.44x once the return's own offset
+is accounted for.**
+
+**The check that says the edge finder is honest.** This repo has shipped the
+`b`-against-`R_earth`-instead-of-`b_capture` bug more than once, so: the ten
+edge returns land at 6268.6 to 6370.3 km against `R_earth` = 6378 km. The edges
+graze the surface, which is what a door edge is, and they do it on the
+*return's* own capture disc - not encounter 1's 11 311 km, not `R_earth`. Two
+independent confirmations of the same thing, neither of them planned.
+
+**What the survey overturned on the way.** The working assumption was that short
+returns (low `h`) are the reachable impact keyholes. Screening 14 circles by
+flying each once says otherwise: 5:7, 7:10 and 6:5 all floor closer than the
+3:4, while 4:3 and 7:5 floor at 153 448 and 1 051 352 km of spatial offset and
+can never be impact keyholes for this rock at this `xi`. The column that decides
+it is `xi2`, the offset the timing refinement cannot remove; `h` predicts
+nothing. Only those last two deserve "cannot be an impact keyhole" - the middle
+band is "`xi2` too large for the timing to close", which is a statement about
+this rock, not about the resonance.
+
+#### The frontend constant did not survive
+
+`godot/scripts/sim.gd` alerted when a plan lay within `KEYHOLE_ALERT_WIDTHS =
+4.0` half-widths of a circle. That misses three of the five flown keyholes -
+7:10 at 27.8, 6:5 at 24.3, 2:3 at 4.2. It is replaced by
+
+    alert when |distance| <= KEYHOLE_PLACEMENT_KM + width/2,   KEYHOLE_PLACEMENT_KM = 100.0
+
+additive, because the door has a real width *and* a displaced centre and the two
+errors add. **The 100 km is chosen, not measured**, and the comment says so:
+every aim in this campaign was taken at one point on each circle (`xi` = 6690
+km), so 26.75 km is the largest error seen at five points, not a bound over a
+drawn circle. The margin is bracketed from the other side by circle crowding,
+checked in closed form with no flights (`probe_keyhole_placement spacing`): at
+`KEYHOLE_MAX_YEARS` = 7 the closest two circles the frontend draws sit **402 km**
+apart, so a 100 km band still names one circle unambiguously. That is a real
+coupling - **at 20 years the tightest pair is 3.0 km**, and this constant would
+have to shrink with the horizon.
+
+Two smaller consequences. The panel now names the circle nearest **in
+kilometres** rather than the one nearest in half-widths, because placement
+dominates; the note flags the disagreement when they differ, the other way round
+from before. And the label lost its third register: it no longer says "IN THE
+KEYHOLE - RETURN SET UP" when a plan lands inside a drawn door, because four of
+five flown doors did not contain their circle, so being inside the drawn band is
+neither necessary nor sufficient. It reports a distance and whether the map can
+still tell.
+
+#### Two fixes in the core this needed
+
+`KeyholeSolution::is_impact_return` compared the return's **already focused**
+closest-approach distance against **encounter 1's** capture radius. Anything
+returning between 6 378 and 11 312 km - a 5 000 km band - was reported as an
+impact keyhole while being a clean miss. It now asks the return's own encounter
+`is_hit()`, with a kernel-free regression test pinning the band. The shipping
+3:4 answer is unchanged (1 087 km is inside Earth either way), so nothing
+published moves; the survey is what would have been wrong.
+
+`refine_keyhole_return` was split out of `solve_keyhole_return` so a caller that
+already knows a bracketing aim can skip `required_dv`'s ~18 campaign re-flights.
+That is what made a five-resonance survey affordable at all, and it is safe
+because the aim only has to bracket and `bracketed` is reported. Every aim in
+the survey landed within 75 km of its target on b-values of tens of thousands of
+km, so sampling `b(dv)` once on a 28-rung ladder and inverting it cost nothing.
+
+#### What this leaves
+
+The core's `tightest_keyhole` still selects by half-widths, which this finding
+makes the wrong metric - it will systematically prefer wide circles over close
+ones. The frontend now works around it by naming `nearest` instead, so nothing
+on screen is wrong, but the core API answers a question that no longer matters
+much. Second, the placement error is measured at exactly one `xi` per circle;
+whether it varies along a circle is unknown, and that is what a sixth campaign
+should ask. Third, nothing here explains *why* the placement error is what it
+is - it is bounded and characterised, not derived.

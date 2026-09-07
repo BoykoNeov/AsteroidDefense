@@ -343,7 +343,7 @@ func _run() -> void:
 	var best_w := INF
 	var best_i := -1
 	for i in rungs.size():
-		var w := await _keyhole_widths_at(rungs[i])
+		var w := await _keyhole_margin_at(rungs[i])
 		print("SHOT  keyhole sweep dv=%.2f -> %s" % [rungs[i], Sim.keyhole_label()])
 		if w < best_w:
 			best_w = w
@@ -358,42 +358,43 @@ func _run() -> void:
 		var phi := 0.5 * (sqrt(5.0) - 1.0)
 		var x1 := hi - phi * (hi - lo)
 		var x2 := lo + phi * (hi - lo)
-		var f1 := await _keyhole_widths_at(x1)
-		var f2 := await _keyhole_widths_at(x2)
+		var f1 := await _keyhole_margin_at(x1)
+		var f2 := await _keyhole_margin_at(x2)
 		for _i in 10:
 			if f1 < f2:
 				hi = x2
 				x2 = x1
 				f2 = f1
 				x1 = hi - phi * (hi - lo)
-				f1 = await _keyhole_widths_at(x1)
+				f1 = await _keyhole_margin_at(x1)
 			else:
 				lo = x1
 				x1 = x2
 				f1 = f2
 				x2 = lo + phi * (hi - lo)
-				f2 = await _keyhole_widths_at(x2)
+				f2 = await _keyhole_margin_at(x2)
 		best_dv = x1 if f1 < f2 else x2
 		best_w = minf(f1, f2)
-		await _keyhole_widths_at(best_dv)
+		await _keyhole_margin_at(best_dv)
 		await _settle(4)
 		await _shot("enc_8_planner_keyhole")
-		print("SHOT  closest a player can dial: dv=%.5f at %d d -> %s (alert=%s)"
-			% [best_dv, int(Sim.plan_lead_d), Sim.keyhole_label(), Sim.keyhole_alert()])
+		print("SHOT  closest a player can dial: dv=%.5f at %d d (margin %.1f km) -> %s (alert=%s)"
+			% [best_dv, int(Sim.plan_lead_d), best_w, Sim.keyhole_label(),
+				Sim.keyhole_alert()])
 		print("SHOT  keyhole note: %s" % Sim.keyhole_note())
 
 	get_tree().quit(0)
 
 
-## Solve one plan at the longest allowed lead and report how many keyhole
-## half-widths it lands from the nearest resonant return. INF when there is
-## nothing to measure against (no b-point, no map).
-func _keyhole_widths_at(dv: float) -> float:
+## Solve one plan at the longest allowed lead and report how far outside the
+## nearest resonant return's door it lands, kilometres. INF when there is
+## nothing to measure against (no b-point, no map). Minimising the same
+## quantity the panel is cut on keeps the picture and the wording agreeing.
+func _keyhole_margin_at(dv: float) -> float:
 	Sim.set_plan(Sim.LEAD_MAX, dv, true)
 	Sim._tick_plan_debounce(1.0)
 	await _settle(1)
-	var row: Dictionary = Sim.plan_keyhole.get("tightest", {})
-	return row.get("widths_away", INF) if not row.is_empty() else INF
+	return Sim.keyhole_margin_km(Sim.plan_keyhole.get("nearest", {}))
 
 
 ## Press one mapped action the way a player does — through `_unhandled_input`, so

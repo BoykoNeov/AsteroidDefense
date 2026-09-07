@@ -658,13 +658,34 @@ pub struct KeyholeSolution {
 }
 
 impl KeyholeSolution {
-    /// Whether the refined return lands inside the capture disc — a resonant
-    /// **impact** keyhole, flown, rather than a return that misses.
+    /// Whether the refined return actually **hits Earth** — a resonant impact
+    /// keyhole, flown, rather than a resonant return that misses.
+    ///
+    /// The test is the return's *own* `b` against the return's *own* focused
+    /// capture radius ([`BPlaneEncounter::is_hit`]), because those are the two
+    /// halves of one pair. Falling back to `distance ≤ R⊕` when the return had no
+    /// hyperbolic reduction is the equivalent statement of the same criterion,
+    /// and `R⊕` is the one quantity that genuinely is shared between the two
+    /// encounters (it is the solid body, not a property of the flyby).
+    ///
+    /// **This used to read `r.distance_m <= self.aimed.encounter.capture_radius`,
+    /// and that was wrong twice over** — the same mixed pair that shipped in
+    /// `sim.gd` and made the frontend call a working deflection `SURFACE IMPACT`
+    /// (HANDOFF, *the verdict bar*). `distance_m` is a closest-approach
+    /// distance — already focused, comparable to `R⊕`. `capture_radius` is the
+    /// *un*focused disc an asymptotic `b` is measured against, and it belonged to
+    /// **encounter 1**, three years and a different `v_inf` away. On the shipping
+    /// 3:4 the answer was right by luck (1 087 km is inside both), but any return
+    /// landing between `R⊕` and encounter 1's 11 312 km disc — a band ~5 000 km
+    /// wide — was reported as an impact keyhole while being a clean miss.
     pub fn is_impact_return(&self) -> bool {
-        self.best
-            .flown_return
-            .as_ref()
-            .is_some_and(|r| r.distance_m <= self.aimed.encounter.capture_radius)
+        let Some(r) = self.best.flown_return.as_ref() else {
+            return false;
+        };
+        match r.encounter.as_ref() {
+            Some(enc) => enc.is_hit(),
+            None => r.distance_m <= self.aimed.encounter.earth_radius,
+        }
     }
 }
 
@@ -786,6 +807,46 @@ pub fn solve_keyhole_return(
         aim.perigee_m,
         dv_tol,
     )?;
+    refine_keyhole_return(scenario, ds, aiming, resonance, aim, aim_dv, opts, tol)
+}
+
+/// [`solve_keyhole_return`] from an aim and an impulse the caller already has —
+/// everything after the `required_dv` solve.
+///
+/// **Why this is separate.** `required_dv` is a bisection in which *every* probe
+/// re-flies the whole campaign: ~18 re-flights, 2–4 minutes, per resonance. A
+/// survey over many resonances pays that over and over for the same
+/// `perigee(Δv)` curve, which is a property of the deflection and not of the
+/// resonance being aimed at. Sampling that curve once and inverting it hands this
+/// function an aim Δv directly, and the survey cost collapses from
+/// `n · (18 + flights)` re-flights to `ladder + n · flights`.
+///
+/// That is safe precisely because **the aim only has to be close enough to
+/// bracket**. The refinement widens by doubling from ±[`KeyholeRefineTol::
+/// bracket_fraction`] and reports [`KeyholeSolution::bracketed`], so an
+/// approximate aim shows up as a wider walk, never as a silently wrong floor —
+/// and if it fails to bracket, that is reported rather than returned as an
+/// answer. The aim Δv is echoed back in [`KeyholeSolution::aim_dv_m_s`]
+/// unchanged, so a caller can always see what it was refined from.
+///
+/// Callers wanting the recipe end-to-end should use [`solve_keyhole_return`],
+/// which is this function with `required_dv` in front of it.
+#[allow(clippy::too_many_arguments)]
+pub fn refine_keyhole_return(
+    scenario: &RealFieldScenario,
+    ds: &DeflectionScenario<'_>,
+    aiming: KeyholeAiming<'_>,
+    resonance: Resonance,
+    aim: KeyholeAim,
+    aim_dv: f64,
+    opts: &KeyholeShotOptions,
+    tol: KeyholeRefineTol,
+) -> Result<KeyholeSolution, KeyholeTargetError> {
+    if !(aim_dv.is_finite() && aim_dv >= 0.0) {
+        return Err(KeyholeTargetError::InvalidInput(format!(
+            "aim Δv must be finite and ≥ 0 (got {aim_dv})"
+        )));
+    }
     // The aim decides how far out the flyby is, so it decides how wide the census
     // has to look. See `widened_for_aim` — a constant gate silently reported "no
     // encounter" for a 7:9 aim that flew fine.
@@ -1335,6 +1396,105 @@ mod tests {
         match aim_at_resonance(&f, r, 0.0, CircleBranch::Minus) {
             Err(KeyholeTargetError::ResonanceOutOfReach(got)) => assert_eq!(got, r),
             other => panic!("expected out-of-reach, got {other:?}"),
+        }
+    }
+
+    /// A return that misses by 9 000 km is a **miss**, and the old test said
+    /// impact.
+    ///
+    /// `is_impact_return` compared the return's geocentric closest approach
+    /// against **encounter 1's** focused capture radius — an already-focused
+    /// distance against the un-focused disc an asymptotic `b` belongs to, from a
+    /// different encounter three years and a different `v_inf` away. That is the
+    /// same mixed pair that shipped in `sim.gd`. This case is the band it got
+    /// wrong: 9 000 km clears Earth (6 378 km) but sits inside encounter 1's
+    /// 11 312 km disc, so the old form called a clean miss an impact keyhole.
+    /// Free — no propagation, no kernels.
+    #[test]
+    fn a_return_outside_earth_is_not_an_impact_keyhole() {
+        // Encounter 1 as the shipping rock's: v_inf 7.63 km/s → an 11 312 km disc.
+        let first = encounter_with(7_632.4, 30_000.0e3);
+        assert!(
+            (first.capture_radius / 1e3 - 11_312.0).abs() < 10.0,
+            "the fixture must reproduce the shipping capture radius, got {:.0} km",
+            first.capture_radius / 1e3
+        );
+        // The return: a slower pass whose perigee clears Earth by 2 622 km.
+        let perigee = 9_000.0e3;
+        let ret = encounter_with(5_000.0, perigee);
+        assert!(!ret.is_hit(), "the fixture return must be a miss");
+
+        let solution = solution_with(first, ret, perigee);
+        assert!(
+            perigee < solution.aimed.encounter.capture_radius,
+            "the fixture must sit in the band the old test got wrong"
+        );
+        assert!(
+            !solution.is_impact_return(),
+            "a return passing {:.0} km from Earth's centre is a miss, not an impact keyhole",
+            perigee / 1e3
+        );
+
+        // And the flown 3:4 case — 1 087 km, inside the solid body — still reads
+        // as an impact, so the fix narrows the answer rather than inverting it.
+        let hit = encounter_with(5_000.0, 1_087.0e3);
+        assert!(hit.is_hit());
+        assert!(solution_with(first, hit, 1_087.0e3).is_impact_return());
+    }
+
+    /// A b-plane reduction with the requested `v_inf` (m/s) and perigee (m).
+    fn encounter_with(v_inf: f64, perigee: f64) -> BPlaneEncounter {
+        let b = (perigee * perigee + 2.0 * MU_EARTH * perigee / (v_inf * v_inf)).sqrt();
+        let s_hat = Vector3::new(0.0, 0.0, 1.0);
+        let b_hat = Vector3::new(1.0, 0.0, 0.0);
+        let (r, v) = perigee_state_for_asymptote(v_inf, b, s_hat, b_hat, MU_EARTH);
+        BPlaneEncounter::from_relative_state(r, v, MU_EARTH, EARTH_EQUATORIAL_RADIUS_M).unwrap()
+    }
+
+    /// A [`KeyholeSolution`] carrying nothing but the two encounters and the
+    /// return distance — everything `is_impact_return` is allowed to read.
+    fn solution_with(
+        first: BPlaneEncounter,
+        ret: BPlaneEncounter,
+        distance_m: f64,
+    ) -> KeyholeSolution {
+        let t0 = Epoch::from_tdb_seconds_past_j2000(0.0);
+        let shot = |flown_return| KeyholeShot {
+            dv_m_s: 0.2,
+            first_epoch: t0,
+            encounter: first,
+            point: Vector2::zeros(),
+            a_prime_m: 0.825 * AU_M,
+            flown_return,
+        };
+        KeyholeSolution {
+            aim: KeyholeAim {
+                circle: ResonantCircle {
+                    resonance: Resonance { h: 3, k: 4 },
+                    a_prime: 0.825 * AU_M,
+                    cos_theta_out: 0.0,
+                    center_zeta: -78_703.7e3,
+                    radius: 74_836.6e3,
+                },
+                branch: CircleBranch::Minus,
+                target: Vector2::zeros(),
+                impact_parameter_m: 0.0,
+                perigee_m: 1.0,
+            },
+            aim_dv_m_s: 0.2,
+            aimed: shot(None),
+            best: shot(Some(FlownReturn {
+                epoch: t0,
+                distance_m,
+                years_after_first: 3.0,
+                approaches_in_gate: 1,
+                encounter: Some(ret),
+                xi_m: Some(4_006.0e3),
+                zeta_m: Some(-26.6e3),
+            })),
+            dv_window_m_s: 0.0,
+            flights: 1,
+            bracketed: true,
         }
     }
 

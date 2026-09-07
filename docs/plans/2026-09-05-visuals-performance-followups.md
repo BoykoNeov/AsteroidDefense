@@ -277,6 +277,18 @@ identical to the eye. **Done when** both hold.
 
 ## Task 7 — The Tier-3 ellipse on the b-plane view (roadmap item, larger)
 
+> **DONE 2026-09-06 — on `[U]`, with `[Z]`/`[X]` to ask the same question at a
+> better- or worse-known orbit.** The verify held: the ellipse is 168.71 x 0.82 km
+> lying **0.3 deg off zeta-hat**, the timing axis, which is the direction dv moves.
+> The trap the work was designed around is not in this plan: the sensitivity's
+> b-plane frame is *arbitrary*, so every scalar is invariant under it but an
+> **ellipse's orientation is not** — the rotation into the view's own axes is the
+> load-bearing step, measured at 1.95e-10. Two findings that look like bugs and
+> are not: a 5.43 km gap between the ellipse centre and the b-point (the linearised
+> centre is not the flown one), and a default that draws **one pixel** (the orbit
+> really is that well known relative to the view's scale).
+
+
 **Why.** `HANDOFF.md` → *What is next* item 4. The keyhole map already shows the
 ellipse in `docs/keyhole_map.svg`; the Godot view does not. The sensitivity
 solve is ~17 s, so it must be an on-demand worker like the porkchop grid.

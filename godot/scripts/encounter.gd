@@ -101,6 +101,10 @@ var _uncertainty := false
 ## state, so it cannot go stale.
 var _marker_live := false
 
+## Projected track segments, ready to draw. See `_track_runs`.
+var _runs := {}
+var _runs_key := ""
+
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -147,6 +151,9 @@ func _fetch() -> void:
 	_b_defl = Sim.encounter_b_point(true)
 	_span = Sim.encounter_span_days()
 	_circles = Sim.keyhole_circles(Sim.KEYHOLE_MAX_YEARS) if Sim.bplane_frame_pinned() else []
+	# The projected tracks are built from `_nom`/`_defl`, which are assigned here
+	# and nowhere else — so this is the whole of their invalidation.
+	_runs.clear()
 	_built = true
 
 
@@ -211,11 +218,11 @@ func _draw() -> void:
 	_draw_earth_and_disc(center, ppl, bright, mid, dim)
 
 	# Tracks: context. Dim, and behind the b-points that actually decide things.
-	_draw_track(_nom, center, ppl, Color(0.5, 0.5, 0.5))
+	_draw_track(_nom, center, ppl, Color(0.5, 0.5, 0.5), "nom")
 	if not _defl.is_empty():
 		# Faint while a solve is pending: this is still the previous plan's arc.
 		var a: float = 0.3 if Sim.plan_solving else 0.75
-		_draw_track(_defl, center, ppl, Color(0.62, 0.62, 0.62, a))
+		_draw_track(_defl, center, ppl, Color(0.62, 0.62, 0.62, a), "defl")
 
 	# Top-left, well above the encounter solution — NOT under it. The first
 	# screenshot of this overlay had it printed below the verdict, where the HUD's
@@ -577,18 +584,68 @@ func _draw_marker(center: Vector2, ppl: float, bright: Color, mid: Color) -> voi
 ##
 ## Unlabelled by design; see `_draw_legend`.
 func _draw_track(pts: PackedVector3Array, center: Vector2, ppl: float,
-		col: Color) -> void:
-	if pts.size() < 2:
-		return
+		col: Color, id: String) -> void:
 	var out_col := Color(col.r, col.g, col.b, col.a * 0.4)
-	var prev := _plot(center, ppl, pts[0])
-	var rect := Rect2(Vector2.ZERO, size).grow(400.0)
-	for k in range(1, pts.size()):
-		var cur := _plot(center, ppl, pts[k])
-		# Cheap reject: at this zoom most of a track is far off-frame.
-		if rect.has_point(cur) or rect.has_point(prev):
-			draw_line(prev, cur, col if pts[k].z <= 0.0 else out_col, 1.1)
-		prev = cur
+	for run: Array in _track_runs(pts, center, ppl, id):
+		draw_polyline(run[0], out_col if run[1] else col, 1.1)
+
+
+## A track's drawable segments, grouped into the longest runs that share a colour
+## and are on frame, and remembered until the zoom, the size or the tracks change.
+##
+## One `draw_polyline` per run rather than one `draw_line` per segment: a ~1400
+## point track was 1400 canvas commands per track per frame, and this view redraws
+## every frame because things blink and the clock runs.
+##
+## **Not one polyline per track.** The two requirements the plan stated together do
+## not compose that way — a single line would have to include the off-frame points
+## to stay connected, which is the reject undone. A run breaks on either of the two
+## things that make a segment different from its neighbour: it leaves the grown
+## rect, or it crosses the b-plane (`s` changes sign, which is what dims the
+## outbound half). Same segments, same colours, ~4 commands instead of 1400.
+##
+## Cached on (zoom, size) and dropped whenever `_fetch` re-reads the tracks — which
+## is the complete set of things that can change the geometry, since `_nom` and
+## `_defl` are assigned nowhere else.
+func _track_runs(pts: PackedVector3Array, center: Vector2, ppl: float,
+		id: String) -> Array:
+	# Keyed by which track it is, not by the points themselves: a
+	# PackedVector3Array as a dictionary key would hash ~1400 vectors on every
+	# lookup, which is the per-frame cost this is here to remove.
+	var key := "%.9f|%.0f|%.0f" % [_half_ld, size.x, size.y]
+	if _runs_key != key:
+		_runs_key = key
+		_runs.clear()
+	var hit: Variant = _runs.get(id)
+	if hit != null:
+		return hit
+	var runs: Array = []
+	if pts.size() >= 2:
+		var rect := Rect2(Vector2.ZERO, size).grow(400.0)
+		var prev := _plot(center, ppl, pts[0])
+		var cur_pts := PackedVector2Array()
+		var cur_out := false
+		for k in range(1, pts.size()):
+			var cur := _plot(center, ppl, pts[k])
+			var out: bool = pts[k].z > 0.0
+			# Cheap reject: at this zoom most of a track is far off-frame.
+			if rect.has_point(cur) or rect.has_point(prev):
+				if cur_pts.is_empty() or out != cur_out:
+					if cur_pts.size() >= 2:
+						runs.append([cur_pts, cur_out])
+					cur_pts = PackedVector2Array([prev])
+					cur_out = out
+				cur_pts.append(cur)
+			elif cur_pts.size() >= 2:
+				runs.append([cur_pts, cur_out])
+				cur_pts = PackedVector2Array()
+			else:
+				cur_pts = PackedVector2Array()
+			prev = cur
+		if cur_pts.size() >= 2:
+			runs.append([cur_pts, cur_out])
+	_runs[id] = runs
+	return runs
 
 
 ## The encounter solution. Only quantities the core actually pins: |B| and the

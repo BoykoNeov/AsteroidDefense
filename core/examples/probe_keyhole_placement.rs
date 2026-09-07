@@ -1405,6 +1405,12 @@ fn stage_xi_sweep(args: &[String]) {
     log(&format!(
         "\nagainst the flown doors: placement errors ran 2.0 .. {LARGEST_PLACEMENT_ERROR_KM:.1} km, \
          and the shipping band is KEYHOLE_PLACEMENT_KM = {SHIPPING_BAND_KM:.0} km.\n  -> {}",
+        // The middle branch below is now all but vestigial and that is worth
+        // saying rather than leaving for someone to notice: it fires only for a
+        // spread between LARGEST_PLACEMENT_ERROR_KM and SHIPPING_BAND_KM, an 18 km
+        // window. It used to be the 73 km between 27 and 100. Kept because the two
+        // constants are independent and a future door can reopen it, but nothing
+        // has been seen to execute it.
         if spread > SHIPPING_BAND_KM * 1e3 {
             "the crossings are further apart than the whole band, so position on the \
              circle is a first-order variable and the doors must be flown at each lead"

@@ -31,7 +31,10 @@ return that merely lands far out could be a search that stopped early; one whose
 timing is spent cannot be. Same gauge as [[keyhole-targeting]].
 
 **Only 3 of 168 circles were flown**, so "no keyhole below 150 d" is NOT
-established and the doc says so explicitly.
+established and the doc says so explicitly. And the **150-to-200 d bracket is the
+3:4's alone** - it is the only circle measured on both sides of the gap. The 2:3
+and 5:7 have no door at 125 d and were never asked above it; they show the 3:4 is
+not a special case there, they do not bracket the death twice more.
 
 ## The control is the whole point
 

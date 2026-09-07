@@ -114,8 +114,11 @@ const KEYHOLE_MAX_YEARS := 7
 ## removes is 25 000 to 36 000 km. A resonant return, not an impact keyhole.
 ##
 ## **So the stated domain floor is 200 d, and it is a floor on the QUESTION, not on
-## the number.** On these three circles the door ceases to exist between 150 and
-## 200 days, and below that there is nothing for this band to be wrong about. The
+## the number.** The door ceases to exist between 150 and 200 days **on the 3:4** -
+## the only circle measured on both sides of that gap. The 2:3 and 5:7 have no door
+## at 125 d and were not asked above it, so they say the 3:4 is not a special case
+## down there rather than bracketing the death a second and third time. Below the
+## floor there is nothing for this band to be wrong about. The
 ## panel still draws circles there and still quotes the band, which is right: the
 ## census has 168 circles and three were flown, so "no keyhole below 150 d" is not
 ## a claim this rests on and must not be written as one.

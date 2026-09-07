@@ -108,8 +108,11 @@ Read this table first, then the session that owns the layer you are touching.
    closed 2026-09-07.** Below 200 d the answer is not a bigger number: on the 3:4,
    2:3 and 5:7 the door **ceases to exist** between 150 and 200 d (all three still
    cross their circle at 125 d, and all three floor 19 447 / 25 140 / 29 341 km out
-   with their timing spent), the 3:4 circle **cannot be reached at all** by 100 d,
-   and none of the three is reached at 75 or 50 d. The constant stays at 800 and
+   with their timing spent), the 3:4 circle **cannot be reached at all** by 100 d
+   (the 2:3 and 5:7 ended on the wrong branch there and are NOT MEASURED, not
+   negative), and none of the three is reached at 75 or 50 d. The 150-to-200 d
+   bracket is the 3:4's alone - it is the only circle measured on both sides of
+   it. The constant stays at 800 and
    gains a stated domain floor. Three gates had to be discarded or fixed to get
    there - `screen` scores **zero hits at 200 and 300 d where the door is known**,
    the ladder aim is geometrically unusable below ~150 d (four `bracketed = false`
@@ -4542,8 +4545,12 @@ their timing - `zeta2` is 2.9 to 187.9 km against a `xi2` of 25 000 to 36 000 km
 shares of 0.000 to 0.007 - so the miss is the two orbits' own sideways offset, and
 no impulse along this curve removes it. Resonant returns, not impact keyholes.
 
-So on these circles the door **ceases to exist between 150 and 200 days**. The
-constant does not move; it gains a stated domain floor it never had.
+So the door **ceases to exist between 150 and 200 days on the 3:4** - which is the
+only circle with a measurement on both sides of that gap (door at 200 d, none at
+150 d). The 2:3 and the 5:7 have **no door at 125 d and were never asked above
+it**; what they add is that the 3:4 is not a special case at 125 d, not a second
+and third bracketing of where the door dies. The constant does not move; it gains
+a stated domain floor it never had.
 
 **What this does NOT claim.** The census has 168 circles and three were flown. "No
 keyhole below 150 d" is not established and is not what the constant's doc now

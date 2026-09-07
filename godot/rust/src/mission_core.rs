@@ -235,15 +235,18 @@ impl KeyholeCircleRow {
 /// **This is a map coordinate, not a prediction.** `core::keyhole`'s module doc
 /// puts the closed form's absolute placement error at `δa'/a' ≈ 1.3e-4`: over an
 /// `h`-year return that is hours of arrival slip, ~10^6 km of Earth's motion,
-/// against a keyhole tens of kilometres wide. Only a flown return says what
-/// happens.
+/// against a keyhole tens of kilometres wide. Measured on flown doors, the
+/// circle these kilometres are counted from is itself misplaced by 2 to 27 km at
+/// the campaign's 12 yr lead and by **211 to 468 km** at the leads the planner
+/// can dial. Only a flown return says what happens.
 ///
 /// **Which of these numbers to rank by** changed on 2026-09-07, and this doc used
 /// to give the wrong answer: it said `widths_away` was "the number that survives"
 /// and the kilometres were only for reading beside the drawn circle. Five flown
 /// doors (`probe_keyhole_placement`) say otherwise — the width is trustworthy to
-/// within 1.44×, but the placement error is an *additive* 2.0 to 26.8 km that a
-/// ratio divides away at a wide door and inflates at a narrow one. So `margin_km`
+/// within 1.44×, but the placement error is an *additive* 2.0 to 26.8 km at that
+/// lead (and up to 467.9 km at a dialable one) that a ratio divides away at a
+/// wide door and inflates at a narrow one. So `margin_km`
 /// (kilometres outside this door) is the risk number, `widths_away` describes one
 /// circle rather than ordering two, and the kilometres were never merely
 /// decorative.
@@ -330,6 +333,18 @@ pub struct KeyholeReadout {
     pub nearest: KeyholePlanRow,
     /// Closest *door*: the smallest `margin_km` in the census.
     pub at_risk: KeyholePlanRow,
+    /// How many doors in the whole census lie within the caller's placement band
+    /// — `at_risk` included, so `1` means the band names exactly one resonance
+    /// and `0` means the plan is outside every door's band.
+    ///
+    /// Present because the answer stopped being 1. The closed form's placement
+    /// error was measured on the 3:4 at three deflection leads — 19.3 km at the
+    /// campaign's 12 yr lead, 210.6 km at 900 days, 467.9 km at 450 days — while
+    /// the neighbouring drawn circles at those same b-plane points sit 402.2,
+    /// 83.6 and 8.3 km apart. A band honest about the first number is wider than
+    /// the second, so a panel quoting one circle would be picking one of several
+    /// the map cannot separate. This is the number that lets it say so.
+    pub doors_in_band: usize,
 }
 
 /// Discover the loaded kernel's usable coverage window by bisecting on whether
@@ -1798,7 +1813,11 @@ impl MissionCore {
     /// width. The readout wants the true `(ξ, ζ)`, so it takes it.
     ///
     /// Closed-form throughout: microseconds, safe on `plan_changed`.
-    pub fn keyhole_readout(&self, max_years: u32) -> Option<KeyholeReadout> {
+    pub fn keyhole_readout(
+        &self,
+        max_years: u32,
+        placement_band_km: f64,
+    ) -> Option<KeyholeReadout> {
         let f = self.opik.as_ref()?;
         let enc = self.plan.as_ref()?.encounter?;
         let p = f.project(&enc.b_vector);
@@ -1806,6 +1825,7 @@ impl MissionCore {
         let circles = f.resonant_circles(2..=max_years.max(2), 24, b_max);
         let nearest = f.nearest_keyhole(&circles, p)?;
         let at_risk = f.smallest_margin_keyhole(&circles, p)?;
+        let doors_in_band = f.doors_within_band(&circles, p, placement_band_km * M_PER_KM);
         Some(KeyholeReadout {
             plan_point_km: (p.x / M_PER_KM, p.y / M_PER_KM),
             b_km: enc.impact_parameter / M_PER_KM,
@@ -1813,6 +1833,7 @@ impl MissionCore {
             beyond_mapped_region: enc.impact_parameter > b_max,
             nearest: KeyholePlanRow::from_proximity(f, p, &nearest),
             at_risk: KeyholePlanRow::from_proximity(f, p, &at_risk),
+            doors_in_band,
         })
     }
 
@@ -5702,6 +5723,145 @@ mod tests {
         );
     }
 
+    /// The placement band these tests query the readout with, km.
+    ///
+    /// Mirrors `sim.gd`'s `KEYHOLE_PLACEMENT_KM`, which is the shipping value and
+    /// the one that decides what a player sees; it lives there because it is a
+    /// statement about how far the *map* can be trusted, which is a presentation
+    /// decision. Kept in step by hand — `test_orrery.gd` is the test that runs
+    /// against the real constant, so a drift between the two shows up there as a
+    /// changed verdict rather than here as a silent pass.
+    const PLACEMENT_BAND_KM: f64 = 500.0;
+
+    /// Kernel-gated. **The plan a player can dial that returns the rock to Earth
+    /// while the old band called it CLEAR.**
+    ///
+    /// `probe_keyhole_placement door 3 4 minus lead=900` flew this exact impulse
+    /// to a resonant return that hits Earth, bisected both edges of its door, and
+    /// put the door's centre **+210.6 km** from the 3:4 circle (edges +196.7 and
+    /// +224.6 km, both grazing the return's capture disc at 6 293–6 334 km against
+    /// `R⊕` = 6 378 km). The same door flown at the campaign's own 12 yr lead sits
+    /// **+19.3 km** out. Same resonance, same circle, same probe — 11× the
+    /// placement error, because the deflection lead moved.
+    ///
+    /// That matters here and not only in the probe, because **900 days is the
+    /// longest lead the planner will accept** (`sim.gd`: `LEAD_MAX = 900`, and
+    /// `lead_cap()` clamps to it) while the 12 yr lead is `T_IMPACT` itself and
+    /// cannot be dialed at all. The five doors that calibrated the old ±100 km
+    /// band were every one of them flown outside the range the band is used in.
+    ///
+    /// So this test pins the failure the old constant would have shipped: a plan
+    /// whose margin is over 100 km — CLEAR, under the old rule — and which flies
+    /// the rock back into Earth three years later.
+    #[test]
+    fn a_dialable_plan_that_returns_is_not_reported_clear() {
+        if !have_kernels() {
+            eprintln!("skipping a_dialable_plan_that_returns_is_not_reported_clear: no DE kernel");
+            return;
+        }
+        let mut mc = MissionCore::load().expect("load kernels");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+
+        // The flown shot: `sim.gd`'s longest dialable lead, and the retrograde Δv
+        // the probe refined to the return's timing floor.
+        const LEAD_S: f64 = 900.0 * 86_400.0;
+        const FLOWN_DV: f64 = -0.932_165_940_6;
+        mc.set_plan(LEAD_S, FLOWN_DV).expect("the plan solves");
+        let r = mc
+            .keyhole_readout(7, PLACEMENT_BAND_KM)
+            .expect("a readout for a plan with a b-point");
+        println!(
+            "900 d flown plan: b {:.0} km at (xi {:.0}, zeta {:.0}); at_risk {}:{} \
+             d {:.1} km, width {:.1} km, margin {:.1} km; doors in a {:.0} km band: {}",
+            r.b_km,
+            r.plan_point_km.0,
+            r.plan_point_km.1,
+            r.at_risk.h,
+            r.at_risk.k,
+            r.at_risk.distance_km,
+            r.at_risk.width_km,
+            r.at_risk.margin_km,
+            PLACEMENT_BAND_KM,
+            r.doors_in_band
+        );
+        assert!(
+            !r.beyond_mapped_region,
+            "the flown 900 d plan is on the map"
+        );
+
+        // The 3:4 by name, not by whichever row a ranking returned — the flown
+        // measurement belongs to that circle and must not follow the ranking.
+        let f = mc.opik.as_ref().expect("frame");
+        let p = f.project(
+            &mc.plan
+                .as_ref()
+                .expect("plan")
+                .encounter
+                .expect("encounter")
+                .b_vector,
+        );
+        let circles = f.resonant_circles(2..=7, 24, 60.0 * f.capture_radius);
+        let three_four = f
+            .keyhole_proximities(&circles, p)
+            .into_iter()
+            .find(|k| k.circle.resonance.h == 3 && k.circle.resonance.k == 4)
+            .expect("the 3:4 circle is in the readout's own census");
+        let d_km = three_four.signed_distance / M_PER_KM;
+        println!(
+            "  3:4 by name at 900 d: d {:.1} km, width {:.1} km, margin {:.1} km",
+            d_km,
+            three_four.keyhole.width / M_PER_KM,
+            three_four.margin() / M_PER_KM
+        );
+        // The probe measured the door centre at +210.632 km with a 27.913 km flown
+        // door, and this plan is the door's own floor shot. A wide band because the
+        // binding re-solves the plan rather than replaying the probe's trajectory;
+        // what is being pinned is that the shot lands hundreds of km out, not tens.
+        assert!(
+            (150.0..280.0).contains(&d_km),
+            "the flown 900 d keyhole shot sits {d_km:.1} km from the 3:4 circle; the probe \
+             measured +210.6 km and bisected the door's edges at +196.7 and +224.6 km. \
+             Outside this band the binding and the probe are no longer flying the same shot"
+        );
+
+        // The point of the whole batch: the old rule would have called this CLEAR.
+        const OLD_BAND_KM: f64 = 100.0;
+        assert!(
+            three_four.margin() / M_PER_KM > OLD_BAND_KM,
+            "this plan returns the rock to Earth, and the retired ±{OLD_BAND_KM} km band \
+             would have had to alert on it to be safe — it scores {:.1} km of margin. If \
+             this ever fails, the old constant was adequate after all and this batch's \
+             headline is wrong",
+            three_four.margin() / M_PER_KM
+        );
+        assert!(
+            r.at_risk.margin_km <= PLACEMENT_BAND_KM,
+            "the shipping band must alert on a plan that flies the rock back into Earth; \
+             the smallest margin in the census is {:.1} km against a {PLACEMENT_BAND_KM:.0} \
+             km band",
+            r.at_risk.margin_km
+        );
+
+        // How many doors the band contains — **reported, not asserted to be more
+        // than one.** The first draft of this test asserted `>= 2`, reasoning from
+        // `probe_keyhole_placement spacing xi=4390`, which found the closest pair of
+        // drawn circles 83.6 km apart against a 210.6 km placement error. It failed,
+        // and the failure is the useful part: 83.6 km is the tightest pair *anywhere*
+        // in that ξ's census, at some other impact parameter entirely, while this plan
+        // sits at b = 153 722 km where the neighbouring circles are far apart. So the
+        // crowding finding is real but narrower than first stated — a band honest
+        // about placement cannot separate circles *somewhere* on the map, not
+        // everywhere — and at this plan it still names exactly one. That distinction
+        // belongs to the panel, which is why the count is carried rather than assumed.
+        assert!(
+            r.doors_in_band >= 1,
+            "the plan is inside the band by the assertion above, so the band must contain \
+             at least the door it alerted on; the readout counts {}",
+            r.doors_in_band
+        );
+    }
+
     /// Kernel-gated. The planner's keyhole readout — *a miss can be worse than a
     /// hit if it is the wrong miss.*
     ///
@@ -5740,13 +5900,13 @@ mod tests {
         }
         let mut mc = MissionCore::load().expect("load kernels");
         assert!(
-            mc.keyhole_readout(7).is_none(),
+            mc.keyhole_readout(7, PLACEMENT_BAND_KM).is_none(),
             "no scenario, no readout — never a zeroed one"
         );
         mc.build_scenario(&ImpactorConfig::default())
             .expect("scenario builds");
         assert!(
-            mc.keyhole_readout(7).is_none(),
+            mc.keyhole_readout(7, PLACEMENT_BAND_KM).is_none(),
             "no plan, no readout: the nominal is an impact, not a miss to place"
         );
 
@@ -5755,7 +5915,7 @@ mod tests {
         mc.set_plan(lead, -0.216_550)
             .expect("the flown plan solves");
         let r = mc
-            .keyhole_readout(7)
+            .keyhole_readout(7, PLACEMENT_BAND_KM)
             .expect("a readout for a plan with a b-point");
         println!(
             "flown 3:4 plan: b {:.0} km at (xi {:.0}, zeta {:.0}); nearest {}:{} \
@@ -5981,7 +6141,7 @@ mod tests {
         // a *different* place on the map, so the readout is reading the plan and
         // not a constant.
         mc.set_plan(mc.period_seconds(), -0.2).expect("plan solves");
-        let d = mc.keyhole_readout(7).expect("readout");
+        let d = mc.keyhole_readout(7, PLACEMENT_BAND_KM).expect("readout");
         println!(
             "default plan: b {:.0} km; nearest {}:{} d {:.1} km; at_risk {}:{} d {:.1} km \
              (margin {:.1} km, {:.2} widths)",

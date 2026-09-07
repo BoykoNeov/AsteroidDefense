@@ -34,6 +34,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **Frontend legibility + the b-plane's frame cost**: tags and captions placed instead of drawn where they fall, the encounter tracks as runs of polyline, a persistence control on `[I]` | **done 2026-09-07**; b-plane view 10.1 -> 9.1 ms, and a single frame-ms number caught producing two opposite wrong conclusions | `godot/scripts/{tag_layer,encounter,main,solar_system,hud}.gd`, `godot/tests/_shot.gd` |
 | **The two drawn claims nobody had measured**: the b-plane view's resonant circles clipped to the viewport and tessellated to a pixel budget, and the Tier-3 ellipse's *shape* put through the ±3σ shell along its own axes | **done 2026-09-07**; the old whole-circle tessellation drew the widest resonance **59.9 px** off inside a 720 px view (now 0.113 px, and 3 points instead of 256), and the drawn ellipse holds everywhere the σ knob reaches — but the linearity scalar that was supposed to say so reads **130× too small** on the axis that matters | `godot/scripts/plot_geometry.gd`, `godot/tests/test_geometry.gd`, `core/examples/probe_tier3_drawn_shape.rs`, `core/tests/tier3_drawn_shape.rs` |
 | **The ranking that was a ratio**: resonant circles ranked by kilometres from their own *door* (`margin`) instead of by keyhole *widths*, the planner's alert cut on that same row, and the note branch nobody had seen fire finally executed | **done 2026-09-07**; the width ratio divides away exactly the additive placement error the five-door batch measured — though on this rock the two rankings never actually parted company, in 2 000 random geometries or on any plan the planner can dial | `core/src/keyhole.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/sim.gd`, `godot/tests/{test_orrery,_shot}.gd` |
+| **The calibration taken outside its own domain**: the same 3:4 door flown at four deflection lead times, the lead-sweep gate that made it affordable, and the placement band resized on what the planner can actually dial | **done 2026-09-07**; the door centre moves **+19.3 km -> +210.6 km -> +467.9 km -> no door at all** across leads 4383, 900, 450 and 150 days, and **only the first of those is not dialable** - so the five doors that set `KEYHOLE_PLACEMENT_KM = 100` were every one of them flown outside the range the constant is used in | `core/examples/probe_keyhole_placement.rs`, `core/src/keyhole.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/sim.gd` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -95,7 +96,13 @@ Read this table first, then the session that owns the layer you are touching.
    2026-09-07**: the core no longer ranks circles by a width ratio (which divides
    away the very error the batch measured), and the note branch that had never
    been seen to fire is now executed by a test. See *The ranking that was a
-   ratio*.
+   ratio*. **And its third loose end - "the placement error is measured at
+   exactly one xi per circle; whether it varies along a circle is unknown, and
+   that is what a sixth campaign should ask" - was asked and answered 2026-09-07.**
+   It varies, by 24x, and the knob that moves a plan along a circle is the
+   **deflection lead time**, which the planner already exposes. The five-door
+   calibration turns out to have been taken at a lead the planner cannot dial.
+   See *The calibration taken outside its own domain*.
 5. ~~**dop853 → IAS15 crossover.**~~ **RETIRED 2026-09-06 — measured, and no second
    integrator is warranted.** Three corrections to that line. (a) The premise was
    wrong: it leaned on the 15.1 km residual vs JPL, which is *unmodelled forces*
@@ -3899,3 +3906,215 @@ binding test green in 51 s (a 0.02 s run means it skipped), `test_orrery.gd`
 prints 89 against the 83 recorded above, the four checks here account for four of
 the difference, and the rest was not chased - a number in this file is supposed to
 be a measurement, and that one would not have been.
+
+
+### The calibration taken outside its own domain - 2026-09-07 session (roadmap item 4's sixth campaign)
+
+The five-door placement batch closed item 4 and wrote down what it could not
+answer: every door had been flown at **one point of one circle**, so the
+placement error was characterised per circle and never *along* one. The shipping
+`KEYHOLE_PLACEMENT_KM = 100.0` rested on those five points and said so in its own
+comment - "a CHOSEN margin, not a measured bound".
+
+That question is now answered, and the answer moved a shipping constant by 5x.
+
+#### The knob was not the one this looked like it needed
+
+The obvious way to move along a resonant circle is a **sideways impulse**: the
+circle spans xi, an along-track nudge barely moves xi, so add an out-of-plane
+component. Priced before building, that design is bad in three separate ways. It
+needs metres per second to shift xi by thousands of km (the out-of-plane leverage
+is ~140x weaker); at that size it shifts `v_inf` at encounter 1, which moves the
+**true** circle away from the drawn one, and that shift would land inside the
+measured placement error as a frame artefact; and `fly_keyhole_shot` applies
+`scalar x one unit direction`, so a fixed sideways component cannot be held while
+the refinement searches the magnitude.
+
+None of that was necessary. `MissionCore::set_plan` takes **two** arguments -
+`lead_seconds` and `dv_along_track` - and `sim.gd` exposes both (`LEAD_MIN/MAX` =
+30..900 d, `DV_MIN/MAX` = 0.1..300 m/s). So the set of encounter-1 b-plane points
+a player can occupy is a **2-D patch, not a 1-D curve**, every resonant circle is
+crossed by a whole family of `(lead, dv)` pairs at different xi, and
+`KeyholeAiming.deflection_epoch` was already a field. The lead sweep needs no new
+core API, no sideways impulse - and no frame confound at all, because the Opik
+frame is built from the **nominal** encounter, which does not depend on the lead.
+
+#### The gate, and what it cost to be wrong about a branch
+
+Flying a door is ~45 flights and ~12 minutes, so the campaign was gated first:
+`probe_keyhole_placement xi_sweep <h> <k> <branch> [leads...]` flies no returns
+and measures no doors. It finds where the along-track curve crosses one chosen
+circle at each lead and reports how far apart in xi the crossings are, against the
+27 km largest placement error already measured. The three outcomes and what each
+would mean were written into the stage's doc comment **before** it was run.
+
+Its first run was wrong, and its own columns said so. A vertical line cuts a
+circle **twice**, and the scan took the first sign change of `signed_distance` -
+which is the near crossing at short leads but not at the 12 yr lead, where
+`dv = 0.01` already starts past it. The output put a `b` of 7 859 km beside one of
+153 448 km and doors 240x apart and called them four samples of one circle. Two
+things made that visible rather than plausible: the door width is printed at every
+crossing, and so is `b`. The near crossings sit at 7 154-7 859 km against this
+encounter's 11 311 km capture radius, i.e. **inside the capture disc** - they are
+impacts at the first flyby, not keyholes at all. `on_branch` now checks each
+crossing against the circle's centre and scans past a wrong-branch one, logging it.
+
+With that fixed the gate is unambiguous. On the 3:4 (circle radius 74 855 km,
+centred at zeta = -78 722 km):
+
+| lead | dv (m/s) | xi at the crossing | linearised door there |
+|---|---|---|---|
+| 4383 d (12 yr) | 0.2165 | +6 104 km | 24.88 km |
+| 900 d | 0.9308 | +4 390 km | 24.91 km |
+| 450 d | 1.2519 | -15 811 km | 24.64 km |
+| 150 d | 3.2235 | -52 860 km | 21.29 km |
+
+**58 964 km of spread**, an arc of 64 825 km on a circle of radius 74 855 - about
+a third of the way round it, and 590x the whole placement band. Three of those
+four leads are dialable.
+
+**xi is not a smooth function of the lead**, and this is recorded as observed
+rather than modelled. Eight leads inside the planner's range give +4390, +906,
+-9310, +4952, -4379, -15811, +5537 and -52860 km at 900, 800, 700, 600, 500, 450,
+300 and 150 days. It oscillates, with no law offered and none measured. Do not
+read the four-row table above as a drift.
+
+#### Three doors on one circle, and the fourth that does not exist
+
+Each surviving lead was then flown the full way: aim, refine to the return's
+timing floor, bisect both edges of the door.
+
+| lead | dialable? | door centre from the circle | flown door | linearised / flown |
+|---|---|---|---|---|
+| 4383 d | **no** | +19.255 km | 26.919 km | 0.924 |
+| 900 d | yes | **+210.632 km** | 27.913 km | 0.891 |
+| 450 d | yes | **+467.869 km** | 20.407 km | 1.219 |
+| 150 d | yes | **no door** | - | - |
+
+Same resonance, same circle, same probe, same closed form. The placement error
+moves by **24x** across the leads a player can dial. At 150 d it stops being an
+impact keyhole entirely: the return floors 17 411 km out with a spatial offset
+`xi2` of -23 263 km that no amount of timing can close, so far enough round the
+circle the door does not merely move - it ceases to exist.
+
+**The width survives, and that is the point of splitting the two.** Across all
+eight doors now flown the linearised width is 0.89x to 1.44x the flown one. The
+width/placement split the five-door batch drew is exactly right; it is only the
+placement half that was under-measured, and it was under-measured in a direction
+nobody had looked.
+
+The edge-finder passes its own honesty check at every new lead: the four new edge
+returns land at 6 293.6, 6 306.2, 6 308.8 and 6 334.3 km against `R_earth` =
+6 378 km. Door edges graze the surface, and they do it on the **return's** own
+capture disc.
+
+#### The headline is not that it varies. It is where it was measured.
+
+`sim.gd` sets `T_IMPACT := 4383.0` days - the campaign lead *is* the whole
+timeline - and `lead_cap()` clamps to `LEAD_MAX = 900`, with `set_plan` clamping
+again to `[30, <=900]`. So the 12 yr lead is **4.9x beyond the longest lead the
+planner will accept**, unconditionally and for every `t`, not just for some.
+
+Every one of the five doors that set `KEYHOLE_PLACEMENT_KM = 100.0` was flown
+there. The constant was calibrated outside the domain it is consumed in, and
+inside that domain it is between 2.1x and 4.7x too small. A plan at a 900 d lead
+with a retrograde 0.932 m/s nudge - both ends of that dialable - sits 210.6 km
+from the 3:4 circle, scores 198.2 km of margin, and **flies the rock back into
+Earth three years later** while the old rule printed `CLEAR - NEAREST 3:4 IS 210
+KM OFF`. That plan is now a kernel-gated binding test.
+
+#### The crowding argument was taken at the same un-dialable point
+
+The 100 km was bracketed from above by circle crowding: at `KEYHOLE_MAX_YEARS` =
+7 the closest two drawn circles sit 402 km apart, so a 100 km band still names one
+circle. That number was also measured at xi = 6 690 km - the nominal encounter's
+own, which is the 12 yr lead's. `spacing` now takes an `xi=` override, and at the
+xi the dialable leads actually reach:
+
+| xi (km) | reached at | closest pair of drawn circles |
+|---|---|---|
+| +6 690 | 12 yr (not dialable) | 402.2 km |
+| +4 390 | 900 d | **83.6 km** |
+| -15 811 | 450 d | **8.3 km** |
+| -52 860 | 150 d | 692.5 km |
+
+So in parts of the map the drawn circles are closer together than the error in
+where they are drawn, and no distance rule can name one resonance there.
+
+**And the honest scope of that, which a failing assertion supplied.** The first
+draft of the binding test asserted that the flown 900 d plan would find several
+doors inside the band, reasoning from the 83.6 km figure. It failed: the readout
+counts **1**. 83.6 km is the tightest pair *anywhere* in that xi's census, at some
+other impact parameter entirely, while this plan sits at `b` = 153 722 km where
+the neighbours are far apart. The crowding finding is real but narrower than it
+first looked - a band honest about placement cannot separate circles *somewhere*
+on the map, not everywhere - and the assertion is now the measured `>= 1` with the
+count reported. This is the second batch running in which the useful outcome was
+an assertion that would not pass.
+
+#### What shipped
+
+`OpikFrame::doors_within_band(circles, p, band)` counts every door whose margin
+is inside a caller's band. The band is the caller's, not the core's: it is a
+statement about how far the *map* can be trusted, which is presentation.
+`MissionCore::keyhole_readout` takes it and returns `doors_in_band` alongside the
+two rows, so the panel can tell the difference between naming a circle and
+picking one of several.
+
+`KEYHOLE_PLACEMENT_KM` is **500.0** - the smallest round number above the largest
+placement error measured - and its doc comment is rewritten rather than appended
+to, because the old caveat ("nothing here bounds the error over a whole drawn
+circle") is now answered rather than still open. It says in as many words that
+this is a **measured maximum over eight doors, not a bound**: three leads on one
+circle and five circles at one lead is not a law, nothing here explains why the
+error grows as the lead shortens, and the 150 d column says a door can vanish
+rather than merely move.
+
+The panel gains a third register. Inside the band with one door it reads as
+before; inside the band with several it reads `** 300 KM OFF 7:8 - AND 2 MORE
+DOORS IN THE BAND`, which is the panel declining to present one of several as the
+answer. Outside the band it still reads CLEAR - the band grew, it did not become
+unconditional, and an alert that is always on says nothing. The note line now says
+`CIRCLE PLACED TO +/-500 KM AT THIS LEAD`, naming the lead because one figure
+demonstrably does not cover the slider.
+
+Every stage of `probe_keyhole_placement` now takes `lead=<days>`, writes one
+ladder **per lead** (`keyhole_ladder_<lead>d.tsv` carrying a `# lead_days =`
+header), and `Ladder::load` **refuses** a ladder flown at a different lead rather
+than interpolating the wrong `b(dv)` curve - a file with no header is refused too,
+since "assume it is the default" is the silent wrong-curve read the check exists
+to stop. The ladder's dv span scales with the lead ratio, and its comment says
+that factor is **a bracket, not a law**: the crossing dv came out 4.30x the 12 yr
+value at a 4.87x shorter lead and 14.9x at a 29.2x shorter one, so the 1/lead
+scaling it is borrowed from is wrong by 2x at the short end. The 3:4 cross-check
+at the end of the ladder stage is now gated to the campaign's own lead, because
+both numbers it compares were measured there and it read as a 6x failure at 450 d
+when it was the leverage changing.
+
+**Checks:** the core's `doors_within_band` unit test (kernel-free, and it executes
+the several-doors branch the flown plan does not reach), the kernel-gated binding
+test `a_dialable_plan_that_returns_is_not_reported_clear` (reproduces the probe's
++210.6 km to 0.1 km and pins that the retired 100 km band would have called it
+CLEAR), five new checks in `test_orrery.gd` covering the crowded register, the
+single-door register, CLEAR outside the band and the constant itself, plus
+`cargo fmt` and no new clippy warnings.
+
+#### What this leaves
+
+The placement error is now known to depend on the deflection lead, and **nothing
+here says why**. Three points on one circle plus five circles at one lead is a
+measurement, not a model, and the 500 km is the largest of those three - a plan at
+a lead between them, or on another resonance, may be worse. The obvious next
+question is whether the error is a function of the *lead* or of the *xi the lead
+lands on*, which the eight-lead sweep cannot answer because xi is not monotone in
+the lead: the two are entangled in every point measured so far.
+
+Second, `doors_in_band` is measured to be 1 on the only plan flown to a return,
+so the crowded register ships tested but not yet observed on real physics. The
+sweep says there are places on the map where it must fire; none of them has been
+flown.
+
+Third, the 150 d column - a door that stops existing as you move round a circle -
+is recorded and not explained. `xi2` is the coordinate that decides it, and how
+`xi2` depends on where on the circle you enter is exactly the question the return
+half of this layer has never been asked.

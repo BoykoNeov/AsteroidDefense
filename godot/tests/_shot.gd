@@ -401,6 +401,18 @@ func _run() -> void:
 				"NO ROWS" if near.is_empty() or row.is_empty()
 					else ("DISAGREE" if int(near.get("h", 0)) != int(row.get("h", 0))
 						or int(near.get("k", 0)) != int(row.get("k", 0)) else "agree")])
+		# How many doors the 500 km placement band contains here. The band is sized
+		# for a placement error measured at up to 468 km, and in parts of the map
+		# the drawn circles are closer together than that (83.6 km apart at the xi a
+		# 900 d plan reaches), so the panel has a register for "several doors, none
+		# of them singled out". The one plan flown to a return finds exactly one, so
+		# that register is tested but has never been seen on real physics - printing
+		# the count is how a future run says whether it finally was.
+		print("SHOT  doors inside the %.0f km placement band: %d%s"
+			% [Sim.KEYHOLE_PLACEMENT_KM,
+				int(Sim.plan_keyhole.get("doors_in_band", 0)),
+				"  <- the crowded register fired"
+					if int(Sim.plan_keyhole.get("doors_in_band", 0)) > 1 else ""])
 		print("SHOT  keyhole note: %s" % Sim.keyhole_note())
 
 	get_tree().quit(0)

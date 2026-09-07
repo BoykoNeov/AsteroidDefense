@@ -845,6 +845,43 @@ impl OpikFrame {
             })
     }
 
+    /// How many of `circles` have a **door** within `band` metres of `p` — the
+    /// count of [`KeyholeProximity::margin`] at or under `band`.
+    ///
+    /// The question this answers is not "how close is the nearest door" but
+    /// **"can a distance rule name one resonance at all here?"**, and it exists
+    /// because the answer turned out to be no in the region the frontend
+    /// actually works in.
+    ///
+    /// The placement band a caller passes is the closed form's own error in
+    /// where it draws a circle. `probe_keyhole_placement` measured that error on
+    /// the 3:4 at three deflection lead times and got 19.3 km at the campaign's
+    /// 12 yr lead, **210.6 km at 900 days and 467.9 km at 450 days** — while the
+    /// closest neighbouring pair of drawn circles at those same b-plane points is
+    /// 402.2, **83.6 and 8.3 km** apart. So at the leads a mission planner can
+    /// dial, the band is between 2.5× and 56× the spacing, and more than one door
+    /// falls inside it. A caller that prints only the nearest one is not wrong
+    /// about that one; it is silently answering a question whose answer is not
+    /// unique, and this is how it finds out.
+    ///
+    /// `band` is the caller's, not the core's: it is a statement about how much
+    /// the *map* can be trusted, which is a presentation decision. Non-finite or
+    /// negative bands count nothing.
+    pub fn doors_within_band(
+        &self,
+        circles: &[ResonantCircle],
+        p: Vector2<f64>,
+        band: f64,
+    ) -> usize {
+        if !(band >= 0.0) {
+            return 0;
+        }
+        self.keyhole_proximities(circles, p)
+            .into_iter()
+            .filter(|k| k.margin() <= band)
+            .count()
+    }
+
     /// Vis-viva at Earth's heliocentric position for a heliocentric velocity.
     fn semi_major_axis_of(&self, v_helio: &Vector3<f64>) -> f64 {
         1.0 / (2.0 / self.r_earth.norm() - v_helio.norm_squared() / self.mu_sun)
@@ -896,6 +933,69 @@ mod tests {
     const MU_EARTH: f64 = 3.986_004_356e14;
     const MU_SUN: f64 = 1.327_124_400_41e20;
     const R_EARTH: f64 = EARTH_EQUATORIAL_RADIUS_M;
+
+    /// `doors_within_band` counts every door in the band, not just the nearest —
+    /// and the several-doors branch is executed here rather than left to a plan
+    /// that happens to find one.
+    ///
+    /// The branch exists because the placement error the frontend must allow for
+    /// (measured at 210.6 km at a 900 day lead, 467.9 km at 450) is larger than
+    /// the tightest spacing between drawn circles at the same b-plane points
+    /// (83.6 km and 8.3 km). Where those two coincide, a distance rule cannot name
+    /// one resonance. The `a_dialable_plan_that_returns_is_not_reported_clear`
+    /// binding test found the flown 900 d plan sits somewhere the circles happen
+    /// to be far apart, so it counts exactly one — which is why the crowded case
+    /// needs its own test instead of being assumed to arise on its own.
+    ///
+    /// Kernel-free: it sweeps the census a real frame produces and asks for a
+    /// band wide enough to hold several of its doors, then checks the count
+    /// against the same proximities the ranking is computed from.
+    #[test]
+    fn doors_within_band_counts_every_door_not_just_the_nearest() {
+        let mut seed = 0x5eed_face_u64;
+        let (f, _) = random_frame(&mut seed);
+        let circles = f.resonant_circles(2..=20, 24, 60.0 * f.capture_radius);
+        assert!(
+            circles.len() > 3,
+            "this geometry has {} circles; the test needs a census to count within",
+            circles.len()
+        );
+        let p = Vector2::new(0.3 * f.capture_radius, -2.0 * f.capture_radius);
+        let mut margins: Vec<f64> = f
+            .keyhole_proximities(&circles, p)
+            .iter()
+            .map(|k| k.margin())
+            .collect();
+        margins.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!(margins.len() >= 3, "need at least three doors to rank");
+
+        // A band under the smallest margin holds nothing; one just over the third
+        // smallest holds exactly three. Both edges come from the proximities the
+        // ranking itself uses, so this cannot pass by counting a different census.
+        let just_under = margins[0] - 1.0;
+        let just_over_third = 0.5 * (margins[2] + margins[3.min(margins.len() - 1)]);
+        assert_eq!(
+            f.doors_within_band(&circles, p, just_under.max(0.0)),
+            0,
+            "a band tighter than every margin must count nothing"
+        );
+        assert_eq!(
+            f.doors_within_band(&circles, p, margins[0]),
+            1,
+            "a band at exactly the smallest margin counts the one door on its edge"
+        );
+        let n = f.doors_within_band(&circles, p, just_over_third);
+        assert!(
+            n >= 3,
+            "a band past the third-smallest margin must count at least three doors; \
+             counted {n} with margins {:.1?} km",
+            margins.iter().take(5).map(|m| m / 1e3).collect::<Vec<_>>()
+        );
+
+        // A nonsense band is not a wide band.
+        assert_eq!(f.doors_within_band(&circles, p, -1.0), 0);
+        assert_eq!(f.doors_within_band(&circles, p, f64::NAN), 0);
+    }
 
     /// A deterministic pseudo-random stream (LCG) — enough to spread geometries
     /// around without a dev-dependency.

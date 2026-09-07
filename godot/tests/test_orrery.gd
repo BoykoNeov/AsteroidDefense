@@ -602,6 +602,57 @@ func _init() -> void:
 	_check(sim.keyhole_note() == "INSIDE THE 5:8 DOOR - WIDER, FURTHER OUT",
 		"a negative margin reads as inside, not as a negative distance (%s)"
 		% sim.keyhole_note())
+
+	# --- the band that contains more than one door -------------------------
+	#
+	# The placement band is 500 km because the closed form misplaces a circle by
+	# up to 468 km at a lead this planner can dial (`KEYHOLE_PLACEMENT_KM`). In
+	# parts of the map the drawn circles are closer together than that - 83.6 km
+	# apart at the xi a 900 d plan reaches, 8.3 km at 450 d - so the band can span
+	# several doors and single out none of them. The panel has to say so instead
+	# of presenting one as the answer.
+	#
+	# The binding test that flies the real 900 d shot finds `doors_in_band` = 1
+	# there (that plan sits where the circles happen to be far apart), so this
+	# branch does not fire on the one flown case and is executed here instead.
+	var crowded_row := {
+		"h": 7, "k": 8, "distance_km": 300.0, "width_km": 25.0, "margin_km": 287.5,
+	}
+	sim.plan_keyhole = {
+		"b_km": 14639.0, "mapped_b_max_km": 678660.0, "beyond_mapped_region": false,
+		"nearest": crowded_row, "at_risk": crowded_row, "doors_in_band": 3,
+	}
+	_check(sim.keyhole_label() == "** 300 KM OFF 7:8 - AND 2 MORE DOORS IN THE BAND",
+		"a band holding three doors names one and admits to the other two (%s)"
+		% sim.keyhole_label())
+	_check(sim.keyhole_alert(),
+		"the alert still fires when the band is crowded - crowding is a reason to "
+		+ "say less, not to go quiet (alert=%s)" % sim.keyhole_alert())
+	sim.plan_keyhole = {
+		"b_km": 14639.0, "mapped_b_max_km": 678660.0, "beyond_mapped_region": false,
+		"nearest": crowded_row, "at_risk": crowded_row, "doors_in_band": 1,
+	}
+	_check(sim.keyhole_label() == "** 300 KM OFF 7:8 - INSIDE THE PLACEMENT BAND",
+		"one door in the band reads as before, with no count (%s)"
+		% sim.keyhole_label())
+	# A plan outside the band still reads CLEAR - the band grew, it did not become
+	# unconditional, and a panel that always shouts says nothing.
+	sim.plan_keyhole = {
+		"b_km": 14639.0, "mapped_b_max_km": 678660.0, "beyond_mapped_region": false,
+		"nearest": {"h": 7, "k": 8, "distance_km": 900.0, "width_km": 25.0,
+			"margin_km": 887.5},
+		"at_risk": {"h": 7, "k": 8, "distance_km": 900.0, "width_km": 25.0,
+			"margin_km": 887.5},
+		"doors_in_band": 0,
+	}
+	_check(sim.keyhole_label().begins_with("CLEAR") and not sim.keyhole_alert(),
+		"887 km of margin is outside the 500 km band and still reads CLEAR (%s)"
+		% sim.keyhole_label())
+	# The constant itself, pinned. The gdext binding test mirrors it by hand as
+	# `PLACEMENT_BAND_KM`; if the two drift, this is the side that ships.
+	_check(is_equal_approx(sim.KEYHOLE_PLACEMENT_KM, 500.0),
+		"the placement band is the 500 km eight flown doors measured (%s)"
+		% sim.KEYHOLE_PLACEMENT_KM)
 	sim.plan_keyhole = saved_keyhole
 
 	sim.free()

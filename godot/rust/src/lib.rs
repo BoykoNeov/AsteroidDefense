@@ -2731,13 +2731,11 @@ impl Mission {
     /// **The kilometres are a map coordinate, not a prediction of a return** —
     /// see `MissionCore::keyhole_readout`. Closed-form; safe on `plan_changed`.
     #[func]
-    fn keyhole_readout(&self, max_years: i64) -> VarDictionary {
+    fn keyhole_readout(&self, max_years: i64, placement_band_km: f64) -> VarDictionary {
         let mut d = VarDictionary::new();
-        let Some(r) = self
-            .core
-            .as_ref()
-            .and_then(|c| c.keyhole_readout(max_years.clamp(2, 20) as u32))
-        else {
+        let Some(r) = self.core.as_ref().and_then(|c| {
+            c.keyhole_readout(max_years.clamp(2, 20) as u32, placement_band_km.max(0.0))
+        }) else {
             return d;
         };
         d.set("plan_xi_km", r.plan_point_km.0);
@@ -2747,6 +2745,7 @@ impl Mission {
         d.set("beyond_mapped_region", r.beyond_mapped_region);
         d.set("nearest", &Self::keyhole_row(&r.nearest));
         d.set("at_risk", &Self::keyhole_row(&r.at_risk));
+        d.set("doors_in_band", r.doors_in_band as i64);
         d
     }
 

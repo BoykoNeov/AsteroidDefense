@@ -174,6 +174,21 @@ func _run() -> void:
 	await _shot("trails_1_max_warp")
 	print("SHOT  trails: warp=%s t=%.0f d (bodies should streak, text should not)"
 		% [Sim.warp_label(), Sim.t])
+
+	# 0d. THE SAME FRAME WITH PERSISTENCE OFF. The pair is the check: the first
+	#     shot must show ghost chains behind the planets and the second must show
+	#     none, at the same warp and the same clock. Driven through the InputMap
+	#     rather than by setting `persist_idx`, because what is being checked is
+	#     the promise the HUD makes to a player - a hand-written action block in
+	#     project.godot and a dispatch branch in main.gd sit between [I] and the
+	#     variable, and setting the variable would test neither.
+	for _i in main.PERSIST_TAUS.size() - 1:
+		await _press("persist_cycle")
+	await _settle(40)
+	await _shot("trails_2_persist_off")
+	print("SHOT  persist: idx=%d tau=%.2f belt_dim_set_for_warp=%d (0.00 = off)"
+		% [main.persist_idx, main.PERSIST_TAUS[main.persist_idx], Sim.warp_idx])
+	await _press("persist_cycle")     # back to the default rung for later shots
 	Sim.warp_idx = 3
 	Sim.jump(0.0)
 	Sim.paused = false

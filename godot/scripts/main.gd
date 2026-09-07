@@ -9,10 +9,18 @@ const PERSIST_SHADER := preload("res://shaders/phosphor_persist.gdshader")
 
 const PHOSPHOR_GREEN := Color(0.25, 1.0, 0.45)
 const PHOSPHOR_AMBER := Color(1.0, 0.62, 0.13)
-## Phosphor persistence time constant, seconds: a trail left by a moving body
+## Phosphor persistence time constants, seconds: a trail left by a moving body
 ## fades to 1/e of its brightness in this long. Wall time, not frames, so the
 ## look does not depend on the refresh rate.
-const PERSIST_TAU := 0.14
+##
+## A ladder rather than one number, cycled by `[I]`, because persistence is the
+## one effect on this screen that can actively hide the thing it decorates. At
+## the top warp step the scenery belt sweeps into a solid band and the inner
+## planets into rings; that is a true picture of 10 yr/s and it is also a wall.
+## **0.0 means off** — `keep = 0`, nothing held from the previous frame — and it
+## is a real entry, not a limit approached: a reader who wants to know where a
+## body *is* rather than where it has been needs the effect gone, not shortened.
+const PERSIST_TAUS: Array[float] = [0.14, 0.35, 0.0]
 
 var crt_mat: ShaderMaterial
 var viewport: SubViewport
@@ -40,6 +48,9 @@ var boot: BootScreen
 var time_bar: TimeBar
 
 var _green := true
+## Index into PERSIST_TAUS. Public so the shot harness can photograph the ends
+## of the ladder without an InputMap round-trip it does not need.
+var persist_idx := 0
 var _focus_idx := 0
 var _focus_targets: Array = []       # [name, getter, distance]
 
@@ -199,8 +210,10 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	# Frame-rate independent decay: keep^(frames per second) is a fixed fraction
-	# per second whatever the refresh rate.
-	persist_mat.set_shader_parameter("keep", exp(-delta / PERSIST_TAU))
+	# per second whatever the refresh rate. tau 0 is the off rung and must be
+	# handled as a case, not by the formula — exp(-delta/0) is a division by zero.
+	var tau: float = PERSIST_TAUS[persist_idx]
+	persist_mat.set_shader_parameter("keep", 0.0 if tau <= 0.0 else exp(-delta / tau))
 
 
 func _input(event: InputEvent) -> void:
@@ -224,6 +237,14 @@ func _input(event: InputEvent) -> void:
 		_green = not _green
 		crt_mat.set_shader_parameter("phosphor",
 			PHOSPHOR_GREEN if _green else PHOSPHOR_AMBER)
+	elif event.is_action_pressed("persist_cycle"):
+		persist_idx = (persist_idx + 1) % PERSIST_TAUS.size()
+		# No clear needed on the way to OFF: the persistence pass is a full-rect
+		# ColorRect and `max(world, previous * 0)` is `world`, so every pixel is
+		# overwritten on the next frame anyway.
+		var tau: float = PERSIST_TAUS[persist_idx]
+		Sim.event_logged.emit("PHOSPHOR PERSISTENCE %s" %
+			("OFF" if tau <= 0.0 else "%.2f S" % tau))
 	elif event.is_action_pressed("view_3d"):
 		_show_view(null)
 		tags.visible = true

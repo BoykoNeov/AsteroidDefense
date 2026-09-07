@@ -14,6 +14,9 @@ var sun_node: Node3D
 var body_nodes := {}                  # name -> MeshInstance3D (wireframe)
 var moon_node: MeshInstance3D
 var _belt: MeshInstance3D
+var _belt_mat: ShaderMaterial
+## Last warp step the belt's brightness was set for; -1 so the first frame sets it.
+var _belt_warp_idx := -1
 ## The sixteen real asteroids, index-aligned with `Sim.asteroids`. Kept as an Array
 ## rather than a name dict because the pairing with that list is what the per-frame
 ## lookup uses, and a name-keyed miss would be a silent no-draw.
@@ -147,6 +150,13 @@ func _process(delta: float) -> void:
 	# Kepler shear across the annulus is invisible at display speeds. This is the
 	# *scenery* belt, not the sixteen bodies above.
 	_belt.rotation.y = TAU * t / (4.4 * 365.25)
+	# ...and fainter the faster the clock runs. Set only when the warp step
+	# changes, not every frame: a shader parameter write per frame is the cost
+	# this file was already asked to stop paying elsewhere.
+	if Sim.warp_idx != _belt_warp_idx:
+		_belt_warp_idx = Sim.warp_idx
+		_belt_mat.set_shader_parameter("dim", clampf(
+			3650.0 / (Sim.WARP_STEPS[Sim.warp_idx] * 40.0), 0.15, 1.0))
 
 	if not Sim.mission_online:
 		return
@@ -485,11 +495,13 @@ func _build_belt() -> void:
 	arrays[Mesh.ARRAY_COLOR] = cols
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_POINTS, arrays)
-	var mat := ShaderMaterial.new()
-	mat.shader = STAR_SHADER
+	# Its own material instance, not the starfield's: they share the shader but
+	# only the belt dims with the warp, and the stars must stay put.
+	_belt_mat = ShaderMaterial.new()
+	_belt_mat.shader = STAR_SHADER
 	_belt = MeshInstance3D.new()
 	_belt.mesh = mesh
-	_belt.material_override = mat
+	_belt.material_override = _belt_mat
 	_belt.name = "AsteroidBelt"
 	add_child(_belt)
 

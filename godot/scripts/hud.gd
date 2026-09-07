@@ -314,7 +314,7 @@ func _help_line(w: float, h: float, dim: Color) -> void:
 	# Same rule for the launch-window map's keys: they bind only while it is up.
 	if view_name == "LAUNCH WINDOWS":
 		line += " [ARR]WINDOW [L]LAUNCHER [D]METRIC [E]VERIFY"
-	line += " [1]3D [2]MAP [3]ENC [4]WINDOWS [T]PHOSPHOR"
+	line += " [1]3D [2]MAP [3]ENC [4]WINDOWS [T]PHOSPHOR [I]PERSIST"
 	_text_r(Vector2(w - MARGIN, h - MARGIN - BOTTOM_RESERVE), line, dim, _fs - 2)
 
 

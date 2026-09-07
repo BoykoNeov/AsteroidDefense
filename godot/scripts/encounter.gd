@@ -604,9 +604,21 @@ func _draw_track(pts: PackedVector3Array, center: Vector2, ppl: float,
 ## rect, or it crosses the b-plane (`s` changes sign, which is what dims the
 ## outbound half). Same segments, same colours, ~4 commands instead of 1400.
 ##
-## Cached on (zoom, size) and dropped whenever `_fetch` re-reads the tracks — which
-## is the complete set of things that can change the geometry, since `_nom` and
-## `_defl` are assigned nowhere else.
+## Cached on (zoom, size) and dropped whenever `_fetch` re-reads the tracks. Two
+## invariants that make that key complete, both load-bearing and neither visible
+## at the cache itself:
+##
+## 1. **`center` and `ppl` are pure functions of `size` and `_half_ld`** — `_draw`
+##    derives them as `size * 0.5` and `min(size) * 0.5 / _half_ld * 0.92`. They
+##    are what `_plot` projects through, so if either could move on its own the
+##    cache would hand back points drawn for a different frame. Nothing else feeds
+##    them; if that ever changes, the key has to grow with it.
+## 2. **The invalidation is correct by draw order, not by construction.**
+##    `plan_changed` clears `_built`, *not* `_runs` — the clear lives in `_fetch`,
+##    and what makes that enough is that `_draw` calls `_fetch` at the top and
+##    `_draw_track` further down, so a re-solved `_defl` can never be read through
+##    a stale run in the same frame. Moving the `_fetch` call below the tracks
+##    would break this silently and the picture would show the previous plan.
 func _track_runs(pts: PackedVector3Array, center: Vector2, ppl: float,
 		id: String) -> Array:
 	# Keyed by which track it is, not by the points themselves: a

@@ -30,6 +30,7 @@ Read this table first, then the session that owns the layer you are touching.
 | Godot visual/perf pass: 3D world in its own viewport with 4× MSAA and phosphor persistence (peak-hold trails), per-frame position memo, cached 2D orbit traces, the `_perf.gd` frame-time harness and `run_harness.ps1` | done 2026-09-05; the 2D map went 18.9 → 7.1 ms/frame, native calls/frame 764 → 29; follow-ups in `docs/plans/2026-09-05-visuals-performance-followups.md` | `godot/scripts/main.gd`, `godot/shaders/phosphor_persist.gdshader`, `godot/tests/` |
 | **Frontend speed**: the display comet flown on its own worker instead of the build worker, and every DE440 body served by one batched binding call filled on demand | **done 2026-09-06**; time to a threat solution 34.0 -> 25.2 s, native calls/frame in the 3D views 29 -> 6 | `godot/rust/src/lib.rs`, `godot/scripts/sim.gd` |
 | **Frontend startup**: the DE kernel read moved onto its own worker, the boot POST given a third state to report it, and `_ready` split into timed phases | **done 2026-09-07**; `_ready` 29 -> 2 ms, and the roadmap item's "646 MB DE440" turned out to be a 32 MB file on a fragmented spinning disk | `godot/rust/src/lib.rs`, `godot/scripts/{sim,boot,solar_system,main}.gd` |
+| **Frontend legibility + the b-plane's frame cost**: tags and captions placed instead of drawn where they fall, the encounter tracks as runs of polyline, a persistence control on `[I]` | **done 2026-09-07**; b-plane view 10.1 -> 9.1 ms, and a single frame-ms number caught producing two opposite wrong conclusions | `godot/scripts/{tag_layer,encounter,main,solar_system,hud}.gd`, `godot/tests/_shot.gd` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -132,7 +133,10 @@ Read this table first, then the session that owns the layer you are touching.
    planet nodes, which threw in `_process` every frame and silently killed every
    line below it — including the comet's span gate. See *The kernel read taken off
    the main thread*.
-8. Phase 3.
+8. **The keyhole-map circle radius is unbounded** and **the Tier-3 ellipse is
+   drawn at 1 sigma only** - the +/-3 sigma linearity shell has never been run
+   against the drawn shape. Both are small, both are noted where they live.
+9. Phase 3.
 
 ---
 
@@ -3279,3 +3283,116 @@ recorded that way.
 `_on_field_settled`, `is_typed`), `godot/scripts/solar_system.gd` and
 `godot/scripts/main.gd` (build on `field_online`), `godot/tests/test_orrery.gd`,
 `godot/tests/test_gdext.gd`, `godot/tests/_shot.gd`.
+
+### The labels that were drawn where they fell, and a frame-ms number that lied twice - 2026-09-07 session (plan tasks 3, 4, 5, 6)
+
+`docs/plans/2026-09-05-visuals-performance-followups.md` had four tasks left.
+All four are done; two of them turned out to be about something other than what
+the plan said, and the session's real finding is a measurement one.
+
+#### The placement rule, and the reservation that must not blink
+
+`tag_layer.gd` and the b-plane's caption passes both drew each label at a fixed
+offset from its glyph and hoped. Sixteen belt asteroids, eight planets, the NEOs
+and the threat all offset 12 px right, so at system zoom the names sat on each
+other. Both now **collect, place, then paint** - the glyph never moves, because
+it is the measured position and the only thing on those layers that is a claim
+about where something *is*; only the text slides.
+
+**The rule that makes it stable is that a blinked-off label still reserves its
+rectangle.** "PREDICTED IMPACT" blinks at 2.2 Hz in the 3D view and 1.6 Hz on
+the b-plane. A placement pass that only saw what is currently painted would
+re-solve every neighbouring label twice a second, and the picture would be
+correct in any single screenshot and jittering in motion - which is precisely
+the class of defect a shot harness cannot catch. `belt_1_real_asteroids.png` is
+the case: 2028-01-01 is twelve years before impact, so Earth is back in almost
+the same place and the *invisible* impact caption is what pushes "EARTH" up a
+slot. The confirmation arrived free in the Task 6 shots - the 3:4 keyhole
+caption sits in the identical place in frames where the impact text is drawn and
+frames where it is not.
+
+**The b-plane task named the second-worst collision.** It asked for keyhole
+captions to clear the b-point captions, which was real. But zoomed out both
+marks sit almost on Earth and **the two b-point captions want the same pixels**:
+`enc_4_zoomed_out` printed "PREDICTED IMPACT" and "B 0.02 LD" on top of one
+another. Not crowded - unreadable. Fixed in the same pass, stepping down a line
+and never sideways so a caption stays attached to the mark it names.
+
+#### The tracks, and the two requirements that do not compose
+
+`_draw_track` issued one `draw_line` per segment - ~1400 per track, two tracks,
+every frame. The plan asked for one `draw_polyline` per track *and* the
+off-frame reject kept; those cannot both hold, because a single line would have
+to include the off-frame points to stay connected. What ships is **runs of
+consecutive on-frame points that share a colour**, broken on either of the two
+things that make a segment differ from its neighbour: it leaves the grown rect,
+or `s` changes sign (which is what dims the outbound half). Same segments, same
+colours, ~4 canvas commands instead of 1400.
+
+The cache is keyed on (zoom, size) and cleared in `_fetch`. Two invariants make
+that complete and **neither is visible at the cache**, so both are now written
+at `_track_runs`: `center` and `ppl` are pure functions of `size` and
+`_half_ld`, so the key covers everything `_plot` projects through; and the
+invalidation is correct **by draw order, not by construction** - `plan_changed`
+clears `_built`, not `_runs`, and what saves it is that `_draw` calls `_fetch`
+at the top and `_draw_track` further down. Move that call below the tracks and
+the view silently shows the previous plan.
+
+#### The finding: one frame-ms number produced two opposite wrong conclusions
+
+This is the part worth carrying forward.
+
+- One post-Task-3 run read the b-plane view at **6.94 / 7.26 ms**, against ~7 for
+  every other view. Conclusion drawn: the plan's premise was stale, this is no
+  longer the expensive view, Task 6 has nothing to win. **Wrong.**
+- The next two runs read **10.17 / 10.32** and **10.38 / 10.70**. Conclusion
+  drawn: Task 4 had cost 3.3 ms/frame. A width memo was written to fix it.
+  **Also wrong** - and the memo measured no better, which is the only reason it
+  did not ship.
+
+Both errors are the same error: a single run compared against a single run, and
+the 6.94 was the outlier. What settled it was swapping the pre-Task-4 file back
+in (`git show <commit>:<path>`) and running twice against the same DLL:
+**10.16 / 10.06 and 10.10 / 10.08**. Task 4 costs ~0.2 ms. The b-plane view
+really is the expensive one, at ~10.1 against ~6.9 for the 3D views, and the
+plan's original 9.1/9.2 baseline was right all along.
+
+With that baseline established honestly, Task 6 measures **10.16 / 10.06 /
+10.10 / 10.08 -> 9.11 / 9.20 / 9.23 / 9.07 ms** - no overlap between the sets,
+`3d_system` unchanged at 6.90-6.92, micro gauges 11.8-12.5 us throughout so the
+runs are comparable at all. That is -1.0 ms, -10%, **not** the -2 ms the plan
+predicted.
+
+The procedure is now written at the end of the plan file: two runs each side,
+report all four, check the micro gauges before believing a delta, and A/B by
+file swap when one looks large. Also recorded there: **the harness window is
+64x64**, so anything gated on "is this label on the plot" is measured in a
+regime nothing like the real screen - a caption cost can be invisible in the
+harness and real in the game.
+
+#### The persistence control, and a key that would have collided silently
+
+`[I]` cycles `[0.14, 0.35, 0.0]` s. **Not `[G]`**, which the plan proposed: `G`
+is already `tier2_term_gr` in the force menu, nothing reports a duplicate
+binding, and the second one simply wins. `0.0` is a real rung rather than a
+limit approached - a reader who wants to know where a body *is* rather than
+where it has been needs the effect gone - and it is handled as a case, since the
+decay formula is a division by zero there.
+
+The scenery belt now fades as the clock speeds up, via a `dim` uniform on
+`starfield.gdshader` set **only when the warp step changes**. The belt already
+had its own material instance, so the stars are untouched.
+
+**What the belt claim rests on, precisely:** the harness prints
+`belt_dim_set_for_warp=9`, which floors `dim` at 0.15. It does *not* rest on
+comparing the two trail pictures - the clock runs through the two key presses
+and the settle, so `trails_1` is at t=1302 d and `trails_2` at t=3218 d. They
+are a fair before/after for *persistence* (ghost chains vs none) and not for the
+belt's phase.
+
+#### What this leaves
+
+Plan tasks 3-6 are closed; task 8's four small items are not started. Two loose
+ends elsewhere are now on the *What is next* list rather than buried: the
+keyhole-map circle radius is unbounded, and the Tier-3 ellipse is drawn at 1
+sigma with the +/-3 sigma linearity shell never run against the drawn shape.

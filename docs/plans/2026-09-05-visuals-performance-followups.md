@@ -156,6 +156,14 @@ src/mission_core.rs` if a shared helper is wanted.
 
 ## Task 3 — Tag de-collision in the 3D view
 
+> **DONE 2026-09-07.** Collect -> place by priority -> paint; the glyph never
+> moves, only the text. The thing this task's steps did not say: a tag whose text
+> is blinked off must still reserve its rectangle, or every neighbour re-solves
+> its offset twice a second and the layer jitters. `belt_1_real_asteroids.png` is
+> that case exactly - at 2028-01-01 the impact point is twelve years away, i.e.
+> almost where Earth already is, so the invisible caption is what pushes "EARTH"
+> up a slot. ffi/frame unchanged.
+
 **Why.** In `belt_1_real_asteroids.png` and `trails_1_max_warp.png` labels sit on
 each other ("PREDICTED IMPACT E-4383" over "Juno"/"EARTH", "2031-XK <THREAT>"
 over "Apophis"). Independent of Tasks 1–2.
@@ -180,6 +188,14 @@ unchanged (the layer must not add lookups).
 
 ## Task 4 — Keyhole captions must not land on the b-point and impact captions
 
+> **DONE 2026-09-07 — and this task named the second-worst collision.** The
+> keyhole-vs-b-point overlap is real and fixed as described (reserved rects, plus
+> the ring labels `_draw_rings` now returns). But zoomed out, **the two b-point
+> captions collide with each other** - `enc_4_zoomed_out` printed "PREDICTED
+> IMPACT" and "B 0.02 LD" on the same pixels, unreadable rather than merely
+> crowded. The marks themselves are reserved too, not just their captions.
+> Measured cost ~0.2 ms/frame, inside this machine's noise.
+
 **Why.** In `enc_2_band_miss.png` the 3:4 caption sits on Earth's limb next to
 "PREDICTED IMPACT", and the budgeted captions can still collide with "B 0.04 LD".
 
@@ -199,6 +215,15 @@ unchanged (the layer must not add lookups).
 the default span or the 1.2 LD span.
 
 ## Task 5 — A persistence control, and the belt at max warp
+
+> **DONE 2026-09-07 — on [I], not [G].** G is already `tier2_term_gr` in the [P]
+> force menu and nothing would have reported the clash; the second binding simply
+> wins. Ladder is `[0.14, 0.35, 0.0]`, with 0.0 a real rung handled as a case (the
+> formula is a division by zero there). The belt's `dim` is set only when the warp
+> step changes. **The belt claim rests on the printed number, not on a picture
+> A/B**: the harness reports `belt_dim_set_for_warp=9`, which floors `dim` at
+> 0.15. The two trail shots are seconds apart on a running clock, so they are a
+> fair before/after for *persistence* and not for the belt's phase.
 
 **Why.** `trails_1_max_warp.png` shows the scenery belt smearing into a solid
 band at 10 yr/s (1600 points, rigid rotation). It is a legitimate phosphor
@@ -223,6 +248,14 @@ editor is open**), `godot/scripts/hud.gd` (`_help_line` lists the key),
 off (no ghosts). HUD lists the key. **Done when** both pictures match that.
 
 ## Task 6 — Encounter tracks as polylines
+
+> **DONE 2026-09-07 — 10.1 -> 9.1 ms, not the 9 -> 7 predicted, and not as one
+> polyline per track.** The two requirements below do not compose: one line per
+> track would have to include the off-frame points to stay connected, which is
+> the reject undone. Runs of consecutive on-frame points that share a colour
+> instead. **Read the measurement note at the end of this file before trusting
+> any frame-ms number here** - a single run produced two confidently wrong
+> conclusions in this session, in opposite directions.
 
 **Why.** The b-plane view is the most expensive remaining view (9.1–9.2 ms
 headless). `_draw_track` issues up to 1 400 `draw_line` calls per track per
@@ -299,3 +332,28 @@ numbers.
   under it. Peak-hold (`max(world, previous*keep)`) is the one that reads right.
 - A memo keyed by body name must check the exact epoch; the orbit walks bypass it
   (`Sim._lookup_ecl`) on purpose.
+
+---
+
+## How to measure on this machine (added 2026-09-07, after being wrong twice)
+
+A single `frame ms avg` here is not evidence. In one session it produced two
+confident and opposite errors: one run of the b-plane view at 6.94 ms led to
+"this view is no longer the expensive one" (four runs put it at ~10.1 against
+~6.9 for the 3D views), and the next runs at 10.2-10.7 led to "Task 4 cost 3.3
+ms/frame" (it costs ~0.2). Both came from comparing against that one outlier.
+
+The procedure that actually settles a question:
+
+1. **Two runs each side, minimum.** Report all four numbers, not an average -
+   if the before and after sets overlap, there is no result.
+2. **Check the micro gauges first.** `lookup(EARTH) raw` and the memo-hit
+   figures say whether two runs are comparable at all. They sat at 11.8-12.8 us
+   across every run above, which is what made the 1.0 ms Task 6 delta readable.
+3. **A/B by file swap when a delta looks large.** `git show <commit>:<path> >
+   <path>`, run twice, restore. Same DLL, same machine state, minutes apart.
+   That is what proved Task 4 innocent, and it is the same technique the
+   `bodies_online` regression was pinned with.
+4. **The harness window is 64x64.** Anything gated on "is this label on the
+   plot" is measured in a regime nothing like the real 1600x900 screen, so a
+   caption-placement cost can be invisible here and real in the game.

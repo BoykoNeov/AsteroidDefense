@@ -195,9 +195,19 @@ func _draw() -> void:
 	draw_line(Vector2(0, center.y), Vector2(w, center.y), faint, 1.0)
 	draw_line(Vector2(center.x, 0), Vector2(center.x, h), faint, 1.0)
 
-	_draw_rings(center, ppl, w, h, faint, dim)
+	# The captions this frame's b-points will print, decided before anything is
+	# drawn: the keyhole pass runs first (circles are context and belong under the
+	# marks) and must know which rectangles are already spoken for.
+	var caps := _b_captions(center, ppl)
+	var reserved: Array[Rect2] = _draw_rings(center, ppl, w, h, faint, dim)
+	for c: Dictionary in caps:
+		reserved.append(c["rect"])
+		# The mark itself, not just its caption. A keyhole name drawn through the
+		# diamond is the same defect as one drawn through "B 0.04 LD" — the glyph
+		# is the answer and the name beside it is context.
+		reserved.append(Rect2(c["mark"] - Vector2(9, 9), Vector2(18, 18)))
 	if _keyholes:
-		_draw_keyholes(center, ppl, dim, faint)
+		_draw_keyholes(center, ppl, dim, faint, reserved)
 	_draw_earth_and_disc(center, ppl, bright, mid, dim)
 
 	# Tracks: context. Dim, and behind the b-points that actually decide things.
@@ -213,7 +223,7 @@ func _draw() -> void:
 	# to the HUD from ~0.7 h down; this block gets the empty band above the target
 	# card instead.
 	_draw_uncertainty_readout(MARGIN, UNCERTAINTY_READOUT_Y, _fs + 5.0, mid, dim)
-	_draw_b_points(center, ppl, bright, mid, dim)
+	_draw_b_points(center, ppl, bright, mid, dim, caps)
 	# Over the b-points, under the live marker: the ellipse is about where the
 	# nominal crossing *is not* pinned down, so it has to be readable against the
 	# cross it surrounds.
@@ -239,17 +249,22 @@ func _draw() -> void:
 ## Nothing is drawn inside the capture disc. A ring there would be a second
 ## distance reference inside the only one that decides anything, and its label
 ## would land on Earth — the clutter that made the first draft unreadable.
+## Returns the rectangles its labels occupy, so the keyhole captions drawn after
+## it can steer clear of them.
 func _draw_rings(center: Vector2, ppl: float, w: float, h: float,
-		faint: Color, dim: Color) -> void:
+		faint: Color, dim: Color) -> Array[Rect2]:
 	var floor_px: float = Sim.cap_km / Sim.LD_KM * ppl + 10.0
+	var rects: Array[Rect2] = []
 	for r: float in [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0]:
 		var rp: float = r * ppl
 		if rp < floor_px or rp > minf(w, h) * 0.52:
 			continue
 		draw_arc(center, rp, 0, TAU, 160, faint, 1.0)
 		var lbl := String.num(r, 2) + " LD" + (" - LUNAR DIST" if r == 1.0 else "")
-		draw_string(_font, center + Vector2(rp * 0.7071 + 5, -rp * 0.7071 - 4),
-			lbl, HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, dim)
+		var at := center + Vector2(rp * 0.7071 + 5, -rp * 0.7071 - 4)
+		draw_string(_font, at, lbl, HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 2, dim)
+		rects.append(_text_rect(at, lbl, _fs - 2))
+	return rects
 
 
 ## The keyhole map: one circle per resonant return, centred on the zeta axis at
@@ -262,7 +277,12 @@ func _draw_rings(center: Vector2, ppl: float, w: float, h: float,
 ## impact — and the far ends of the wide ones sit well outside the default span,
 ## so zoom out with the wheel to see 3:4 whole. Circles are context, drawn under
 ## the disc and the marks: they never decide anything on this screen.
-func _draw_keyholes(center: Vector2, ppl: float, dim: Color, faint: Color) -> void:
+## `reserved` is text already on the plot — the range-ring labels and the two
+## b-point captions. A keyhole name is context; the b-point captions are the
+## comparison this whole view exists to make, so the names give way, never the
+## other way round.
+func _draw_keyholes(center: Vector2, ppl: float, dim: Color, faint: Color,
+		reserved: Array[Rect2]) -> void:
 	if _circles.is_empty():
 		return
 	var rect := Rect2(Vector2.ZERO, size).grow(-MARGIN)
@@ -319,15 +339,27 @@ func _draw_keyholes(center: Vector2, ppl: float, dim: Color, faint: Color) -> vo
 	labelled.sort_custom(func(a: Array, b: Array) -> bool: return a[4] > b[4])
 	var budget: int = mini(labelled.size(), KEYHOLE_LABELS)
 	var placed: Array[float] = []
+	var fs: int = _fs - 3
 	for i in budget:
 		var e: Array = labelled[i]
 		var y: float = e[0]
 		for py: float in placed:
 			if absf(y - py) < _fs + 2.0:
 				y = py + _fs + 2.0
-		placed.append(y)
-		draw_string(_font, Vector2(e[1] + 8.0, y + 4.0), e[2],
-			HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 3, e[3])
+		# Right of the crossing, then left of it, then one row further down. Left
+		# first because these circles are centred on the zeta axis and the b-point
+		# captions all run rightward from marks on or near it, so the far side is
+		# usually clear; the row step is the fallback for when it is not.
+		var tw: float = _font.get_string_size(
+			e[2], HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+		var at := Vector2(e[1] + 8.0, y + 4.0)
+		for cand: Vector2 in [at, Vector2(e[1] - 8.0 - tw, y + 4.0),
+				Vector2(e[1] + 8.0, y + 4.0 + _fs + 2.0)]:
+			at = cand
+			if not _overlaps(_text_rect(at, e[2], fs), reserved):
+				break
+		placed.append(at.y - 4.0)
+		draw_string(_font, at, e[2], HORIZONTAL_ALIGNMENT_LEFT, -1, fs, e[3])
 
 
 ## What the marks mean, stated once in a corner instead of on top of them. The
@@ -402,30 +434,24 @@ func _draw_earth_and_disc(center: Vector2, ppl: float, bright: Color, mid: Color
 ## The b-points — where each asymptote pierces this plane. These are the operative
 ## marks: their distance from the centre IS the miss the verdict compares.
 func _draw_b_points(center: Vector2, ppl: float, bright: Color, mid: Color,
-		dim: Color) -> void:
+		dim: Color, caps: Array) -> void:
 	# Nominal: inside the disc, by construction. This is the hit — and it stays the
 	# prediction until the burn actually happens, not merely until a plan is drawn
 	# up. A solved plan sitting beside a blinking PREDICTED IMPACT is the whole
 	# comparison this view exists to make.
 	if _b_nom != Vector3.ZERO:
-		var p := _plot(center, ppl, _b_nom)
-		var clamped: bool = not _on_plot(p)
-		p = _clamp_to_plot(p)
+		var p := _clamp_to_plot(_plot(center, ppl, _b_nom))
 		if Sim.burned():
 			_cross(p, 5.0, dim)
 		elif Sim.blink(1.6):
 			_cross(p, 8.0, bright)
-			draw_string(_font, _label_at(p, center, "PREDICTED IMPACT"),
-				"PREDICTED IMPACT" + (" >" if clamped else ""),
-				HORIZONTAL_ALIGNMENT_LEFT, -1, _fs, bright)
+			_paint_caption(_cap(caps, "nom"), bright)
 
 	# Deflected: ZERO means there is no such point — no plan, or a clean miss that
 	# left the encounter entirely. Both must draw nothing; ZERO is Earth's centre.
 	if _b_defl == Vector3.ZERO:
 		return
-	var pd := _plot(center, ppl, _b_defl)
-	var off: bool = not _on_plot(pd)
-	pd = _clamp_to_plot(pd)
+	var pd := _clamp_to_plot(_plot(center, ppl, _b_defl))
 	# While a solve is pending this mark still belongs to the PREVIOUS plan, so it
 	# is drawn faint: the operator has moved on and this has not caught up. The
 	# label says so too (`miss_label` reports SOLVING...), but a confidently-drawn
@@ -433,10 +459,75 @@ func _draw_b_points(center: Vector2, ppl: float, bright: Color, mid: Color,
 	var solving: bool = Sim.plan_solving
 	_dashed_line(center, pd, Color(dim, dim.a * (0.4 if solving else 1.0)), 6.0, 5.0)
 	_diamond(pd, 6.0, Color(bright, 0.35 if solving else 1.0))
-	# Through Sim's formatter, like every other site that prints a miss.
-	var txt := "B " + Sim.miss_label() + (" >" if off else "")
-	draw_string(_font, _label_at(pd, center, txt), txt,
-		HORIZONTAL_ALIGNMENT_LEFT, -1, _fs, Color(bright, 0.5 if solving else 1.0))
+	_paint_caption(_cap(caps, "defl"), Color(bright, 0.5 if solving else 1.0))
+
+
+## Where this frame's two b-point captions go, and what they say — decided in one
+## place, before anything is drawn.
+##
+## Two reasons it is not simply done at the draw site. `_draw_keyholes` runs
+## *first* (circles are context and belong under the marks) and needs these
+## rectangles to avoid them, so they have to exist before the b-points are painted.
+## And the two captions collide with **each other**: zoomed out, both marks sit
+## almost on Earth and both captions want the same pixels — `enc_4_zoomed_out`
+## printed "PREDICTED IMPACT" and "B 0.02 LD" on top of one another, which is not
+## a crowded label but an unreadable one.
+##
+## The impact caption blinks. Its rectangle is returned on every frame regardless
+## and `_paint_caption` is what the blink gates: a reservation that comes and goes
+## twice a second would make every keyhole caption jump between two placements.
+func _b_captions(center: Vector2, ppl: float) -> Array:
+	var out: Array = []
+	# Only when there is a caption to place: once burned, the nominal mark is a
+	# dim unlabelled cross, and its rectangle must not be held against anything.
+	if _b_nom != Vector3.ZERO and not Sim.burned():
+		var raw := _plot(center, ppl, _b_nom)
+		out.append(_caption("nom", _clamp_to_plot(raw), center,
+			"PREDICTED IMPACT" + (" >" if not _on_plot(raw) else ""), out))
+	if _b_defl != Vector3.ZERO:
+		var raw_d := _plot(center, ppl, _b_defl)
+		# Through Sim's formatter, like every other site that prints a miss.
+		out.append(_caption("defl", _clamp_to_plot(raw_d), center,
+			"B " + Sim.miss_label() + (" >" if not _on_plot(raw_d) else ""), out))
+	return out
+
+
+## One caption, placed clear of the ones already in `taken`.
+##
+## `_label_at` puts it radially outward from Earth; if that lands on a caption
+## already placed, it steps down by a line until it does not. Stepping *down* and
+## never sideways keeps the caption attached to the mark it names — the b-points
+## are what this view is about, and a caption that has wandered off is worse than
+## one sitting a line lower.
+func _caption(kind: String, p: Vector2, center: Vector2, text: String,
+		taken: Array) -> Dictionary:
+	var at := _label_at(p, center, text)
+	var lh: float = _fs + 3.0
+	for _step in 4:
+		var r := _text_rect(at, text, _fs)
+		var clear := true
+		for other: Dictionary in taken:
+			if r.intersects(other["rect"]):
+				clear = false
+				break
+		if clear:
+			break
+		at.y += lh
+	return {"kind": kind, "text": text, "at": at, "mark": p,
+		"rect": _text_rect(at, text, _fs)}
+
+
+func _cap(caps: Array, kind: String) -> Dictionary:
+	for c: Dictionary in caps:
+		if c["kind"] == kind:
+			return c
+	return {}
+
+
+func _paint_caption(c: Dictionary, col: Color) -> void:
+	if c.is_empty():
+		return
+	draw_string(_font, c["at"], c["text"], HORIZONTAL_ALIGNMENT_LEFT, -1, _fs, col)
 
 
 ## The live asteroid, when the clock is actually inside the encounter window.
@@ -690,6 +781,22 @@ func _label_at(p: Vector2, center: Vector2, text: String) -> Vector2:
 	if at.x + tw > size.x - MARGIN:
 		at.x = p.x - tw - 14.0
 	return at.clamp(Vector2(MARGIN, 60.0), size - Vector2(tw + MARGIN, 60.0))
+
+
+## The box a `draw_string` at `at` will fill. `draw_string` takes a baseline-left
+## origin, so the box starts an ascent above it — get that wrong and every
+## reservation sits a line away from the text it is reserving for.
+func _text_rect(at: Vector2, text: String, fs: int) -> Rect2:
+	return Rect2(at.x, at.y - _font.get_ascent(fs),
+		_font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x,
+		_font.get_height(fs))
+
+
+func _overlaps(r: Rect2, rects: Array[Rect2]) -> bool:
+	for other: Rect2 in rects:
+		if r.intersects(other):
+			return true
+	return false
 
 
 func _on_plot(p: Vector2) -> bool:

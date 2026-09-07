@@ -102,6 +102,11 @@ output.
   approach. Headless checks: `godot --headless --path godot --script
   res://tests/test_orrery.gd` and the `_shot.gd` autoloads for screenshots (the
   visual layer is only verifiable by looking — see `memory/gdext-binding.md`).
+  `res://tests/test_geometry.gd` is the cheap one — pure view geometry, no
+  kernels, no scenario build, no window, about a second. Note that a `--script`
+  run registers **no autoloads**, so a script naming `Sim` will not even compile
+  there; that is why the geometry lives in `scripts/plot_geometry.gd` apart from
+  `encounter.gd`.
 
 ## The Godot harnesses: pictures and frame times
 

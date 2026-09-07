@@ -46,6 +46,9 @@ extends Control
 ## that reaches ~10^6 km down-range still sits within ~|B| of the origin here.
 const DEFAULT_HALF_LD := 0.15
 const MARGIN := 18.0
+## Screen-space plot geometry, shared with `tests/test_geometry.gd`. Preloaded
+## rather than named as a global class so a game run needs no editor rescan.
+const PlotGeometry := preload("res://scripts/plot_geometry.gd")
 ## Where the Tier-3 readout block starts, px from the top.
 ##
 ## An empty band: below the view header and above the HUD's target card, which
@@ -307,9 +310,12 @@ func _draw_keyholes(center: Vector2, ppl: float, dim: Color, faint: Color,
 	for c: Dictionary in _circles:
 		var cc: Vector2 = _plot(center, ppl, Vector3(0.0, float(c["center_zeta_km"]), 0.0))
 		var r: float = float(c["radius_km"]) / Sim.LD_KM * ppl
-		# Entirely off-frame: the nearest point of the circle is beyond the corners.
-		if cc.distance_to(center) - r > rect.size.length():
-			continue
+		# Culling lives in `circle_polyline` now, which gets it right in both
+		# directions: the old test here only caught a circle whose ring passes
+		# beyond the corners, and never the other way a circle misses the view —
+		# a radius so large that the whole plot sits *inside* the ring, which is
+		# exactly the shape the widest resonances have.
+		var poly := PlotGeometry.circle_polyline(cc, r, rect)
 		var is_three_four: bool = int(c["h"]) == 3 and int(c["k"]) == 4
 		# Which crossing of the zeta axis is on the plot decides where the caption
 		# goes and which width it quotes; neither on-plot means no caption.
@@ -332,8 +338,8 @@ func _draw_keyholes(center: Vector2, ppl: float, dim: Color, faint: Color,
 		else:
 			var g: float = lerpf(faint.r * 1.15, dim.r, w_rel)
 			col = Color(g, g, g, lerpf(0.45, 0.9, w_rel))
-		var segs := 96 if r < 2000.0 else 256
-		draw_arc(cc, r, 0.0, TAU, segs, col, 1.4 if is_three_four else 1.0)
+		if poly.size() >= 2:
+			draw_polyline(poly, col, 1.4 if is_three_four else 1.0)
 		if at != Vector2.INF:
 			var txt := "%d:%d  KEYHOLE %s KM" % [int(c["h"]), int(c["k"]), String.num(width_km, 2)]
 			labelled.append([at.y, at.x, txt, col, width_km + (1e9 if is_three_four else 0.0)])

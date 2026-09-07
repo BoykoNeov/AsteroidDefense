@@ -32,6 +32,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **Frontend speed**: the display comet flown on its own worker instead of the build worker, and every DE440 body served by one batched binding call filled on demand | **done 2026-09-06**; time to a threat solution 34.0 -> 25.2 s, native calls/frame in the 3D views 29 -> 6 | `godot/rust/src/lib.rs`, `godot/scripts/sim.gd` |
 | **Frontend startup**: the DE kernel read moved onto its own worker, the boot POST given a third state to report it, and `_ready` split into timed phases | **done 2026-09-07**; `_ready` 29 -> 2 ms, and the roadmap item's "646 MB DE440" turned out to be a 32 MB file on a fragmented spinning disk | `godot/rust/src/lib.rs`, `godot/scripts/{sim,boot,solar_system,main}.gd` |
 | **Frontend legibility + the b-plane's frame cost**: tags and captions placed instead of drawn where they fall, the encounter tracks as runs of polyline, a persistence control on `[I]` | **done 2026-09-07**; b-plane view 10.1 -> 9.1 ms, and a single frame-ms number caught producing two opposite wrong conclusions | `godot/scripts/{tag_layer,encounter,main,solar_system,hud}.gd`, `godot/tests/_shot.gd` |
+| **The two drawn claims nobody had measured**: the b-plane view's resonant circles clipped to the viewport and tessellated to a pixel budget, and the Tier-3 ellipse's *shape* put through the ±3σ shell along its own axes | **done 2026-09-07**; the old whole-circle tessellation drew the widest resonance **59.9 px** off inside a 720 px view (now 0.113 px, and 3 points instead of 256), and the drawn ellipse holds everywhere the σ knob reaches — but the linearity scalar that was supposed to say so reads **130× too small** on the axis that matters | `godot/scripts/plot_geometry.gd`, `godot/tests/test_geometry.gd`, `core/examples/probe_tier3_drawn_shape.rs`, `core/tests/tier3_drawn_shape.rs` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -136,10 +137,32 @@ Read this table first, then the session that owns the layer you are touching.
    planet nodes, which threw in `_process` every frame and silently killed every
    line below it — including the comet's span gate. See *The kernel read taken off
    the main thread*.
-8. **The keyhole-map circle radius is unbounded** and **the Tier-3 ellipse is
-   drawn at 1 sigma only** - the +/-3 sigma linearity shell has never been run
-   against the drawn shape. Both are small, both are noted where they live.
-9. Phase 3.
+8. ~~**The keyhole-map circle radius is unbounded**, and **the Tier-3 ellipse is
+   drawn at 1 sigma only** — the ±3σ linearity shell has never been run against
+   the drawn shape.~~ **DONE 2026-09-07 — and "both are small" was half right.**
+   The circle half was smaller than stated *and named the wrong layer*: the core
+   is not at fault (`ResonantCircle` already refuses the degenerate case, and the
+   widest circle's 9.232e6 km radius is a true answer), the **drawing** was.
+   `draw_arc(cc, r, 0, TAU, 256, …)` sizes its tessellation in *angle*, so at the
+   zoom-in stop that circle is 795 431 px across, one chord spans 19 500 px, and
+   the line drawn through a 720 px viewport sat up to **59.9 px** from where the
+   circle is. Clipping the arc to the view and tessellating to a 0.3 px budget
+   gives **0.113 px** and costs **3 points instead of 256**. The offline SVG map
+   never had the defect — it emits a real `<circle>` inside a clip path.
+   The ellipse half was *larger* than stated, and the answer is reassuring while
+   the reason it had to be asked is not: the drawn shape **is** supported at 3σ
+   everywhere the σ knob reaches (worst 0.561 of the drawn half-width, at the top
+   stop, extrapolating to a crossing at scale ~2e3 against a knob that stops at
+   1e3) — but the linearity scalar that was supposed to say so reads **0.0043**
+   where the axis that matters reads **0.561**, because it normalises against the
+   *major* axis of a 205:1 needle. And the first table's scariest row was not
+   curvature at all: at the small-covariance end the residual is the integrator's
+   own noise, which drops a hundredfold at a tighter tolerance while real
+   curvature does not move. See *The two drawn claims*.
+9. Phase 3 — noting that its first bullet (plausible launch vehicles + payload
+   mass budgets) is already built, in `core/src/launch_vehicle.rs` and the `[M]`
+   readout. What is actually left there is orbital assembly, standing defence
+   systems, and multi-mission campaigns.
 
 ---
 
@@ -3542,3 +3565,186 @@ company. Second, the placement error is measured at exactly one `xi` per circle;
 whether it varies along a circle is unknown, and that is what a sixth campaign
 should ask. Third, nothing here explains *why* the placement error is what it
 is - it is bounded and characterised, not derived.
+
+### The two drawn claims - 2026-09-07 session (roadmap item 8, and one of its halves named the wrong layer)
+
+Item 8 was the last numbered entry before Phase 3, and it read as tidy-up: "the
+keyhole-map circle radius is unbounded, and the Tier-3 ellipse is drawn at 1
+sigma only - the +/-3 sigma linearity shell has never been run against the drawn
+shape. Both are small, both are noted where they live." Neither half closed the
+way that sentence expected. One was smaller than stated and lived in a different
+file than the one it accused; the other was larger, and the number that was
+supposed to answer it had been answering a different question all along.
+
+The pattern is now unbroken across that whole list: item 1 had three wrong
+clauses, item 4 was two questions under one name, item 5's premise was wrong,
+item 6's proposed fix would have deleted a correct number, item 7 named the wrong
+file. **An item's text is a pointer to where to look, never a description of what
+is there.**
+
+#### Half one: the circle radius, which was never the core's problem
+
+The item says the radius is unbounded, and it is - but `core/src/keyhole.rs` is
+right about that. `OpikFrame::resonant_circle` already refuses the degenerate
+case (`denom.abs() < 1e-12`: the resonance that *is* the incoming orbit, whose
+level set is a line and not a circle), and everything it returns is finite and
+true. The published map (`docs/keyhole_map.json`, 168 circles) has a widest of
+**9.232e6 km** - twenty-four lunar distances - for the 15:19 resonance, centred
+9.229e6 km down the zeta axis. That circle **encloses Earth's centre**, so its
+ring passes about **3 000 km** from Earth: it is genuinely in frame at the
+deepest zoom while being enormous. That combination, not the radius alone, is
+the defect.
+
+The defect lived in `godot/scripts/encounter.gd`, in one line:
+
+```gdscript
+var segs := 96 if r < 2000.0 else 256
+draw_arc(cc, r, 0.0, TAU, segs, col, 1.4 if is_three_four else 1.0)
+```
+
+`draw_arc` spreads its points around the **whole** circle, so the tessellation
+was sized in *angle* while the error it commits is in *pixels*. Measured by the
+new `godot/tests/test_geometry.gd` at the zoom-in stop (`_half_ld` clamps to
+0.01) on a 1280x720 viewport:
+
+| | old: 256 whole-circle segments | new: clipped, 0.3 px budget |
+|---|---|---|
+| radius on screen | 795 431 px | same |
+| chord length | ~19 500 px | fits the window |
+| **distance from the true circle** | **59.9 px** | **0.113 px** |
+| points drawn | 256 | **3** |
+
+Fifty-nine pixels on a 720 px view, on the one screen whose entire job is where a
+line falls relative to a disc. And the fix is *cheaper* than the bug: the visible
+window of that circle needs three points.
+
+Two more things the rewrite settled.
+
+- **The old cull could only see one of the two ways a circle misses the view.**
+  `if cc.distance_to(center) - r > rect.size.length(): continue` catches a ring
+  that passes beyond the corners. It cannot catch a ring so large that the whole
+  plot sits *inside* it - and that is exactly the shape the widest resonances
+  have, so those were being drawn as 256 points of nothing every frame. The new
+  `circle_polyline` culls on both `d - r > vr` and `r - d > vr`.
+- **The offline map never had this defect.** `tools/keyhole_map_svg.py` emits a
+  real `<circle>` element inside a `<clipPath>`, so the renderer draws a true
+  circle and clips it. The two pictures had been disagreeing, and only the
+  interactive one was wrong.
+
+The geometry moved to a new file, `godot/scripts/plot_geometry.gd`, and the
+reason is worth recording because it cost a run to discover: **a headless
+`--script` run registers no autoloads**, so a script that names `Sim` fails to
+*compile* in isolation, and `encounter.gd` names `Sim` on nearly every line. The
+first version of the test loaded `encounter.gd` and got `Identifier not found:
+Sim` before it could call anything. Pure geometry in its own file, loaded by
+`preload` rather than `class_name` (a new global class needs an editor rescan -
+see the staleness traps), is testable with no kernels, no build and no window.
+
+`test_geometry.gd` runs 17 checks in about a second. Four are worth naming: the
+drawn chords meet the budget; **every in-frame point of the true circle is on the
+drawn line** (clipping is only honest if it drops nothing visible - worst
+0.1172 px); both culls fire; and the point cap is never what bounds the picture
+(sweeping eight decades of radius, the worst case is **78 points at r = 354 px**
+against a cap of 1024).
+
+#### Half two: the ellipse's shape, and the number that could not see it
+
+`RealFieldScenario::bplane_uncertainty_checked` has returned a `LinearityReport`
+since Tier 3 began, so the item's "has never been run" was about *pointing it at
+the drawn ellipse*, not about building anything. Doing that turned up the reason
+it would not have helped if someone had.
+
+**`max_relative_residual` normalises against the shell's largest flown
+displacement.** On the shipping ellipse - 168.71 x 0.82 km, a 205:1 needle - that
+scale *is* the major axis. So a residual big enough to be most of the 0.82 km
+minor axis, i.e. big enough to mean the needle is not that thin, divides down to
+a per-mil number and reads as "linear". The scalar is correct for what it was
+built for (the impact probability, which the major axis dominates) and
+structurally blind to the shape. Measured at the sigma knob's top stop: the
+scalar says **0.0043**, the minor axis says **0.561**. A factor of **130**.
+
+So `probe_tier3_drawn_shape` resolves the same residuals along the drawn
+ellipse's own axes and sweeps the `[Z]`/`[X]` knob across its full `10^+/-3`
+range, shell at 3 sigma (97 propagations, 117 s):
+
+```text
+   scale    sig_maj km   sig_min km    resid km   of major   of minor   scalar
+    1e-3        0.169       0.0008      0.0302     0.0596      0.355   0.0801
+    1e-2        1.687       0.0082      0.0102     0.0020      0.012   0.0029
+    1e-1       16.871       0.0818      0.0190     0.0004      0.002   0.0005
+     1e0      168.710       0.8182      0.0121     0.0000      0.001   0.0000
+     1e1     1687.103       8.1822      0.1869     0.0000      0.006   0.0001
+     1e2    16871.034      81.8218     15.4984     0.0001      0.056   0.0004
+     1e3   168710.343     818.2179   1528.4543     0.0013      0.561   0.0043
+```
+
+`of minor` is the number nobody had read: the residual's component along the
+minor axis, as a fraction of that axis' own 3-sigma half-width. Above 1.0 the
+view would be drawing a width narrower than the error in it.
+
+**The verdict is reassuring. The first reading of it was wrong.** The column is
+U-shaped, worst at *both* ends, and the naive read - "the picture is least
+trustworthy when the orbit is best known" - is backwards. Re-running at
+`forward_rtol = 1e-13` instead of the shipping `1e-9` separates the two:
+
+| | scale 1e-3 | scale 1e2 |
+|---|---|---|
+| residual at rtol 1e-9 | 0.0302 km | 15.4984 km |
+| residual at rtol 1e-13 | **0.0003 km** | **15.3276 km** |
+| `of minor` at 1e-13 | 0.355 -> **0.003** | 0.056 -> 0.056 |
+
+A hundredfold drop at the small end and nothing at the large end. The residual is
+a flat **integration-noise floor** plus a term growing as the square of the
+scale; the floor is the integrator, the square-law part is real curvature, and
+only the second is physics. The probe now fits and prints both
+(`residual = floor + k * scale^2`) instead of quoting one number. This is the
+same shape of finding as the integrator-convergence batch: a number that looks
+like a property of the model turning out to be a property of how it was computed.
+
+With the floor understood, the answer to the item: **the drawn shape is supported
+everywhere the knob reaches.** At the shipping covariance the minor-axis residual
+is 0.001 of the drawn 3-sigma half-width. At the top stop it is 0.561 - the drawn
+width is still 1.8x the error in it - and the linear extrapolation crosses 1.0 at
+scale ~2e3, outside a knob that stops at 1e3. `core/tests/tier3_drawn_shape.rs`
+pins both ends (37 propagations, 60 s), and pins one more thing: that the
+per-axis number stays at least 10x the scalar, because the day those two agree,
+this test has stopped adding anything.
+
+**One instinct corrected on the way.** The decomposition looked like it needed the
+display rotation, for the reason `Tier3View` exists - an ellipse's orientation is
+not invariant under the sensitivity's arbitrary basis. It does not: the residual
+and the axis are expressed in the *same* basis, and a common rotation leaves
+their dot product alone, so both ratios are invariant scalars. What genuinely
+needs the rotation is the printed *angle*. The probe does it anyway, which
+re-measures the two b-planes' agreement as a side effect (2.2e-16 here, against
+the 1.95e-10 the ellipse batch recorded - this probe builds the Opik frame from
+the sensitivity's own reduction, so the two share `S-hat` exactly).
+
+`bplane_uncertainty_checked_many` is new and is what made a sweep affordable: one
+13-propagation sensitivity and one sampling *plan* shared across n shells. The
+plan sharing is not an optimisation - `sensitivity_with_plan`'s own doc warns
+that two plans that drift apart make the shell difference its displacements
+against a mean measured at another epoch, and report the difference as curvature.
+Seven separate calls would have been seven plans.
+
+#### What this leaves
+
+- **Nothing changed on screen for the ellipse, deliberately.** The shell says a
+  3-sigma ring would be honest to draw; it is not drawn, because at the default
+  zoom the 1-sigma major axis is already about one pixel, and the readout prints
+  the minor axis to 0.01 km - coarser than any residual measured here. The
+  finding is that the existing picture is sound, not that it needs more on it.
+- **The drawn covariance's three constants now exist in three places** - the
+  binding (`TIER3_*` in `mission_core.rs`), `probe_keyhole_map`, and this
+  probe/test pair - with nothing enforcing agreement, because core cannot see the
+  binding. A change to what the frontend draws has to be made in all three or the
+  probe silently answers about an ellipse nobody draws.
+- The circle clip treats the view as its **circumscribing disc**, not its
+  rectangle, so it keeps slightly more arc than needed near the corners. A
+  deliberate trade: an exact rectangle clip is four line-circle intersections and
+  a case analysis, to decide how much of a ring to tessellate.
+- The guard test costs 60 s with kernels - the right cost for the claim, but it
+  is now among the slowest in the suite.
+- `cargo clippy -D warnings` reports three pre-existing `neg_cmp_op_on_partial_ord`
+  lints in `core/src/sbdb.rs` (628, 736). CI does not pass `-D warnings`, so it
+  stays green; nothing in this batch touches that file.

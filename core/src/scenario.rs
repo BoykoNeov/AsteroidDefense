@@ -1441,34 +1441,67 @@ impl RealFieldScenario {
         covariance: &StateCovariance,
         n_sigma: f64,
     ) -> Result<(BPlaneUncertainty, LinearityReport), UncertaintyError> {
+        let (_, mut checked) =
+            self.bplane_uncertainty_checked_many(std::slice::from_ref(covariance), n_sigma)?;
+        Ok(checked
+            .pop()
+            .expect("one covariance in, one mapped covariance out"))
+    }
+
+    /// [`bplane_uncertainty_checked`](Self::bplane_uncertainty_checked) for a whole
+    /// family of covariances at once, paying the sensitivity **once**.
+    ///
+    /// The frontend's σ knob is exactly this question asked at many scales: the
+    /// same encounter, the same Jacobian, a covariance dialled up and down. Asking
+    /// it one covariance at a time re-solves the 13-propagation sensitivity per
+    /// answer *and* re-derives the sampling plan per answer — and the plan is the
+    /// hazard [`sensitivity_with_plan`](Self::sensitivity_with_plan) documents:
+    /// two plans that drift apart make the shell difference its flown
+    /// displacements against a mean measured at another epoch, and the report
+    /// calls the difference nonlinearity. One solve, one plan, n shells.
+    ///
+    /// The sensitivity comes back with the reports because a caller that wants to
+    /// look at *where* the map bent needs the basis those residuals are expressed
+    /// in, and fetching it with a second call would be the same two-plan bug.
+    ///
+    /// **Cost: 13 + 12·n propagations.**
+    pub fn bplane_uncertainty_checked_many(
+        &self,
+        covariances: &[StateCovariance],
+        n_sigma: f64,
+    ) -> Result<(BPlaneSensitivity, Vec<(BPlaneUncertainty, LinearityReport)>), UncertaintyError>
+    {
         // One plan, shared: the shell must fly at the epoch the mean was measured
         // at, or the report is comparing reduction epochs and calling it curvature.
         let (sens, (t_reduce, cadence, n_snapshots)) = self.sensitivity_with_plan()?;
         let mean = sens.mean();
 
-        let offsets = covariance.sigma_shell(n_sigma);
-        let mut flown = Vec::with_capacity(offsets.len());
-        for (i, o) in offsets.iter().enumerate() {
-            let s = StateVector::new(
-                self.seed.position + Vector3::new(o[0], o[1], o[2]),
-                self.seed.velocity + Vector3::new(o[3], o[4], o[5]),
-            );
-            let enc = self
-                .uncertainty_sample(s, t_reduce, cadence, n_snapshots)
-                .map_err(|e| match e {
-                    UncertaintyError::SampleFailed { message, .. } => {
-                        UncertaintyError::SampleFailed {
-                            column: Some(i),
-                            message: format!("σ-shell sample: {message}"),
+        let mut out = Vec::with_capacity(covariances.len());
+        for covariance in covariances {
+            let offsets = covariance.sigma_shell(n_sigma);
+            let mut flown = Vec::with_capacity(offsets.len());
+            for (i, o) in offsets.iter().enumerate() {
+                let s = StateVector::new(
+                    self.seed.position + Vector3::new(o[0], o[1], o[2]),
+                    self.seed.velocity + Vector3::new(o[3], o[4], o[5]),
+                );
+                let enc = self
+                    .uncertainty_sample(s, t_reduce, cadence, n_snapshots)
+                    .map_err(|e| match e {
+                        UncertaintyError::SampleFailed { message, .. } => {
+                            UncertaintyError::SampleFailed {
+                                column: Some(i),
+                                message: format!("σ-shell sample: {message}"),
+                            }
                         }
-                    }
-                    other => other,
-                })?;
-            flown.push(sens.basis.project(&enc) - mean);
+                        other => other,
+                    })?;
+                flown.push(sens.basis.project(&enc) - mean);
+            }
+            let report = LinearityReport::new(&sens.jacobian, &offsets, &flown, n_sigma);
+            out.push((sens.map(covariance), report));
         }
-
-        let report = LinearityReport::new(&sens.jacobian, &offsets, &flown, n_sigma);
-        Ok((sens.map(covariance), report))
+        Ok((sens, out))
     }
 
     /// The nominal fixed-epoch reduction, the frame it defines, and the 2×6

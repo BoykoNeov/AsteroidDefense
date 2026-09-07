@@ -4091,6 +4091,40 @@ at the end of the ladder stage is now gated to the campaign's own lead, because
 both numbers it compares were measured there and it read as a 6x failure at 450 d
 when it was the leverage changing.
 
+#### What a 5x wider band did to the app, measured
+
+A band five times wider could have traded a false CLEAR for an alarm that is
+always on - the failure the retired constant's own comment warned about ("if two
+circles sit closer together than that band, the alert is on permanently and says
+nothing"). `_shot.gd` says it did not:
+
+```text
+SHOT  planner keyhole: ** 174 KM OFF 3:5 - INSIDE THE PLACEMENT BAND (alert=true)
+SHOT  keyhole sweep dv=0.05 -> CLEAR - NEAREST 3:5 IS 1,656 KM OFF
+SHOT  keyhole sweep dv=0.15 -> CLEAR - NEAREST 7:11 IS 787 KM OFF
+SHOT  keyhole sweep dv=0.90 -> CLEAR - NEAREST 3:4 IS 4,996 KM OFF
+SHOT  keyhole sweep dv=1.40 -> CLEAR - NEAREST 3:4 IS 76,071 KM OFF
+SHOT  closest a player can dial: dv=0.13313 at 900 d (margin 1.5 km, d 1.845 km,
+      door 0.718 km, old rule 5.14 half-widths vs cut 4.0)
+      -> ** 1 KM OFF 5:8 - INSIDE THE PLACEMENT BAND (alert=true)
+SHOT  doors inside the 500 km placement band: 1
+```
+
+Three readings. **CLEAR is still reachable on plans a player dials** - the whole
+impulse sweep reads it, at 787 to 76 071 km off - so the band grew without
+becoming unconditional. **The closest dialable plan did not move**: `dv=0.13313 at
+900 d`, 5:8, margin 1.5 km, every digit unchanged from the previous session, so
+nothing recorded about it is stale. And **`doors_in_band` is 1 on real physics**,
+which is why the constant's doc says in as many words that the several-doors case
+is inferred from the closed-form spacing sweep and has not yet been seen on a
+flown plan.
+
+The one visible change is the default plan, which flips from CLEAR to `** 174 KM
+OFF 3:5 - INSIDE THE PLACEMENT BAND`. That is the intended effect and not a
+regression: 174 km is well inside the placement error now measured at dialable
+leads, so the map cannot honestly call it clear. What the panel claims there is
+"too close for this map to tell", which is true, rather than "safe", which was not.
+
 **Checks:** the core's `doors_within_band` unit test (kernel-free, and it executes
 the several-doors branch the flown plan does not reach), the kernel-gated binding
 test `a_dialable_plan_that_returns_is_not_reported_clear` (reproduces the probe's

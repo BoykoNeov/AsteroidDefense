@@ -87,6 +87,16 @@ const KEYHOLE_MAX_YEARS := 7
 ## in parts of the map, and cannot always name one resonance. The readout counts
 ## how many doors the band contains (`doors_in_band`) and the panel says so when
 ## it is more than one, rather than quoting one of several.
+##
+## **That several-doors case is inferred, not yet seen on a flown plan.** It comes
+## from the spacing sweep above, which is closed-form geometry; the one plan this
+## project has flown to a return impact at a dialable lead reports
+## `doors_in_band` = 1, because it sits at b = 153 722 km where the neighbouring
+## circles happen to be far apart. The 83.6 km figure is the tightest pair
+## *anywhere* in that xi's census, at some other impact parameter. So the crowded
+## register is tested (`test_orrery.gd`, on a hand-built row) and reachable in
+## principle, and `_shot.gd` prints the count so a future run can say whether it
+## has finally fired on real physics.
 const KEYHOLE_PLACEMENT_KM := 500.0
 
 ## Whether the threat and planner are live: true once the core's scenario has

@@ -103,7 +103,18 @@ Read this table first, then the session that owns the layer you are touching.
    It varies, by 24x, and the knob that moves a plan along a circle is the
    **deflection lead time**, which the planner already exposes. The five-door
    calibration turns out to have been taken at a lead the planner cannot dial.
-   See *The calibration taken outside its own domain*.
+   See *The calibration taken outside its own domain*. **And its last open half -
+   the band was calibrated at 200 d and up while the slider goes down to 30 - was
+   closed 2026-09-07.** Below 200 d the answer is not a bigger number: on the 3:4,
+   2:3 and 5:7 the door **ceases to exist** between 150 and 200 d (all three still
+   cross their circle at 125 d, and all three floor 19 447 / 25 140 / 29 341 km out
+   with their timing spent), the 3:4 circle **cannot be reached at all** by 100 d,
+   and none of the three is reached at 75 or 50 d. The constant stays at 800 and
+   gains a stated domain floor. Three gates had to be discarded or fixed to get
+   there - `screen` scores **zero hits at 200 and 300 d where the door is known**,
+   the ladder aim is geometrically unusable below ~150 d (four `bracketed = false`
+   walls), and `xi_sweep` was reporting a hole in the curve as its end. See *The
+   band's domain floor, measured*.
 5. ~~**dop853 → IAS15 crossover.**~~ **RETIRED 2026-09-06 — measured, and no second
    integrator is warranted.** Three corrections to that line. (a) The premise was
    wrong: it leaned on the 15.1 km residual vs JPL, which is *unmodelled forces*
@@ -4491,3 +4502,144 @@ which is a different kind of answer and worth having.
 
 **The three-door register is still only geometry.** Two doors has now been flown;
 three has not.
+
+### The band's domain floor, measured - 2026-09-07 session (below 200 days there is no door to be wrong about)
+
+`KEYHOLE_PLACEMENT_KM` = 800 rested on doors flown at 200 d and up. The planner's
+slider goes down to **30 d**. Its own comment said so - "a plan dialed between 30
+and 200 days is outside everything that calibrated this number" - and that was the
+last open half of the constant.
+
+It is measured now, and the answer is not a bigger number. **Below 200 days there
+is no door for the band to be wrong about.**
+
+#### What was flown
+
+Three circles - the 3:4, 2:3 and 5:7 - swept at 150, 125, 100, 75 and 50 d, then
+the crossings at 125 d refined all the way to their floors. All in the **nominal**
+Opik frame, which belongs to the undeflected rock, so it is the same circle at
+every lead and the comparison is a comparison.
+
+| lead | 3:4 Minus | 2:3 Minus | 5:7 Minus |
+|---|---|---|---|
+| 150 d | crossed, dv 3.2238, xi -52 866 km | crossed, dv 0.8831 | crossed, dv 1.5966 |
+| 125 d | crossed, dv 4.4103, xi -68 990 km | crossed, dv 1.2602 | crossed, dv 2.2220 |
+| 100 d | NOT REACHED - gate at dv 37.5 | wrong branch, NOT MEASURED | wrong branch, NOT MEASURED |
+| 75 d | NOT REACHED - gate at dv 65.3 | NOT REACHED | NOT REACHED |
+| 50 d | NOT REACHED - gate at dv 150 | NOT REACHED | NOT REACHED |
+
+And the three doors at 125 d, the lowest lead where anything is still crossed:
+
+| circle | floor dv | return floors at | xi2 (spatial) | zeta2 (timing) |
+|---|---|---|---|---|
+| 5:7 | 2.2274920 | 29 341 km | -35 526 km | **2.9 km** |
+| 2:3 | 1.2610756 | 25 140 km | -31 229 km | **58.1 km** |
+| 3:4 | 4.4540499 | 19 447 km | -25 380 km | **187.9 km** |
+
+**Every one is converged, and that is what makes the negative a result.** A return
+that merely lands far out could be a search that stopped early. These have spent
+their timing - `zeta2` is 2.9 to 187.9 km against a `xi2` of 25 000 to 36 000 km,
+shares of 0.000 to 0.007 - so the miss is the two orbits' own sideways offset, and
+no impulse along this curve removes it. Resonant returns, not impact keyholes.
+
+So on these circles the door **ceases to exist between 150 and 200 days**. The
+constant does not move; it gains a stated domain floor it never had.
+
+**What this does NOT claim.** The census has 168 circles and three were flown. "No
+keyhole below 150 d" is not established and is not what the constant's doc now
+says. What is established is about the circles swept, at a scan ceiling that
+reproduces a known crossing - which is the amendment the decision rule took before
+any result arrived, because the original wording ("no resonance yields a door")
+would have needed every resonance in the census flown.
+
+#### The control, which is the only reason the negative is worth anything
+
+A method that finds nothing has to be shown to find something. The same
+`dv=`-aimed path, run at 200 d where the door is on record, reproduces it to three
+decimals: centre **+785.973 km** against the recorded +786.0, edges **+780.068**
+and **+791.879** against +780.1 and +791.9, flown width 11.812 km, and the return
+**HITS** at 5 514 km. The path finds a door when there is one.
+
+#### Three gates that had to be discarded or fixed on the way
+
+**`screen` is not a door-existence gate, and a control said so before any
+conclusion rested on it.** Run at 200 d and 300 d - both leads with a known, flown
+3:4 door - it reports **zero hits**, with returns at 478 709 and 576 838 km. One
+unrefined shot at the ladder's aim lands half a million kilometres from Earth even
+where a door exists. Its zero hits at 50-125 d were discarded rather than written
+down. The stage's own footer says the column to read is `xi2`, not `hit?`.
+
+**The ladder's aim is unusable below ~150 d, and the geometry says why.** It
+matches the circle's `b` at the *nominal* xi. On the 3:4 that point is
+b = 153 424 km against a circle whose largest possible `b` is 153 577 km - it is
+essentially the circle's outermost point, reachable only near xi = 0. At a short
+lead the curve gets to that same `b` far out in xi. Flown at 125, 100, 75 and 50 d
+it returned `bracketed = false` four times, ending **214 729 to 320 646 km**
+outside the circle, every one sitting at 2.27x its aim, which is exactly
+`reach_fraction` - the wall, not a floor. Hence `dv=`, which aims a door from the
+crossing `xi_sweep` measures.
+
+**A bug in `xi_sweep`: a hole in the curve was being reported as its end.** The
+scan stopped at the first flight that returned nothing and called it the 5e8 m
+scan gate. At 50 d the retrograde curve passes **through Earth** - the ladder
+reads b = 762 km at dv 1.7586 - and the flight fails there. The scan stopped at
+dv 1.7787 and printed `NOT REACHED`, on a curve the ladder had already flown out
+to b = 306 654 km at dv 70. That reads as a reachability finding and is a hole in
+the middle of the sweep. `Ok(None)` is a terminus (past the gate the pass has
+swung so wide there is no encounter left, and every larger impulse is wider);
+`Err` is one bad impulse to step over, with `prev` cleared so no bracket spans the
+discontinuity. With the fix the 50 d scan runs the full range to 150 m/s and still
+crosses nothing - and the 100 d and 75 d rows are **unchanged**, so only 50 d had
+been truncated.
+
+**And the scan ceiling was itself a calibration.** `SWEEP_DV_HI` = 30 m/s, whose
+doc says "well past what the 1/lead law needs at 150 days" - and means it. The
+3:4's own aim needs 19.0 m/s at 75 d and 37.7 at 50 d, so below 150 d the ceiling
+stopped the scan before the circle and printed `NOT REACHED`. Now `dvmax=` and
+`rungs=`, documented as a pair because raising the span without adding rungs
+coarsens the geometric spacing the sign change has to be caught in.
+
+#### The check that gated the whole sweep
+
+Raising the ceiling makes the rungs coarser in *ratio*, and the curve cuts every
+circle **twice**. One rung pair straddling both crossings leaves the signed
+distance the same sign at both ends, and the sweep prints `NOT REACHED` with a
+plausible "last distance" - indistinguishable from the reachability finding this
+batch is about. So the 150 d row had to reproduce the recorded crossing before any
+other row was read. It does, on all three circles: the 3:4 reads dv **3.223849**,
+xi **-52 865.7 km** against the recorded 3.2235 and -52 860.
+
+#### One number that must not be banked
+
+The 125 d 3:4 floor sits "+1 112 km from the circle", past the 800 km band. **That
+is not a placement error.** Placement is the midpoint of two flown door *edges*,
+and there are no edges where there is no door - it is only where the refinement
+ended while chasing a return minimum.
+
+#### What shipped
+
+- `probe_keyhole_placement`: `dvmax=` / `rungs=` on `xi_sweep`, `dv=` on `door`
+  (which prints which aim it used and what the ladder would have said), the
+  gate-vs-failure fix, and `SHIPPING_BAND_KM` / `LARGEST_PLACEMENT_ERROR_KM`
+  replacing a summary line that had been printing "KEYHOLE_PLACEMENT_KM = 100 km"
+  through both changes of that constant.
+- `core/src/keyhole_target.rs`:
+  `the_three_four_door_has_ceased_to_exist_by_a_125_day_lead` - one flight at the
+  refined floor, asserting the return is outside the capture disc **and** that its
+  timing is spent, because the first assertion alone would pass on an unconverged
+  shot that happened to land far out.
+- `KEYHOLE_PLACEMENT_KM`'s doc: the constant unchanged at 800, with the ladder
+  extended downward, the domain floor stated, and an explicit line that three
+  circles out of 168 is not "no keyhole below 150 d".
+
+#### What this leaves
+
+**The mechanism behind the placement error is still open** - it was open before
+this batch and this batch did not touch it. What is now known is that the question
+has a bounded domain: the error only exists where a door exists, which on these
+circles is 200 d and up.
+
+**Whether other resonances have doors below 200 d is unasked.** Three circles of
+168 were swept. A circle whose geometry puts its crossing at a small xi at a short
+lead is the place to look, and `xi_sweep` is cheap enough to screen the whole
+census before flying anything.

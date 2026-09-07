@@ -89,12 +89,42 @@ const KEYHOLE_MAX_YEARS := 7
 ## Same resonance, same circle, same probe. 800 km is the smallest round number
 ## above the largest of those.
 ##
-## **It is a measured maximum over ten doors and it is NOT A BOUND, and the
-## unmeasured region is BELOW the last row rather than between rows.** `LEAD_MIN`
-## is 30 d. The 3:4 has no door at 150 d, so this ladder stops at 200; no other
-## resonance has been flown below 300 d, and the trend above is still climbing
-## where the measurements run out. A plan dialed between 30 and 200 days is
-## outside everything that calibrated this number.
+## **It is a measured maximum over ten doors and it is NOT A BOUND.** The trend
+## above is still climbing where the measurements run out, so a door somewhere
+## could sit past 800 km.
+##
+## **But the region below the last row is no longer unmeasured, and what is down
+## there is not a bigger error - it is no door at all.** That was the open half of
+## this constant (`LEAD_MIN` is 30 d, and nothing had been flown between 30 and
+## 200). Measured 2026-09-07 on three circles - the 3:4, the 2:3 and the 5:7 -
+## swept and then flown at 150, 125, 100, 75 and 50 d:
+##
+##     lead    what the three circles do
+##     200 d   the 3:4 door EXISTS, centre +786.0 km   <- the last row above
+##     150 d   the 3:4 has no door: floors 17 411 km out
+##     125 d   all three still CROSSED, none is an impact keyhole
+##             (returns floor 19 447 / 25 140 / 29 341 km out)
+##     100 d   the 3:4 circle cannot be reached at all - the deflected pass
+##             leaves the encounter scan gate at dv 37.5 m/s first
+##      75 d   none of the three reached (gate at dv 65.3)
+##      50 d   none of the three reached (gate at dv 150)
+##
+## Each 125 d floor is converged, not merely far out: the timing coordinate zeta2
+## is spent (2.9, 58.1 and 187.9 km) while the sideways offset xi2 that no impulse
+## removes is 25 000 to 36 000 km. A resonant return, not an impact keyhole.
+##
+## **So the stated domain floor is 200 d, and it is a floor on the QUESTION, not on
+## the number.** On these three circles the door ceases to exist between 150 and
+## 200 days, and below that there is nothing for this band to be wrong about. The
+## panel still draws circles there and still quotes the band, which is right: the
+## census has 168 circles and three were flown, so "no keyhole below 150 d" is not
+## a claim this rests on and must not be written as one.
+##
+## The control that makes the negative worth anything: the same aiming path that
+## found no door at 125 d reproduces the **200 d door** to three decimals - centre
+## +785.973 km against the recorded +786.0, edges +780.068 / +791.879, and the
+## return HITS. See `the_three_four_door_has_ceased_to_exist_by_a_125_day_lead` in
+## `core/src/keyhole_target.rs`.
 ##
 ## **What the error is NOT - two proxies killed by measurement, not by argument.**
 ##

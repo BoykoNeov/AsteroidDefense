@@ -1655,6 +1655,122 @@ mod tests {
         );
     }
 
+    /// **The 3:4 door does not exist at a 125 day lead, and the reason is spatial.**
+    ///
+    /// `KEYHOLE_PLACEMENT_KM`'s ladder of flown doors stops at 200 d, where the
+    /// door's centre sits +786.0 km from its circle. The planner's slider goes down
+    /// to 30 d, so what happens below 200 was the open half of that constant.
+    ///
+    /// Measured 2026-09-07 (`probe_keyhole_placement`, see HANDOFF): the reachable
+    /// curve still *crosses* the 3:4 circle at 125 d — at Δv 4.410255, ξ −68 990 km —
+    /// but refining that crossing to its floor gives a return that misses Earth by
+    /// **19 447 km**. It is a resonant return and not an impact keyhole. The 2:3 and
+    /// 5:7 behave the same way at that lead (25 140 and 29 341 km out).
+    ///
+    /// **Why this is a floor and not an unfinished search** — the same gauge the
+    /// test above uses. The timing coordinate ζ₂ has gone to 187.9 km against a
+    /// spatial ξ₂ of −25 380 km, a share of 0.007. Timing is what a Δv nudge buys
+    /// and it is spent; the 25 380 km sideways offset is the two orbits' own, and no
+    /// impulse along this curve removes it.
+    ///
+    /// One flight, at the floor Δv the probe refined to, so this costs a single
+    /// propagation rather than a 26-flight golden-section walk.
+    #[test]
+    fn the_three_four_door_has_ceased_to_exist_by_a_125_day_lead() {
+        use crate::deflection::along_track_unit;
+        use crate::scenario::{ImpactorConfig, RealFieldScenario};
+
+        let Some(_) = crate::kernels::resolve_for_test("the 125 d 3:4 floor") else {
+            return;
+        };
+        /// The floor `probe_keyhole_placement door 3 4 minus dv=4.410255 lead=125`
+        /// refined to. **Do not round this** — the sibling test above records why a
+        /// rounded keyhole Δv reads as an unconverged search.
+        const FLOOR_DV_RETROGRADE_M_S: f64 = 4.454_049_908_7;
+        /// The lead, days. Dialable: `sim.gd` allows 30..900.
+        const LEAD_DAYS: f64 = 125.0;
+
+        let sc = RealFieldScenario::build(&ImpactorConfig::default()).expect("build");
+        let ds = sc.deflection().expect("deflection");
+        let nominal = sc.nominal_hit(&ds).expect("nominal hit");
+        let t_ca = ds
+            .nominal_encounter_epoch()
+            .expect("epoch")
+            .expect("an encounter");
+        let eph = sc.ephemeris().clone();
+        let (r_km, v_km) = eph
+            .state_km_s(EARTH_J2000, SUN_J2000, t_ca.as_hifitime())
+            .expect("Earth state");
+        // The frame belongs to the UNDEFLECTED rock, so it is the same frame — and
+        // therefore the same circle — at every lead. That is what makes a
+        // comparison across leads a comparison at all.
+        let frame = OpikFrame::new(
+            &nominal,
+            r_km * M_PER_KM,
+            v_km * M_PER_KM,
+            eph.sun_gm_m3_s2().expect("sun GM"),
+        )
+        .expect("frame");
+        let epoch = sc.impact_epoch().shifted_by_seconds(-LEAD_DAYS * 86_400.0);
+        let seed = ds.nominal().state_at(epoch).expect("seed");
+        let retro = -along_track_unit(seed).expect("along-track");
+
+        let aiming = KeyholeAiming {
+            frame: &frame,
+            earth_radius_m: nominal.earth_radius,
+            deflection_epoch: epoch,
+            direction: retro,
+        };
+        let shot = fly_keyhole_shot(
+            &sc,
+            &ds,
+            aiming,
+            FLOOR_DV_RETROGRADE_M_S,
+            Resonance { h: 3, k: 4 },
+            &KeyholeShotOptions::default().widened_for_aim(153.4e6),
+        )
+        .expect("the flight runs");
+
+        let ret = shot
+            .flown_return
+            .as_ref()
+            .expect("a return inside the gate");
+        let (xi2, zeta2) = (
+            ret.xi_m.expect("the return reduces in its own frame"),
+            ret.zeta_m.expect("the return reduces in its own frame"),
+        );
+        println!(
+            "125 d floor: encounter-1 b {:.0} km; return {:.0} km out,              ξ₂ {:.0} km (spatial), ζ₂ {:.0} km (timing)",
+            shot.encounter.impact_parameter / M_PER_KM,
+            ret.distance_m / M_PER_KM,
+            xi2 / M_PER_KM,
+            zeta2 / M_PER_KM,
+        );
+
+        // The claim: this is NOT an impact keyhole. Earth's capture radius is the
+        // honest yardstick, not its physical surface — a return inside the capture
+        // disc is drawn in and hits.
+        // 1.5x the disc, against a measured 1.72x. The disc itself is the physical
+        // line — inside it the return is drawn in and hits — so this is that line
+        // plus a little slack, not a threshold chosen to make the claim.
+        assert!(
+            ret.distance_m > 1.5 * nominal.capture_radius,
+            "the 125 d 3:4 return floors {:.0} km out against a {:.0} km capture radius;              19 447 km was measured, i.e. 1.72 discs out. If this has come inside, a door              exists at 125 d and KEYHOLE_PLACEMENT_KM's stated domain floor is wrong",
+            ret.distance_m / M_PER_KM,
+            nominal.capture_radius / M_PER_KM
+        );
+        // And the reason: the miss is spatial, so it is a floor rather than a
+        // search that stopped early. Without this the assertion above could pass
+        // on an unconverged shot that happens to land far out.
+        assert!(
+            ret.timing_share().expect("both components") < 0.05,
+            "the 125 d floor is {:.3} timing (ζ₂ {:.0} km) against spatial              (ξ₂ {:.0} km), where 0.007 was measured. A share this large means the              search had not spent its timing, and a far-out return then says nothing              about whether a door exists",
+            ret.timing_share().unwrap(),
+            zeta2 / M_PER_KM,
+            xi2 / M_PER_KM
+        );
+    }
+
     /// Build the starting three-point bracket the solve builds, for an objective
     /// `f` around an aim of 1.0.
     fn bracket_around(aim: f64, fraction: f64, f: impl Fn(f64) -> f64) -> Bracket {

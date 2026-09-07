@@ -83,6 +83,21 @@ const RETURN_YEARS: std::ops::RangeInclusive<u32> = 2..=20;
 const MAX_REVOLUTIONS: u32 = 24;
 const B_MAX_CAPTURE_RADII: f64 = 60.0;
 
+/// The frontend's shipping placement band, km — `sim.gd`'s `KEYHOLE_PLACEMENT_KM`.
+///
+/// Mirrored here **only so the log can say what it is being compared against**;
+/// nothing in this probe's physics reads it. It has moved twice (100 → 500 → 800)
+/// and this line was left saying 100 through both, which is exactly the kind of
+/// stale number a log is worst at: it is not asserted anywhere, so nothing fails
+/// when it rots, and a reader takes it for the current value.
+const SHIPPING_BAND_KM: f64 = 800.0;
+
+/// The largest door-centre offset any flown door has shown, km — the 200 d 3:4
+/// door, which is what set [`SHIPPING_BAND_KM`]. Also stale for two sessions at
+/// 26.8, the five-door maximum, after the lead sweep found 210.6, 467.9, 648.2
+/// and 786.0 km at dialable leads.
+const LARGEST_PLACEMENT_ERROR_KM: f64 = 786.0;
+
 /// The Δv span the ladder covers **at the campaign's own 12 yr lead**, m/s. The
 /// low end is below any reachable resonance; the high end is where the deflected
 /// pass starts leaving the shipping 5e8 m scan gate, which the ladder reports
@@ -139,6 +154,69 @@ fn take_xi_km(args: &[String]) -> (Option<f64>, Vec<String>) {
         }
     }
     (xi, rest)
+}
+
+/// Pull a `dvmax=<m/s>` token out of the argument list, same discipline as
+/// [`take_lead`]. Only `xi_sweep` reads it. See [`SWEEP_DV_HI`]: its default is
+/// calibrated at a 150 d lead, and a shorter lead needs a proportionally bigger
+/// impulse to reach the same circle, so the ceiling has to move with the lead or
+/// the scan reports the ceiling as a reachability result.
+fn take_dv_max(args: &[String]) -> (Option<f64>, Vec<String>) {
+    let mut dv = None;
+    let mut rest = Vec::new();
+    for a in args {
+        match a.strip_prefix("dvmax=").and_then(|s| s.parse::<f64>().ok()) {
+            Some(v) if v > 0.0 => dv = Some(v),
+            _ => rest.push(a.clone()),
+        }
+    }
+    (dv, rest)
+}
+
+/// Pull a `dv=<m/s>` token out of the argument list: the Δv the `door` stage
+/// starts its refinement from, overriding the ladder's.
+///
+/// **The ladder's aim is not usable below ~150 days, and that is a measurement,
+/// not a suspicion.** The ladder maps Δv to `b`, and the aim asks for the `b` of
+/// the circle's point at the *nominal* ξ. On the 3:4 that point sits at
+/// b = 153 424 km against a circle whose largest possible `b` is 153 577 km — it
+/// is essentially the circle's outermost point, reachable only near ξ = 0. At a
+/// short lead the reachable curve gets to that same `b` far out in ξ, so the aim
+/// is right in `b` and hundreds of thousands of kilometres from the door. Flown
+/// at 125, 100, 75 and 50 d it produced `bracketed = false` four times, ending
+/// 214 729 to 320 646 km outside the circle.
+///
+/// So a short-lead door is aimed from `xi_sweep`'s **crossing** Δv, which is
+/// where the curve actually meets the circle, and this is how that gets in.
+fn take_dv_aim(args: &[String]) -> (Option<f64>, Vec<String>) {
+    let mut dv = None;
+    let mut rest = Vec::new();
+    for a in args {
+        match a.strip_prefix("dv=").and_then(|s| s.parse::<f64>().ok()) {
+            Some(v) if v.is_finite() && v > 0.0 => dv = Some(v),
+            _ => rest.push(a.clone()),
+        }
+    }
+    (dv, rest)
+}
+
+/// Pull a `rungs=<n>` token out of the argument list. Raising [`SWEEP_DV_HI`]
+/// without raising this coarsens the *geometric* spacing of the scan, and the
+/// scan's whole job is to catch a sign change between adjacent rungs — so the
+/// two knobs belong together and are documented as a pair.
+fn take_rungs(args: &[String]) -> (Option<usize>, Vec<String>) {
+    let mut n = None;
+    let mut rest = Vec::new();
+    for a in args {
+        match a
+            .strip_prefix("rungs=")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            Some(v) if v >= 3 => n = Some(v),
+            _ => rest.push(a.clone()),
+        }
+    }
+    (n, rest)
 }
 
 fn work_dir() -> PathBuf {
@@ -723,6 +801,7 @@ fn stage_screen(args: &[String]) {
 
 fn stage_door(args: &[String]) {
     let (lead, args) = take_lead(args);
+    let (dv_override, args) = take_dv_aim(&args);
     let h: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
     let k: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4);
     let branch = match args.get(3).map(|s| s.to_lowercase()) {
@@ -747,19 +826,24 @@ fn stage_door(args: &[String]) {
         std::process::exit(1);
     });
     let sign = if aim.target.y < 0.0 { -1.0 } else { 1.0 };
-    let Some(aim_dv) = ladder.dv_for_b(aim.impact_parameter_m, sign) else {
-        eprintln!(
-            "{resonance} wants b = {:.0} km, outside the ladder's range",
-            aim.impact_parameter_m / 1e3
-        );
-        std::process::exit(1);
+    let ladder_dv = ladder.dv_for_b(aim.impact_parameter_m, sign);
+    let aim_dv = match (dv_override, ladder_dv) {
+        (Some(dv), _) => dv,
+        (None, Some(dv)) => dv,
+        (None, None) => {
+            eprintln!(
+                "{resonance} wants b = {:.0} km, outside the ladder's range, and no                  dv= aim was given",
+                aim.impact_parameter_m / 1e3
+            );
+            std::process::exit(1);
+        }
     };
     let circle = aim.circle;
     let kh = s.frame.keyhole_at(&circle, aim.target);
     log(&format!(
         "{resonance} {branch:?}: a' {:.6} AU, aim (ξ {:.0}, ζ {:.0}) km, b {:.0} km, \
          perigee {:.0} km\n  linearised door at the aim point: {:.3} km wide \
-         (|∇a'| {:.3e}); ladder aim Δv {:.10} m/s ({} nudge)",
+         (|∇a'| {:.3e}); aim Δv {:.10} m/s from {} ({} nudge)",
         circle.a_prime / AU_M,
         aim.target.x / 1e3,
         aim.target.y / 1e3,
@@ -768,6 +852,13 @@ fn stage_door(args: &[String]) {
         kh.width / 1e3,
         kh.gradient.norm(),
         aim_dv,
+        match (dv_override, ladder_dv) {
+            // Said out loud on every run, because which of these two aimed the
+            // shot is the difference between a door and a `bracketed = false`.
+            (Some(_), Some(l)) => format!("dv= (the ladder would have said {l:.6})"),
+            (Some(_), None) => "dv= (the ladder could not reach this b)".to_string(),
+            (None, _) => "the ladder".to_string(),
+        },
         if sign < 0.0 { "retrograde" } else { "prograde" }
     ));
 
@@ -1005,6 +1096,16 @@ fn stage_door(args: &[String]) {
 /// 7 859 km against 153 448 km of `b`, and doors 240× apart, presented as the same
 /// circle at four leads. The high end is well past what the 1/lead law needs to
 /// reach the far branch at 150 days, and still inside `sim.gd`'s `DV_MAX` of 300.
+///
+/// **The default high end is calibrated at 150 days and is NOT enough below it** —
+/// the sentence above says "at 150 days" and means it. `Δv` for a given `b` grows
+/// roughly as `1/lead`, so the 3:4's own aim needs 19.0 m/s at 75 d and 37.7 m/s
+/// at 50 d, and a 30 m/s ceiling stops the scan before the circle is reached. A
+/// scan that stops short reports `NOT REACHED`, which reads like a reachability
+/// *finding* and is really the ceiling talking. Hence `dvmax=` and `rungs=`: below
+/// 150 d, raise the ceiling to the app's own `DV_MAX` region and add rungs to keep
+/// the geometric spacing, or the sweep answers a question about this constant
+/// instead of about the rock.
 const SWEEP_DV_LO: f64 = 0.001;
 const SWEEP_DV_HI: f64 = 30.0;
 const SWEEP_RUNGS: usize = 26;
@@ -1028,6 +1129,10 @@ struct Crossing {
 
 fn stage_xi_sweep(args: &[String]) {
     let (_, args) = take_lead(args);
+    let (dv_max, args) = take_dv_max(&args);
+    let (rungs, args) = take_rungs(&args);
+    let dv_hi = dv_max.unwrap_or(SWEEP_DV_HI);
+    let rungs = rungs.unwrap_or(SWEEP_RUNGS);
     let h: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
     let k: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4);
     let branch = match args.get(3).map(|s| s.to_lowercase()) {
@@ -1096,14 +1201,31 @@ fn stage_xi_sweep(args: &[String]) {
             continue;
         };
         // One flight: the impulse, the flyby, and where it lands relative to the
-        // circle. `None` is the scan gate, which ends the sweep upward.
-        let fly = |dv: f64| -> Option<(nalgebra::Vector2<f64>, f64, f64)> {
+        // circle.
+        //
+        // **The two ways a flight can fail are not the same thing, and collapsing
+        // them truncated this scan.** `Ok(None)` is the 5e8 m scan gate: the pass
+        // has swung so wide there is no encounter left to reduce, and the curve
+        // really is over — every larger impulse is further out still. `Err` is a
+        // propagation failure at one impulse, and the curve continues on the far
+        // side of it.
+        //
+        // At a 50 d lead the retrograde curve passes *through Earth* — the ladder
+        // reads b = 762 km at Δv 1.7586, well inside the planet — and the flight
+        // fails there. Treating that as the gate stopped the scan at Δv 1.7787 and
+        // reported `NOT REACHED`, on a curve the ladder had already flown out to
+        // b = 306 654 km at Δv 70. That reads as a reachability finding and is a
+        // hole in the middle of the sweep.
+        let fly = |dv: f64| -> Result<Option<(nalgebra::Vector2<f64>, f64, f64)>, ()> {
             match ds.evaluate(epoch, dir * dv) {
                 Ok(Some(enc)) => {
                     let p = s.frame.project(&enc.b_vector);
-                    Some((p, enc.impact_parameter, circle.signed_distance(p)))
+                    Ok(Some((p, enc.impact_parameter, circle.signed_distance(p))))
                 }
-                _ => None,
+                // Past the scan gate: no encounter, and none at any larger Δv.
+                Ok(None) => Ok(None),
+                // One bad impulse. Step over it.
+                Err(_) => Err(()),
             }
         };
 
@@ -1122,13 +1244,26 @@ fn stage_xi_sweep(args: &[String]) {
         let mut prev: Option<(f64, f64)> = None;
         let mut bracket = None;
         let mut gated_at = None;
-        for i in 0..SWEEP_RUNGS {
-            let f = i as f64 / (SWEEP_RUNGS - 1) as f64;
-            let dv = SWEEP_DV_LO * (SWEEP_DV_HI / SWEEP_DV_LO).powf(f);
+        for i in 0..rungs {
+            let f = i as f64 / (rungs - 1) as f64;
+            let dv = SWEEP_DV_LO * (dv_hi / SWEEP_DV_LO).powf(f);
             flights += 1;
-            let Some((p, _, d)) = fly(dv) else {
-                gated_at = Some(dv);
-                break;
+            let (p, d) = match fly(dv) {
+                Ok(Some((p, _, d))) => (p, d),
+                Ok(None) => {
+                    gated_at = Some(dv);
+                    break;
+                }
+                // A hole, not a terminus. `prev` is cleared because a bracket
+                // spanning the hole would straddle a discontinuity, and a sign
+                // change read across it is not a crossing of the circle.
+                Err(()) => {
+                    log(&format!(
+                        "lead {lead_days:8.1} d:   (no encounter at dv {dv:.6} m/s — stepping over it; this is a failed flight, not the scan gate)"
+                    ));
+                    prev = None;
+                    continue;
+                }
             };
             if let Some((dv0, d0)) = prev {
                 if d0 * d < 0.0 {
@@ -1156,7 +1291,7 @@ fn stage_xi_sweep(args: &[String]) {
                          the circle"
                     ),
                     None => format!(
-                        "no sign change up to Δv {SWEEP_DV_HI} m/s (last distance {:.0} km)",
+                        "no sign change up to Δv {dv_hi} m/s (last distance {:.0} km) — raise dvmax= before reading this as unreachable",
                         prev.map(|p| p.1 / 1e3).unwrap_or(f64::NAN)
                     ),
                 }
@@ -1166,12 +1301,12 @@ fn stage_xi_sweep(args: &[String]) {
 
         // --- bisect the crossing ---------------------------------------------
         flights += 1;
-        let d_lo = fly(lo).map(|x| x.2).unwrap_or(f64::NAN);
+        let d_lo = fly(lo).ok().flatten().map(|x| x.2).unwrap_or(f64::NAN);
         let mut best: Option<(f64, nalgebra::Vector2<f64>, f64, f64)> = None;
         for _ in 0..SWEEP_BISECTIONS {
             let mid = 0.5 * (lo + hi);
             flights += 1;
-            let Some((p, b, d)) = fly(mid) else { break };
+            let Ok(Some((p, b, d))) = fly(mid) else { break };
             if best.as_ref().is_none_or(|x| d.abs() < x.3.abs()) {
                 best = Some((mid, p, b, d));
             }
@@ -1268,18 +1403,18 @@ fn stage_xi_sweep(args: &[String]) {
         found.iter().map(|c| c.b_m).fold(0.0_f64, f64::max) / 1e3,
     ));
     log(&format!(
-        "\nagainst the five flown doors: placement errors ran 2.0 .. 26.8 km, and the \
-         shipping band is KEYHOLE_PLACEMENT_KM = 100 km.\n  -> {}",
-        if spread > 100.0e3 {
+        "\nagainst the flown doors: placement errors ran 2.0 .. {LARGEST_PLACEMENT_ERROR_KM:.1} km, \
+         and the shipping band is KEYHOLE_PLACEMENT_KM = {SHIPPING_BAND_KM:.0} km.\n  -> {}",
+        if spread > SHIPPING_BAND_KM * 1e3 {
             "the crossings are further apart than the whole band, so position on the \
              circle is a first-order variable and the doors must be flown at each lead"
-        } else if spread > 27.0e3 {
+        } else if spread > LARGEST_PLACEMENT_ERROR_KM * 1e3 {
             "the crossings are further apart than the largest placement error seen, so \
              the sweep can separate position-on-circle from resonance identity — fly them"
         } else {
             "the crossings are closer together than the placement errors already \
              measured, so this sweep cannot resolve a variation along the circle; the \
-             band's five-point basis is what it is"
+             band's flown basis is what it is"
         }
     ));
     for c in &found {

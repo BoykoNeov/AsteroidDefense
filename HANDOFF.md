@@ -3490,6 +3490,16 @@ apart, so a 100 km band still names one circle unambiguously. That is a real
 coupling - **at 20 years the tightest pair is 3.0 km**, and this constant would
 have to shrink with the horizon.
 
+The change is visible on a plan a player can actually dial. `_shot.gd`
+golden-sections the impulse for the smallest margin and now prints both rules
+off the same row: `dv=0.13313 at 900 d (margin 1.5 km, d 1.845 km, door 0.718
+km, old rule 5.14 half-widths vs cut 4.0) -> ** 1 KM OFF 5:8 - INSIDE THE
+PLACEMENT BAND (alert=true)`. The old rule scored that plan 5.14 half-widths
+against a cut of 4.0 and would have printed CLEAR. Both numbers are printed
+because the first version of this claim was arithmetic done in my head and
+written up as an observation - which is the failure this file has recorded
+twice already.
+
 Two smaller consequences. The panel now names the circle nearest **in
 kilometres** rather than the one nearest in half-widths, because placement
 dominates; the note flags the disagreement when they differ, the other way round
@@ -3522,7 +3532,13 @@ The core's `tightest_keyhole` still selects by half-widths, which this finding
 makes the wrong metric - it will systematically prefer wide circles over close
 ones. The frontend now works around it by naming `nearest` instead, so nothing
 on screen is wrong, but the core API answers a question that no longer matters
-much. Second, the placement error is measured at exactly one `xi` per circle;
+much. One consequence to know about before touching the panel: `keyhole_note`
+prints its disagreement line when the widths-tightest circle is not the
+km-nearest one, and now that the label follows kilometres **that branch is the
+common case rather than the exception**. It is not visibly wrong - the harness
+run printed the fallback text every time - but it is a mostly-live branch now,
+not a mostly-dead one, and it will start firing as soon as the two metrics part
+company. Second, the placement error is measured at exactly one `xi` per circle;
 whether it varies along a circle is unknown, and that is what a sixth campaign
 should ask. Third, nothing here explains *why* the placement error is what it
 is - it is bounded and characterised, not derived.

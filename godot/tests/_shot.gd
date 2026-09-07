@@ -378,9 +378,16 @@ func _run() -> void:
 		await _keyhole_margin_at(best_dv)
 		await _settle(4)
 		await _shot("enc_8_planner_keyhole")
-		print("SHOT  closest a player can dial: dv=%.5f at %d d (margin %.1f km) -> %s (alert=%s)"
-			% [best_dv, int(Sim.plan_lead_d), best_w, Sim.keyhole_label(),
-				Sim.keyhole_alert()])
+		# `widths_away` is printed beside the margin on purpose: it is the rule
+		# that shipped until 2026-09-07 (alert when <= 4.0 half-widths), and the
+		# claim that the additive band catches plans that rule called CLEAR is
+		# only worth making if both numbers come off the same plan.
+		var row: Dictionary = Sim.plan_keyhole.get("nearest", {})
+		print("SHOT  closest a player can dial: dv=%.5f at %d d (margin %.1f km, d %.3f km, door %.3f km, old rule %.2f half-widths vs cut 4.0) -> %s (alert=%s)"
+			% [best_dv, int(Sim.plan_lead_d), best_w,
+				absf(row.get("distance_km", INF)), float(row.get("width_km", 0.0)),
+				float(row.get("widths_away", INF)),
+				Sim.keyhole_label(), Sim.keyhole_alert()])
 		print("SHOT  keyhole note: %s" % Sim.keyhole_note())
 
 	get_tree().quit(0)

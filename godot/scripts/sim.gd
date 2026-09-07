@@ -54,50 +54,109 @@ const KEYHOLE_MAX_YEARS := 7
 ## `KEYHOLE_PLACEMENT_KM + width/2`: a keyhole has a real width *and* a centre
 ## the closed form places wrongly, and those two errors add.
 ##
-## The width half of that is sound. Eight doors have now been flown to a return
-## impact and had both edges bisected, and the linearised width is between 0.89x
-## and 1.44x the flown one throughout. The *placement* half is not sound, and
-## this constant is the apology for it.
+## The width half of that is the sound half, and the 200 d door widened its
+## range. Ten doors have now been flown to a return impact and had both edges
+## bisected, and the linearised width is between **0.89x and 2.11x** the flown one
+## - it used to be 0.89x to 1.44x over the first nine. The 2.11x is the 200 d
+## door: 11.8 km flown against 24.9 km drawn. That is where the 3:4 door is
+## closing (it does not exist at all by 150 d, and its return's irreducible
+## sideways offset is already 10 300 km at 200 d), and a closing door narrows
+## faster than the linearisation knows. The formula stays **conservative** - it
+## draws the door wider than it is, so the panel alerts where it need not, which
+## is the safe direction - but "within 1.44x" was a nine-door statement and is no
+## longer true. The *placement* half is not sound at all, and this constant is the
+## apology for it.
 ##
-## **500 km, because the error depends on the deflection lead and the old
-## calibration was taken at a lead this planner cannot dial.** The five keyholes
-## that set the previous 100 km were flown at the campaign's own 12 yr lead
-## (`T_IMPACT` = 4383 d) and gave door centres 2.0 to 26.8 km from their circles.
-## `LEAD_MAX` is 900 d and `lead_cap()` clamps to it, so no plan in this app is
-## ever flown at that lead. Flying the *same* 3:4 door at leads that can be
-## dialed (2026-09-07, `probe_keyhole_placement door 3 4 minus lead=...`):
+## **800 km, because the placement error grows as the deflection lead shortens
+## and the shortest leads this planner allows are the worst.** The five keyholes
+## that set the original 100 km were flown at the campaign's own 12 yr lead
+## (`T_IMPACT` = 4383 d), which `lead_cap()` clamps away - `LEAD_MAX` is 900 d, so
+## no plan in this app is ever flown there. Flying the *same* 3:4 door at leads
+## that can be dialed (`probe_keyhole_placement door 3 4 minus lead=...`,
+## 2026-09-07):
 ##
-##     lead 4383 d (not dialable) : door centre +19.3 km from the circle
-##     lead  900 d                : +210.6 km
-##     lead  450 d                : +467.9 km
-##     lead  150 d                : no door at all — the return stops hitting Earth
+##     lead   dv (m/s)   door centre from the circle
+##     4383 d   0.2165    +19.3 km    <- not dialable
+##      900 d   0.9322   +210.6 km
+##      450 d   1.2519   +467.9 km
+##      300 d   2.8798   +648.2 km
+##      200 d   2.4785   +786.0 km
+##      150 d      -      no door at all - the return stops hitting Earth
 ##
-## Same resonance, same circle, same probe. 500 km is the smallest round number
-## above the largest of those, and it is a MEASURED MAXIMUM OVER EIGHT DOORS,
-## not a bound: three leads on one circle and five circles at one lead is not a
-## law, nothing here explains why the error grows as the lead shortens, and the
-## 150 d column says the door can vanish rather than merely move.
+## Same resonance, same circle, same probe. 800 km is the smallest round number
+## above the largest of those.
 ##
-## Circle crowding used to bracket this from above and no longer does. At the
-## 12 yr lead's ξ the closest pair of drawn circles sits 402 km apart, which is
-## where "a 100 km band still names one circle" came from — but that ξ is not
-## dialable either. At the ξ a 900 d plan reaches the closest pair is 83.6 km,
-## and at 450 d it is 8.3 km (`probe_keyhole_placement spacing xi=...`). So a
-## band honest about the placement error is wider than the gap between circles
-## in parts of the map, and cannot always name one resonance. The readout counts
-## how many doors the band contains (`doors_in_band`) and the panel says so when
-## it is more than one, rather than quoting one of several.
+## **It is a measured maximum over ten doors and it is NOT A BOUND, and the
+## unmeasured region is BELOW the last row rather than between rows.** `LEAD_MIN`
+## is 30 d. The 3:4 has no door at 150 d, so this ladder stops at 200; no other
+## resonance has been flown below 300 d, and the trend above is still climbing
+## where the measurements run out. A plan dialed between 30 and 200 days is
+## outside everything that calibrated this number.
 ##
-## **That several-doors case is inferred, not yet seen on a flown plan.** It comes
-## from the spacing sweep above, which is closed-form geometry; the one plan this
-## project has flown to a return impact at a dialable lead reports
-## `doors_in_band` = 1, because it sits at b = 153 722 km where the neighbouring
-## circles happen to be far apart. The 83.6 km figure is the tightest pair
-## *anywhere* in that xi's census, at some other impact parameter. So the crowded
-## register is tested (`test_orrery.gd`, on a hand-built row) and reachable in
-## principle, and `_shot.gd` prints the count so a future run can say whether it
-## has finally fired on real physics.
-const KEYHOLE_PLACEMENT_KM := 500.0
+## **What the error is NOT - two proxies killed by measurement, not by argument.**
+##
+## It is not *where on the circle* the plan sits. That was the obvious suspect,
+## because the lead also slides the plan round the circle and the two moved
+## together in every point measured before. The 300 d row breaks it: that shot
+## lands at xi = +5531 km against the 12 yr shot's +6103 km - 572 km apart on a
+## circle of radius 74 855 km, **0.48 degrees of arc** - and the map is wrong
+## about one of them by 19 km and about the other by 648.
+##
+## It is not the size of the impulse either, which is the other thing a shorter
+## lead forces. The 200 d door needs a **smaller** nudge than the 300 d one
+## (2.4785 against 2.8798 m/s, because the dv a circle costs is not monotone in
+## the lead) and its placement error is **larger** - 786 against 648 km. Impulse
+## down, error up.
+##
+## That second elimination only works after the first, because the 200 d shot is
+## not at the same place on the circle either. What survives both is that of the
+## four candidates - lead, dv, xi, and the angle round the circle - **only the
+## lead orders all five flown doors**. The other three are each non-monotone
+## somewhere in the ladder above.
+##
+## Nor is it the frame the circle is drawn in, and that one had to be flown to be
+## believed. The map builds the Opik frame from the NOMINAL, undeflected encounter
+## and then places the DEFLECTED point on it, so the deflection's own change to
+## v_inf, to the approach direction, and to when the rock arrives are all
+## unmodelled - and all of them grow with the impulse.
+## `probe_keyhole_placement frame` rebuilt each flight's circle in that flight's
+## own frame and the spread across leads got **worse**, not better: 1375 km across
+## the four self-consistent rows against 767 km uncorrected, and a 24.9 km door.
+## The frame is a real effect and
+## a large one - the deflected pass reaches closest approach ~1.9 h after the
+## nominal impact, Earth moves 210 000 km in that time, and the 3:4 circle moves
+## ~210 km because of it - but that piece is very nearly the SAME at every lead,
+## so it sizes this constant without explaining its ladder.
+##
+## So the variable is identified and the mechanism is not. Read the ladder as five
+## flown doors on one circle, not as a law.
+##
+## Circle crowding used to bracket this from above and no longer does. **Careful
+## with the old evidence for that**: the 402 / 83.6 / 8.3 km figures from
+## `probe_keyhole_placement spacing` are gaps between neighbouring circles along a
+## line of constant xi, which is NOT the quantity this band cuts on - that is
+## `margin`, the distance from the *plan's own point* to a door, and a plan
+## reaches a given b at its own xi rather than at the one the spacing sweep asked
+## about. Same class of mistake as ranking circles by widths instead of km.
+## `probe_keyhole_placement crowding` asks the register's own question instead: it
+## flies the whole dialable dv range at a lead, keeps only the points where the
+## deflected pass actually **misses**, and counts doors in the band at each.
+##
+## **On that measurement the several-doors register fires on real physics**, which
+## it never had before, and it does so at **every lead the planner allows**. At
+## 900 / 600 / 450 / 300 / 150 / 30 days a prograde nudge of 0.11 to 2.08 m/s -
+## `DV_MIN` is 0.1 - puts the rock at b = 11 638 to 17 014 km with **two doors
+## inside the band**, and every one of those is a genuine miss against the
+## 11 311 km capture radius. Four of the six sit at ~1.5x the capture radius,
+## which is a comfortable miss; the 30 d one is a miss by 3 % and should be read
+## as such.
+##
+## **It fires because the band widened, not because the physics changed.** The
+## runner-up door's best margin anywhere on the 900 d curve is 644.9 km - between
+## the retired 500 km band and this 800 km one. A wider band is a weaker claim
+## about which resonance you are near, and this register is the panel saying so.
+## The readout carries `doors_in_band`; `_shot.gd` prints the count.
+const KEYHOLE_PLACEMENT_KM := 800.0
 
 ## Whether the threat and planner are live: true once the core's scenario has
 ## finished building and installed (see `_poll_build`). Consumers check this
@@ -2296,9 +2355,10 @@ func keyhole_label() -> String:
 	if keyhole_margin_km(risk) <= KEYHOLE_PLACEMENT_KM:
 		# When the band spans more than one drawn circle the panel must not present
 		# one of them as *the* answer. That is not hypothetical: the placement error
-		# the band is sized for (up to 468 km) is larger than the gap between
-		# neighbouring circles in parts of the map (83.6 km at a 900 d plan's xi,
-		# 8.3 km at 450 d), so the band genuinely cannot separate them there.
+		# the band is sized for (up to 786 km) is larger than the gap between
+		# neighbouring circles over whole stretches of the map, and
+		# `probe_keyhole_placement crowding` has now flown plans a player can dial
+		# that sit inside two doors at once. See `KEYHOLE_PLACEMENT_KM`.
 		var n := int(plan_keyhole.get("doors_in_band", 1))
 		if n > 1:
 			return "** %s KM OFF %s - AND %d MORE DOORS IN THE BAND" % [
@@ -2335,13 +2395,13 @@ func keyhole_margin_km(row: Dictionary) -> float:
 ## shout. The one condition, so the blink and the wording can never disagree.
 ##
 ## Deliberately NOT the core's `inside` flag. The closed form's width is sound —
-## measured against eight flown doors it is between 0.89x and 1.44x the real one
+## measured against ten flown doors it is between 0.89x and 2.11x the real one
 ## once you account for the return's own spatial offset — but the *centre* it
 ## draws is wrong by tens of kilometres at the campaign's 12 yr lead and by
 ## HUNDREDS at the leads this planner can actually dial (211 km at 900 d, 468 km
-## at 450 d). `inside` read false for four of the first five keyholes that
-## returned the rock to Earth, and it reads false by a wider margin still on the
-## 900 d shot the binding test flies.
+## at 450 d, 786 km at 200 d). `inside` read false for four of the first five
+## keyholes that returned the rock to Earth, and it reads false by a wider margin
+## still on the 300 d shot the binding test flies.
 ##
 ## Cut on `at_risk`, the row with the smallest margin in the whole census, not on
 ## the nearest circle: the nearest circle's door is not necessarily the nearest
@@ -2380,9 +2440,9 @@ func keyhole_note() -> String:
 			return "INSIDE THE %s DOOR - WIDER, FURTHER OUT" % keyhole_name(risk)
 		return "%s KM FROM THE WIDER %s DOOR" % [
 			group_num(int(m)), keyhole_name(risk)]
-	# The number is a measured maximum over eight flown doors, and it grows as the
-	# lead shortens (19 km at 12 yr, 211 at 900 d, 468 at 450 d), so the caveat
-	# names the lead rather than implying one figure covers the whole slider.
+	# The number is a measured maximum over the flown doors, and it grows as the
+	# lead shortens (19 km at 12 yr, 211 at 900 d, 468 at 450 d, 786 at 200 d), so
+	# the caveat names the lead rather than implying one figure covers the slider.
 	return "CIRCLE PLACED TO +/-%d KM AT THIS LEAD - ONLY A FLOWN RETURN CONFIRMS" % int(
 		KEYHOLE_PLACEMENT_KM)
 

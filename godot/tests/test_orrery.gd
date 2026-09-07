@@ -605,16 +605,17 @@ func _init() -> void:
 
 	# --- the band that contains more than one door -------------------------
 	#
-	# The placement band is 500 km because the closed form misplaces a circle by
-	# up to 468 km at a lead this planner can dial (`KEYHOLE_PLACEMENT_KM`). In
-	# parts of the map the drawn circles are closer together than that - 83.6 km
-	# apart at the xi a 900 d plan reaches, 8.3 km at 450 d - so the band can span
-	# several doors and single out none of them. The panel has to say so instead
-	# of presenting one as the answer.
+	# The placement band is 800 km because the closed form misplaces a circle by
+	# up to 786 km at a lead this planner can dial (`KEYHOLE_PLACEMENT_KM`). Over
+	# stretches of the map the drawn circles are closer together than that, so the
+	# band can span several doors and single out none of them. The panel has to
+	# say so instead of presenting one as the answer.
 	#
-	# The binding test that flies the real 900 d shot finds `doors_in_band` = 1
-	# there (that plan sits where the circles happen to be far apart), so this
-	# branch does not fire on the one flown case and is executed here instead.
+	# This register is no longer hypothetical: `probe_keyhole_placement crowding`
+	# found a dialable 900 d plan (prograde 0.1102 m/s, b = 17 069 km, a clean
+	# miss) with two doors inside the band. It is still executed here on built rows
+	# because a unit check should not need a 3-minute flight to reach its branch,
+	# and because the three-door case above that plan is still only geometry.
 	var crowded_row := {
 		"h": 7, "k": 8, "distance_km": 300.0, "width_km": 25.0, "margin_km": 287.5,
 	}
@@ -646,12 +647,12 @@ func _init() -> void:
 		"doors_in_band": 0,
 	}
 	_check(sim.keyhole_label().begins_with("CLEAR") and not sim.keyhole_alert(),
-		"887 km of margin is outside the 500 km band and still reads CLEAR (%s)"
+		"887 km of margin is outside the 800 km band and still reads CLEAR (%s)"
 		% sim.keyhole_label())
 	# The constant itself, pinned. The gdext binding test mirrors it by hand as
 	# `PLACEMENT_BAND_KM`; if the two drift, this is the side that ships.
-	_check(is_equal_approx(sim.KEYHOLE_PLACEMENT_KM, 500.0),
-		"the placement band is the 500 km eight flown doors measured (%s)"
+	_check(is_equal_approx(sim.KEYHOLE_PLACEMENT_KM, 800.0),
+		"the placement band is the 800 km the flown doors measured (%s)"
 		% sim.KEYHOLE_PLACEMENT_KM)
 	sim.plan_keyhole = saved_keyhole
 

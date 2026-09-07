@@ -370,9 +370,11 @@ fn main() {
         "door" => stage_door(&args),
         "spacing" => stage_spacing(&args),
         "xi_sweep" => stage_xi_sweep(&args),
+        "frame" => stage_frame(&args),
+        "crowding" => stage_crowding(&args),
         other => {
             eprintln!(
-                "unknown stage {other:?}; expected ladder | screen | door | spacing | xi_sweep"
+                "unknown stage {other:?}; expected ladder | screen | door | spacing | xi_sweep | frame | crowding"
             );
             std::process::exit(2);
         }
@@ -1315,5 +1317,781 @@ fn report_shot(label: &str, shot: &KeyholeShot, circle: &ResonantCircle) {
                 None => "no reduction",
             }
         )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 6 — WHY the placement error depends on the lead: the frame the circle
+// is drawn in
+// ---------------------------------------------------------------------------
+//
+// The lead sweep left this open in as many words: "the placement error is now
+// known to depend on the deflection lead, and nothing here says why. Three
+// points on one circle plus five circles at one lead is a measurement, not a
+// model." This stage proposes a model with two terms and tests it.
+//
+// **Term A — the closed form's own flyby error.** Öpik's construction is an
+// instantaneous rotation of `v∞` at Earth's exact heliocentric position. The
+// real flyby takes days and happens at the asteroid's position, not Earth's.
+// That error is a property of the *circle* and of `b`, and has nothing to do
+// with the deflection that delivered the rock there. The five doors flown at
+// the campaign's own lead measure it: +19.26, +2.02, −26.75, −2.23 and
+// +7.25 km, at Δv from 0.034 to 0.217 m/s. **The signs differ**, which is what
+// says it is not a Δv effect.
+//
+// **Term B — the frame.** A resonant circle is a function of the encounter:
+// `c = μ⊕/v∞²`, `θ` (the angle between the incoming asymptote and Earth's
+// velocity) and Earth's own heliocentric state. This probe,
+// `MissionCore::keyhole_readout` and the drawn map all build that frame from
+// the **nominal, undeflected** encounter — and then place the **deflected**
+// b-point on it. A deflection changes all three: the rock arrives a little
+// faster or slower (`δv∞`), from a slightly different direction (`δθ`), and at
+// a different time, so Earth is somewhere else (`δt_CA` — at 30 km/s, an hour
+// of arrival slip is 10⁵ km of Earth motion). All three grow with the impulse,
+// and the impulse grows roughly as 1/lead. So Term B grows as the lead shortens
+// — which is the shape the sweep measured and could not explain.
+//
+// # What is measured, and the decision rule — written before the run
+//
+// For one lead, let `d₀` be the flown point's signed distance from the circle
+// drawn in the **nominal** frame (what the map reports, and what the door
+// campaign published as the placement error) and `d₁` the same point's signed
+// distance from the circle drawn in that flight's **own** frame. Their
+// difference `δd = d₁ − d₀` is Term B, measured rather than modelled.
+//
+// If the model is right then **`d₀ + δd` is the same number at every lead** —
+// that number being Term A, which belongs to the 3:4 circle and not to any
+// plan. Three outcomes:
+//
+//   * `d₀ + δd` constant to within a door width (~25 km) across 4383, 900 and
+//     450 days — the lead dependence is the frame, the mechanism is named, and
+//     the fix (draw the circle in the plan's own frame) is available. It is
+//     **not applied here**: `keyhole_readout` and `keyhole_circles` are bound to
+//     each other by live assertions, and making the frame plan-dependent moves
+//     the drawn circles as the player drags the lead slider. That is a design
+//     decision, not a side effect of an explanation.
+//   * `δd` small at every lead — the frame is *not* the mechanism, the 500 km
+//     band's cause is still unknown, and the next experiment is the matched-ξ
+//     pair (two leads root-found onto the same ξ, doors flown at both), which is
+//     the only thing that separates the lead from the ξ it lands on.
+//   * `δd` large but `d₀ + δd` still spreading — the frame is part of it and
+//     something else is too. Report the residual; do not fit a law to it.
+//
+// The closed-form cross-check on `δd`: for a point at angle `φ` on the circle,
+// moving the centre by `δζ_c` and the radius by `δR` changes the signed distance
+// by `−δR − δζ_c·sin φ`. That is reported beside the exact re-projection, so a
+// large `δd` can be read as *which* of the two circle parameters moved rather
+// than as one opaque number.
+//
+// Term B is also split in two, because the three sub-terms are not equally
+// suspect: `d_geom` rebuilds the frame from the deflected encounter but keeps
+// **Earth's state at the nominal closest approach**, so `d_geom − d₀` is the
+// `δv∞`/`δθ` part and `d₁ − d_geom` is the timing part on its own.
+//
+// ```text
+//   probe_keyhole_placement frame [h k branch] [leads...]   # ~1 flight per lead
+// ```
+
+/// The 3:4 campaign, by lead: `(lead days, Δv to fly, the door centre the door
+/// stage measured there)`.
+///
+/// The Δv is the refined door floor where one was recorded (4383 d and 900 d)
+/// and the `xi_sweep` crossing otherwise. **That distinction matters and is why
+/// the door centre is carried separately rather than read off this flight**: at
+/// a crossing Δv the flown point sits *on* the circle by construction, so its
+/// own `d₀` is ~0 and only `δd` can be read from it, while the recorded door
+/// centre supplies the `d₀` the model has to explain. At the two leads where the
+/// door's own Δv is known both come from the same flight and the two agree by
+/// construction — which is itself the check that reading `δd` at a crossing is
+/// legitimate.
+///
+/// Sources: `door` stage runs of 2026-09-07 (4383, 900, 300 and 200 d) and the `xi_sweep`
+/// crossings of the same session (450 d, 150 d). The 150 d entry has no door —
+/// the return floors 17 411 km out — so it carries `None` and is flown only to
+/// show what the frame is doing where the door has ceased to exist.
+///
+/// **`same_flight` is the honesty flag on the row.** When the Δv is the door's
+/// own floor, `d₀` and `δd` are read from one flight and the row compares like
+/// with like. When it is a crossing Δv they are not: `d₀` is a door centre from a
+/// flight that no longer exists and `δd` comes from a point elsewhere on the
+/// circle. That matters because the frame correction contains `−δζ_c·sin φ`, so
+/// it swings with *where on the circle* it was read — the 450 d row's crossing
+/// sits at ξ = −15 812 km, φ = −102.2°, against door rows at φ ≈ −85°. The
+/// summary reports the spread with and without such rows rather than mixing them
+/// silently.
+const FLOWN_34_BY_LEAD: &[(f64, f64, Option<f64>, bool)] = &[
+    (4383.0, 0.216_548_269_9, Some(19.255e3), true),
+    (900.0, 0.932_165_940_6, Some(210.632e3), true),
+    (450.0, 1.251_9, Some(467.869e3), false),
+    (300.0, 2.879_756_546_8, Some(648.174e3), true),
+    (200.0, 2.478_471_262_1, Some(785.988e3), true),
+    (150.0, 3.223_5, None, false),
+];
+
+fn stage_frame(args: &[String]) {
+    let (_, args) = take_lead(args);
+    let h: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
+    let k: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4);
+    let branch = match args.get(3).map(|s| s.to_lowercase()) {
+        Some(s) if s.starts_with('p') => CircleBranch::Plus,
+        _ => CircleBranch::Minus,
+    };
+    let resonance = Resonance { h, k };
+    let wanted: Vec<f64> = args[4.min(args.len())..]
+        .iter()
+        .filter_map(|s| s.parse::<f64>().ok())
+        .filter(|d| *d > 0.0)
+        .collect();
+
+    // One build. The nominal encounter and its frame belong to the undeflected
+    // rock, so the circle below is the *same* circle at every lead — which is
+    // the whole basis of the comparison.
+    let s = setup(None);
+    let ds = s.scenario.deflection().expect("deflection");
+    let eph = s.scenario.ephemeris().clone();
+    let mu_sun = eph.sun_gm_m3_s2().expect("sun GM");
+    let t_ca0 = ds
+        .nominal_encounter_epoch()
+        .expect("epoch")
+        .expect("an encounter");
+    let (r0_km, v0_km) = eph
+        .state_km_s(EARTH_J2000, SUN_J2000, t_ca0.as_hifitime())
+        .expect("Earth state at the nominal CA");
+    let (r0, v0) = (r0_km * 1e3, v0_km * 1e3);
+
+    let Some(c0) = s.frame.resonant_circle(resonance) else {
+        eprintln!("{resonance} has no circle in the nominal frame");
+        std::process::exit(1);
+    };
+    let aim = aim_at_resonance(&s.frame, resonance, s.xi, branch).unwrap_or_else(|e| {
+        eprintln!("cannot aim at {resonance}: {e}");
+        std::process::exit(1);
+    });
+    let sign = if aim.target.y < 0.0 { -1.0 } else { 1.0 };
+    log(&format!(
+        "\n{resonance} {branch:?} in the NOMINAL frame: centre ζ {:.3} km, radius {:.3} km\n\
+         nominal encounter: v∞ {:.3} m/s, θ {:.6}°, CA at {}\n\
+         {} nudge; one flight per lead, no doors flown and no refinement",
+        c0.center_zeta / 1e3,
+        c0.radius / 1e3,
+        s.frame.v_inf,
+        s.frame.theta().to_degrees(),
+        t_ca0.as_hifitime(),
+        if sign < 0.0 { "retrograde" } else { "prograde" }
+    ));
+
+    let impact = s.scenario.impact_epoch();
+    let mut rows: Vec<(f64, f64, f64, f64, f64, f64, bool)> = Vec::new();
+    let t0 = Instant::now();
+
+    for &(lead_days, dv, door_centre, same_flight) in FLOWN_34_BY_LEAD {
+        if !wanted.is_empty() && !wanted.iter().any(|w| (w - lead_days).abs() < 0.5) {
+            continue;
+        }
+        // The campaign's own lead is `epoch0()` **exactly**, not `impact − 4383 d`.
+        // The two differ by hours, and at this leverage (b is very nearly
+        // proportional to the lead) hours are tens of kilometres — the same size
+        // as the 19.3 km this row exists to explain.
+        let epoch = if (lead_days - s.default_lead_days).abs() < 1.0 {
+            s.scenario.epoch0()
+        } else {
+            impact.shifted_by_seconds(-lead_days * 86_400.0)
+        };
+        let Ok(seed) = ds.nominal().state_at(epoch) else {
+            log(&format!(
+                "lead {lead_days:8.1} d: the nominal has no state here"
+            ));
+            continue;
+        };
+        let Some(dir) = along_track_unit(seed).map(|u| u * sign) else {
+            log(&format!("lead {lead_days:8.1} d: no along-track heading"));
+            continue;
+        };
+        let aiming = KeyholeAiming {
+            frame: &s.frame,
+            earth_radius_m: s.nominal.earth_radius,
+            deflection_epoch: epoch,
+            direction: dir,
+        };
+        let opts = KeyholeShotOptions::default().widened_for_aim(aim.impact_parameter_m);
+        let shot = match fly_keyhole_shot(&s.scenario, &ds, aiming, dv, resonance, &opts) {
+            Ok(shot) => shot,
+            Err(e) => {
+                log(&format!("lead {lead_days:8.1} d: {e}"));
+                continue;
+            }
+        };
+
+        // Earth's state at *this flight's own* closest approach.
+        let (r1_km, v1_km) = eph
+            .state_km_s(EARTH_J2000, SUN_J2000, shot.first_epoch.as_hifitime())
+            .expect("Earth state at the deflected CA");
+        let (r1, v1) = (r1_km * 1e3, v1_km * 1e3);
+        let dt_ca = shot.first_epoch.tdb_seconds_past_j2000() - t_ca0.tdb_seconds_past_j2000();
+
+        // Three frames: the map's, this flight's geometry on the map's clock, and
+        // this flight's own.
+        let f_geom = OpikFrame::new(&shot.encounter, r0, v0, mu_sun).expect("geometry frame");
+        let f_full = OpikFrame::new(&shot.encounter, r1, v1, mu_sun).expect("own frame");
+        let (Some(c_geom), Some(c_full)) = (
+            f_geom.resonant_circle(resonance),
+            f_full.resonant_circle(resonance),
+        ) else {
+            log(&format!(
+                "lead {lead_days:8.1} d: {resonance} has no circle in the rebuilt frame"
+            ));
+            continue;
+        };
+
+        let p0 = s.frame.project(&shot.encounter.b_vector);
+        let d0 = c0.signed_distance(p0);
+        let d_geom = c_geom.signed_distance(f_geom.project(&shot.encounter.b_vector));
+        let d_full = c_full.signed_distance(f_full.project(&shot.encounter.b_vector));
+
+        let phi = (p0.y - c0.center_zeta).atan2(p0.x);
+        let d_zeta_c = c_full.center_zeta - c0.center_zeta;
+        let d_radius = c_full.radius - c0.radius;
+        let predicted = -d_radius - d_zeta_c * phi.sin();
+
+        // How far out of the nominal b-plane the deflected b-vector has tipped —
+        // the part the map's projection silently drops.
+        let out_of_plane = shot.encounter.b_vector.dot(&s.frame.eta_hat);
+
+        log(&format!(
+            "\n--- lead {lead_days:.0} d, Δv {dv:.10} m/s {} ---\n\
+             flight: b {:.1} km, point (ξ {:.1}, ζ {:.1}) km, φ {:.3}°, return {}\n\
+             encounter shift: δv∞ {:+.4} m/s ({:+.3e} rel), δθ {:+.3e}°, δt_CA {:+.1} s \
+             ({:+.2} h → Earth moved {:.0} km), b out of the nominal plane {:+.1} km\n\
+             circle shift (own frame vs map's): δζ_c {:+.3} km, δR {:+.3} km\n\
+             signed distance: map's frame d₀ {:+.3} km | geometry only {:+.3} km \
+             ({:+.3} km) | own frame d₁ {:+.3} km (δd {:+.3} km)\n\
+             closed form −δR − δζ_c·sin φ = {:+.3} km against that exact δd",
+            if sign < 0.0 { "retrograde" } else { "prograde" },
+            shot.encounter.impact_parameter / 1e3,
+            p0.x / 1e3,
+            p0.y / 1e3,
+            phi.to_degrees(),
+            match shot.flown_return.as_ref() {
+                None => "none in the gate".to_string(),
+                Some(r) => format!(
+                    "{:.1} km ({})",
+                    r.distance_m / 1e3,
+                    match r.encounter.as_ref() {
+                        Some(e) if e.is_hit() => "HIT",
+                        Some(_) => "miss",
+                        None => "no reduction",
+                    }
+                ),
+            },
+            f_full.v_inf - s.frame.v_inf,
+            (f_full.v_inf - s.frame.v_inf) / s.frame.v_inf,
+            (f_full.theta() - s.frame.theta()).to_degrees(),
+            dt_ca,
+            dt_ca / 3600.0,
+            dt_ca.abs() * v0.norm() / 1e3,
+            out_of_plane / 1e3,
+            d_zeta_c / 1e3,
+            d_radius / 1e3,
+            d0 / 1e3,
+            d_geom / 1e3,
+            (d_geom - d0) / 1e3,
+            d_full / 1e3,
+            (d_full - d0) / 1e3,
+            predicted / 1e3,
+        ));
+
+        // Term B is read at whatever point was flown; Term A needs the door
+        // centre, which at a crossing Δv is not this flight's own `d₀`.
+        let delta_d = d_full - d0;
+        match door_centre {
+            Some(centre) => rows.push((
+                lead_days,
+                centre,
+                delta_d,
+                centre + delta_d,
+                d_geom - d0,
+                d_full - d_geom,
+                same_flight,
+            )),
+            None => log(
+                "  no door was ever found at this lead, so there is no d₀ to correct — the \
+                 frame shift above is reported for scale only.",
+            ),
+        }
+    }
+
+    if rows.is_empty() {
+        log("\nno lead produced a usable row.");
+        return;
+    }
+    log(&format!(
+        "\n=== {resonance} {branch:?}: IS THE LEAD DEPENDENCE THE FRAME? === \
+         ({} rows in {:.0} s)\n\n\
+         | lead | door centre d₀ | frame term δd | d₀ + δd (Term A) | of which v∞/θ | \
+         of which timing | d₀ and δd from |\n|---|---|---|---|---|---|---|",
+        rows.len(),
+        t0.elapsed().as_secs_f64()
+    ));
+    for (lead, d0, dd, term_a, geom, timing, same) in &rows {
+        log(&format!(
+            "| {lead:.0} d | {:+.3} km | {:+.3} km | **{:+.3} km** | {:+.3} km | {:+.3} km | {} |",
+            d0 / 1e3,
+            dd / 1e3,
+            term_a / 1e3,
+            geom / 1e3,
+            timing / 1e3,
+            if *same {
+                "one flight"
+            } else {
+                "**two flights**"
+            }
+        ));
+    }
+    let spread = |v: Vec<f64>| {
+        v.iter().cloned().fold(f64::MIN, f64::max) - v.iter().cloned().fold(f64::MAX, f64::min)
+    };
+    let clean: Vec<&(f64, f64, f64, f64, f64, f64, bool)> = rows.iter().filter(|r| r.6).collect();
+    let spread_before = spread(rows.iter().map(|r| r.1).collect());
+    let spread_after = spread(rows.iter().map(|r| r.3).collect());
+    let clean_before = spread(clean.iter().map(|r| r.1).collect());
+    let clean_after = spread(clean.iter().map(|r| r.3).collect());
+    log(&format!(
+        "\n                                                    all {} rows | the {} \
+         same-flight rows\n\
+         spread of the published placement error :   {:9.1} km | {:9.1} km\n\
+         spread once each flight's own frame is used:{:9.1} km | {:9.1} km\n\
+         the door this is measured against is ~{:.1} km wide.",
+        rows.len(),
+        clean.len(),
+        spread_before / 1e3,
+        clean_before / 1e3,
+        spread_after / 1e3,
+        clean_after / 1e3,
+        s.frame.keyhole_at(&c0, aim.target).width / 1e3
+    ));
+    log(
+        "\nRead the same-flight column, and read the middle column of the table rather than \
+         any ratio: the claim under test is that `d₀ + δd` is ONE number belonging to this \
+         circle. A spread that stays above a door width means the frame is part of the \
+         mechanism and something else is too — and the same-flight column is the one that \
+         says so without a mixed-provenance row to argue about.",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 7 — can the "several doors in the band" register fire on a real flight?
+// ---------------------------------------------------------------------------
+//
+// `KEYHOLE_PLACEMENT_KM` grew to 500 km and the panel gained a third register:
+// when more than one door falls inside the band it declines to name a
+// resonance. That register ships with a unit test behind it and **has never
+// been observed on real physics**. The one plan flown to a return reports
+// `doors_in_band = 1`, and the 83.6 km figure that motivated the register is the
+// tightest pair *anywhere* in that ξ's census — at some other impact parameter
+// entirely, not where that plan sits. The constant's own doc now says the
+// crowded case is "inferred from closed-form geometry and has not yet fired on
+// a flown plan". This stage goes looking for one.
+//
+// # Why a coarse Δv sweep cannot find it, and what this does instead
+//
+// The crowded windows are the width of the band either side of a pair of
+// circles — of order a thousand kilometres of `b` — while a Δv ladder samples
+// `b` in steps of tens of thousands. Sweeping and hoping to land in one is a
+// lottery. So the search is in three parts:
+//
+//   1. **fly a coarse curve** — the plan's `(ξ, ζ)` at ~40 impulses per
+//      direction, real flights, no returns and no interpolation of physics;
+//   2. **scan it densely in closed form** — interpolate that curve and count
+//      `doors_within_band` at tens of thousands of points along it, which costs
+//      nothing and finds every window the curve passes through;
+//   3. **fly the windows** — a real flight at each candidate Δv, and a bisection
+//      toward the window's own `b` if the first shot lands outside it. Only a
+//      flown point counts. The interpolation picks *where to look*; it is never
+//      the evidence.
+//
+// The census is the **readout's**, not this probe's survey census: 2..=7 years,
+// `k ≤ 24`, `b ≤ 60 × capture radius`. A window among circles the frontend does
+// not draw would prove nothing about the frontend's register.
+//
+// **And the curve is gated on the deflected pass being a miss.** The first run of
+// this stage reported the register firing at three leads — and every one of the
+// plans it found sat at `b` between 4 593 and 9 526 km against an 11 311 km
+// capture radius, i.e. **still an impact**. Circles crowd near Earth because that
+// is where every resonance's circle has to pass, so an ungated search finds its
+// answer there every time and the answer is worthless: a plan that has not yet
+// turned the hit into a miss has no keyhole question to get wrong. Only points
+// with `!enc.is_hit()` are counted, and the rejected ones are reported rather
+// than silently dropped — the count of them is the reason this gate exists.
+//
+// # The decision rule, written before the run
+//
+//   * a real flight at a dialable `(lead, Δv)` reports **two or more doors in
+//     the band** — the register fires on real physics, and that plan becomes a
+//     binding test;
+//   * the closed-form scan finds windows but no flight lands inside one — the
+//     window is real and narrower than the search can steer to; report it as
+//     unconfirmed with the residual `b` and do not upgrade the doc's claim;
+//   * no window anywhere on the dialable curve at any lead swept — the register
+//     is unreachable on this rock, "inferred from geometry" stands, and now
+//     there is a measured search behind that sentence instead of a guess.
+//
+// # What this can and cannot claim
+//
+// A flight that reports two doors in the band says **the panel cannot name one
+// resonance there**. It does *not* say two impact keyholes exist at that point:
+// that needs two returns flown to Earth, two edge bisections, ~25 minutes per
+// door, and it is a different question. The register is about what the map is
+// entitled to assert, and that is what is measured here.
+//
+// ```text
+//   probe_keyhole_placement crowding [lead=<days>] [max_years] [band=<km>]
+// ```
+
+/// Δv span the coarse curve covers, m/s, and its resolution.
+///
+/// The low end is `sim.gd`'s `DV_MIN`; the high end is past where the deflected
+/// pass leaves the shipping 5e8 m scan gate at every lead swept, which the sweep
+/// reports rather than assumes (`DV_MAX` is 300, so the gate binds long before
+/// the slider does). 40 rungs over that span is ~9 % in Δv per rung, which is
+/// what makes the log interpolation between them good to the ~1 % of `b` needed
+/// to steer into a thousand-kilometre window.
+const CROWD_DV_LO: f64 = 0.1;
+const CROWD_DV_HI: f64 = 4.0;
+const CROWD_RUNGS: usize = 40;
+/// Real flights spent per candidate window in stage 3. Four is enough to cross a
+/// window whose ends the interpolation placed to ~1 % of `b`, and the whole point
+/// is that these are flights: a window this many misses is reported as
+/// unconfirmed rather than argued into an answer.
+const CROWD_CONFIRM_SAMPLES: usize = 4;
+/// Points of the interpolated curve the closed-form scan visits per direction.
+/// Free — no flights — so this is set by the narrowest window worth finding
+/// rather than by cost.
+const CROWD_SCAN_POINTS: usize = 40_000;
+
+/// One flown rung of the plan curve.
+#[derive(Clone, Copy)]
+struct CurvePoint {
+    dv: f64,
+    point: nalgebra::Vector2<f64>,
+    b_m: f64,
+    /// The deflected pass misses Earth. A crowded point that still impacts is not
+    /// an answer to this question — see the stage doc.
+    is_miss: bool,
+}
+
+fn stage_crowding(args: &[String]) {
+    let (lead, args) = take_lead(args);
+    let max_years: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(7);
+    let band_km: f64 = args
+        .iter()
+        .filter_map(|a| a.strip_prefix("band=").and_then(|s| s.parse::<f64>().ok()))
+        .next()
+        .unwrap_or(500.0);
+    let band = band_km * 1e3;
+
+    let s = setup(Some(lead.unwrap_or(900.0)));
+    let ds = s.scenario.deflection().expect("deflection");
+    // The frontend's census, exactly: `MissionCore::keyhole_readout` calls
+    // `resonant_circles(2..=max_years, 24, 60 × capture_radius)`.
+    let circles = s.frame.resonant_circles(
+        2..=max_years.max(2),
+        MAX_REVOLUTIONS,
+        B_MAX_CAPTURE_RADII * s.nominal.capture_radius,
+    );
+    log(&format!(
+        "\n{} circles in the readout's own census (2..={} yr, k ≤ {}, b ≤ {:.0} km); \
+         band {:.0} km\nlead {:.1} d, Δv {:.2} .. {:.2} m/s in {} rungs per direction",
+        circles.len(),
+        max_years.max(2),
+        MAX_REVOLUTIONS,
+        B_MAX_CAPTURE_RADII * s.nominal.capture_radius / 1e3,
+        band_km,
+        s.lead_days,
+        CROWD_DV_LO,
+        CROWD_DV_HI,
+        CROWD_RUNGS
+    ));
+
+    let seed = ds
+        .nominal()
+        .state_at(s.deflection_epoch)
+        .expect("nominal state at the impulse epoch");
+    let prograde = along_track_unit(seed).expect("along-track");
+    let t0 = Instant::now();
+    let mut flights = 0usize;
+
+    // One flight: impulse, flyby, b-plane point. `None` is the scan gate.
+    let fly = |dv_signed: f64| -> Option<CurvePoint> {
+        let dir = prograde * dv_signed.signum();
+        match ds.evaluate(s.deflection_epoch, dir * dv_signed.abs()) {
+            Ok(Some(enc)) => Some(CurvePoint {
+                dv: dv_signed,
+                point: s.frame.project(&enc.b_vector),
+                b_m: enc.impact_parameter,
+                is_miss: !enc.is_hit(),
+            }),
+            _ => None,
+        }
+    };
+    let count_at = |p: nalgebra::Vector2<f64>| s.frame.doors_within_band(&circles, p, band);
+    // The **second** smallest margin in the census — the number that decides
+    // whether a band can name one resonance, and the one a negative result has to
+    // quote. `f64::INFINITY` when the census has fewer than two circles.
+    let runner_up = |p: nalgebra::Vector2<f64>| -> f64 {
+        let mut m: Vec<f64> = s
+            .frame
+            .keyhole_proximities(&circles, p)
+            .into_iter()
+            .map(|k| k.margin())
+            .collect();
+        m.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        m.get(1).copied().unwrap_or(f64::INFINITY)
+    };
+    let rows_at = |p: nalgebra::Vector2<f64>| -> Vec<(String, f64, f64, f64)> {
+        let mut v: Vec<(String, f64, f64, f64)> = s
+            .frame
+            .keyhole_proximities(&circles, p)
+            .into_iter()
+            .map(|k| {
+                (
+                    format!("{}:{}", k.circle.resonance.h, k.circle.resonance.k),
+                    k.signed_distance,
+                    k.keyhole.width,
+                    k.margin(),
+                )
+            })
+            .collect();
+        v.sort_by(|a, b| a.3.partial_cmp(&b.3).expect("finite"));
+        v
+    };
+
+    let mut best_flown: Option<(CurvePoint, usize)> = None;
+    let mut windows: Vec<(f64, f64, f64, usize)> = Vec::new();
+    // The nearest this lead's curve ever comes to crowded, over misses only:
+    // `(second-smallest margin, Δv, point)`. A "not reachable" that does not say
+    // by how much is not a measurement.
+    let mut closest = (f64::INFINITY, f64::NAN, nalgebra::Vector2::zeros());
+
+    for sign in [-1.0_f64, 1.0] {
+        // --- 1. the coarse curve, flown --------------------------------------
+        let mut curve: Vec<CurvePoint> = Vec::new();
+        for i in 0..CROWD_RUNGS {
+            let t = i as f64 / (CROWD_RUNGS - 1) as f64;
+            let dv = CROWD_DV_LO * (CROWD_DV_HI / CROWD_DV_LO).powf(t);
+            flights += 1;
+            match fly(sign * dv) {
+                Some(p) => curve.push(p),
+                None => {
+                    log(&format!(
+                        "  {} curve: left the 5e8 m scan gate at Δv {dv:.3} m/s after {} rungs",
+                        if sign < 0.0 { "retrograde" } else { "prograde" },
+                        curve.len()
+                    ));
+                    break;
+                }
+            }
+        }
+        if curve.len() < 2 {
+            continue;
+        }
+        let impacting = curve.iter().filter(|p| !p.is_miss).count();
+        let flown_counts: Vec<usize> = curve
+            .iter()
+            .map(|p| if p.is_miss { count_at(p.point) } else { 0 })
+            .collect();
+        for p in curve.iter().filter(|p| p.is_miss) {
+            let r = runner_up(p.point);
+            if r < closest.0 {
+                closest = (r, p.dv, p.point);
+            }
+        }
+        log(&format!(
+            "  {} curve: {} rungs flown ({impacting} still impacting, not counted), \
+             b {:.0} .. {:.0} km, ξ {:.0} .. {:.0} km; doors in band at the rungs \
+             themselves: max {}",
+            if sign < 0.0 { "retrograde" } else { "prograde" },
+            curve.len(),
+            curve.first().expect("nonempty").b_m / 1e3,
+            curve.last().expect("nonempty").b_m / 1e3,
+            curve.first().expect("nonempty").point.x / 1e3,
+            curve.last().expect("nonempty").point.x / 1e3,
+            flown_counts.iter().max().copied().unwrap_or(0)
+        ));
+        for (p, c) in curve.iter().zip(&flown_counts) {
+            if *c >= 2 && best_flown.as_ref().is_none_or(|(_, bc)| c > bc) {
+                best_flown = Some((*p, *c));
+            }
+        }
+
+        // --- 2. the free scan between the rungs ------------------------------
+        //
+        // Linear in log Δv between the two bracketing flown rungs. The curve is
+        // smooth and the rungs are ~9 % apart, so this is an interpolation of
+        // *flown* points and never an extrapolation — but it is still only a
+        // pointer to where to fly next, never evidence.
+        // `None` where either bracketing rung still impacts: the miss/impact
+        // boundary is a real edge of the interpolation's validity, not a place to
+        // average across.
+        let at = |dv_abs: f64| -> Option<nalgebra::Vector2<f64>> {
+            let i = curve
+                .partition_point(|r| r.dv.abs() < dv_abs)
+                .clamp(1, curve.len() - 1);
+            let (lo, hi) = (curve[i - 1], curve[i]);
+            if !(lo.is_miss && hi.is_miss) {
+                return None;
+            }
+            let t = (dv_abs.ln() - lo.dv.abs().ln()) / (hi.dv.abs().ln() - lo.dv.abs().ln());
+            Some(lo.point + t * (hi.point - lo.point))
+        };
+        let lo_dv = curve.first().expect("nonempty").dv.abs();
+        let hi_dv = curve.last().expect("nonempty").dv.abs();
+        let mut run: Option<(f64, f64, usize)> = None;
+        for i in 0..CROWD_SCAN_POINTS {
+            let t = i as f64 / (CROWD_SCAN_POINTS - 1) as f64;
+            let dv = lo_dv * (hi_dv / lo_dv).powf(t);
+            let Some(p) = at(dv) else {
+                if let Some(r) = run.take() {
+                    windows.push((sign * r.0, sign * r.1, 0.0, r.2));
+                }
+                continue;
+            };
+            let c = count_at(p);
+            let r = runner_up(p);
+            if r < closest.0 {
+                closest = (r, sign * dv, p);
+            }
+            match (&mut run, c >= 2) {
+                (None, true) => run = Some((dv, dv, c)),
+                (Some(r), true) => {
+                    r.1 = dv;
+                    r.2 = r.2.max(c);
+                }
+                (Some(r), false) => {
+                    windows.push((sign * r.0, sign * r.1, 0.0, r.2));
+                    run = None;
+                }
+                (None, false) => {}
+            }
+        }
+        if let Some(r) = run {
+            windows.push((sign * r.0, sign * r.1, 0.0, r.2));
+        }
+    }
+
+    log(&format!(
+        "\n{flights} flights in {:.0} s. Closed-form scan found {} window(s) where the \
+         interpolated curve has ≥ 2 doors in the band.",
+        t0.elapsed().as_secs_f64(),
+        windows.len()
+    ));
+    // Widest first: a wide window is the one a real flight can actually be
+    // steered into, and the narrow ones are where the interpolation is least
+    // trustworthy anyway.
+    windows.sort_by(|a, b| {
+        ((b.1 - b.0).abs())
+            .partial_cmp(&(a.1 - a.0).abs())
+            .expect("finite")
+    });
+    for (lo, hi, _, c) in windows.iter().take(8) {
+        log(&format!(
+            "  Δv {:+.6} .. {:+.6} m/s  (width {:.2e} m/s), up to {c} doors",
+            lo,
+            hi,
+            (hi - lo).abs()
+        ));
+    }
+
+    // --- 3. fly the windows --------------------------------------------------
+    //
+    // The interpolation says *where* to look and is never the evidence, so each
+    // candidate window is sampled at evenly spaced interior points and every one
+    // of them is a real flight. Spread across the window rather than bisected
+    // toward its middle: the real curve is offset from the interpolated one by an
+    // unknown amount, so there is no measured quantity to bisect on, and pretending
+    // otherwise would be a search that reports a bracket as an answer.
+    let mut confirmed: Option<(f64, CurvePoint, usize)> = None;
+    'windows: for (lo, hi, _, _) in windows.iter().take(4) {
+        for i in 1..=CROWD_CONFIRM_SAMPLES {
+            let t = i as f64 / (CROWD_CONFIRM_SAMPLES + 1) as f64;
+            let dv = lo + t * (hi - lo);
+            flights += 1;
+            let Some(p) = fly(dv) else {
+                log(&format!("  candidate Δv {dv:+.6}: left the scan gate"));
+                continue;
+            };
+            let c = if p.is_miss { count_at(p.point) } else { 0 };
+            log(&format!(
+                "  candidate Δv {dv:+.10} m/s → b {:.1} km, (ξ {:.1}, ζ {:.1}) km, {}, \
+                 doors in the {band_km:.0} km band: {c}",
+                p.b_m / 1e3,
+                p.point.x / 1e3,
+                p.point.y / 1e3,
+                if p.is_miss {
+                    "a miss"
+                } else {
+                    "STILL AN IMPACT"
+                }
+            ));
+            if c >= 2 {
+                confirmed = Some((dv, p, c));
+                break 'windows;
+            }
+        }
+    }
+
+    log(&format!(
+        "\n=== CROWDED REGISTER, LEAD {:.0} d === ({flights} flights in {:.0} s)",
+        s.lead_days,
+        t0.elapsed().as_secs_f64()
+    ));
+    match confirmed.or(best_flown.map(|(p, c)| (p.dv, p, c))) {
+        Some((dv, p, c)) => {
+            log(&format!(
+                "FIRES on a flown plan: lead {:.0} d, Δv {:+.10} m/s → b {:.1} km at \
+                 (ξ {:.1}, ζ {:.1}) km, {c} doors inside the {band_km:.0} km band.\n\
+                 The panel cannot name one resonance here. This does NOT say {c} impact \
+                 keyholes exist at that point — that needs a return flown and both edges \
+                 bisected per door, which this stage does not do.\n\
+                 The rows, by margin:",
+                s.lead_days,
+                dv,
+                p.b_m / 1e3,
+                p.point.x / 1e3,
+                p.point.y / 1e3
+            ));
+            log(&format!(
+                "    (b {:.1} km against a {:.1} km capture radius, so this really is a \
+                 miss; the runner-up margin's best anywhere on this curve is {:.1} km)",
+                p.b_m / 1e3,
+                s.nominal.capture_radius / 1e3,
+                closest.0 / 1e3
+            ));
+            for (name, d, w, m) in rows_at(p.point).iter().take(6) {
+                log(&format!(
+                    "    {name:>6}  d {:+10.1} km  width {:8.3} km  margin {:+10.1} km{}",
+                    d / 1e3,
+                    w / 1e3,
+                    m / 1e3,
+                    if *m <= band { "  ← in the band" } else { "" }
+                ));
+            }
+        }
+        None if windows.is_empty() => log(&format!(
+            "NOT REACHABLE at this lead: no point of the dialable curve that is a MISS, \
+             flown or interpolated, has two doors inside the band.\n\
+             How close it came: the runner-up door's smallest margin anywhere on the \
+             curve is {:.1} km, at Δv {:+.6} m/s, (ξ {:.1}, ζ {:.1}) km — so a band of \
+             {:.0} km would have been needed here against the {band_km:.0} km asked for.",
+            closest.0 / 1e3,
+            closest.1,
+            closest.2.x / 1e3,
+            closest.2.y / 1e3,
+            closest.0 / 1e3
+        )),
+        None => log(
+            "UNCONFIRMED: the closed-form scan finds windows on this curve but no flight \
+             landed inside one. The window is real and narrower than this search can steer \
+             to; the doc's claim must not be upgraded on it.",
+        ),
     }
 }

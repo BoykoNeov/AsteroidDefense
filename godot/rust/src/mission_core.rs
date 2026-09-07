@@ -237,16 +237,17 @@ impl KeyholeCircleRow {
 /// `h`-year return that is hours of arrival slip, ~10^6 km of Earth's motion,
 /// against a keyhole tens of kilometres wide. Measured on flown doors, the
 /// circle these kilometres are counted from is itself misplaced by 2 to 27 km at
-/// the campaign's 12 yr lead and by **211 to 468 km** at the leads the planner
+/// the campaign's 12 yr lead and by **211 to 786 km** at the leads the planner
 /// can dial. Only a flown return says what happens.
 ///
 /// **Which of these numbers to rank by** changed on 2026-09-07, and this doc used
 /// to give the wrong answer: it said `widths_away` was "the number that survives"
 /// and the kilometres were only for reading beside the drawn circle. Five flown
 /// doors (`probe_keyhole_placement`) say otherwise — the width is trustworthy to
-/// within 1.44×, but the placement error is an *additive* 2.0 to 26.8 km at that
-/// lead (and up to 467.9 km at a dialable one) that a ratio divides away at a
-/// wide door and inflates at a narrow one. So `margin_km`
+/// within 2.11× over the ten doors now flown, but the placement error is an
+/// *additive* 2.0 to 26.8 km at that lead (and up to 786.0 km at a dialable one)
+/// that a ratio divides away at a wide door and inflates at a narrow one. So
+/// `margin_km`
 /// (kilometres outside this door) is the risk number, `widths_away` describes one
 /// circle rather than ordering two, and the kilometres were never merely
 /// decorative.
@@ -5731,7 +5732,7 @@ mod tests {
     /// decision. Kept in step by hand — `test_orrery.gd` is the test that runs
     /// against the real constant, so a drift between the two shows up there as a
     /// changed verdict rather than here as a silent pass.
-    const PLACEMENT_BAND_KM: f64 = 500.0;
+    const PLACEMENT_BAND_KM: f64 = 800.0;
 
     /// Kernel-gated. **The plan a player can dial that returns the rock to Earth
     /// while the old band called it CLEAR.**
@@ -5860,6 +5861,185 @@ mod tests {
              at least the door it alerted on; the readout counts {}",
             r.doors_in_band
         );
+    }
+
+    /// Kernel-gated. **The same door one lead further down, where the 500 km band
+    /// would have called it CLEAR in turn.**
+    ///
+    /// `probe_keyhole_placement door 3 4 minus lead=300` flew this impulse to a
+    /// resonant return that hits Earth (894 km from Earth's centre at the floor)
+    /// and bisected both edges of its door, which graze the return's own capture
+    /// disc at 6 287.5 and 6 274.1 km against `R⊕` = 6 378 km. The door's centre
+    /// is **+648.2 km** from the 3:4 circle, 27.5 km wide.
+    ///
+    /// Two things that number settles, and they are why this is a test and not a
+    /// row in a probe log.
+    ///
+    /// **The band had to move again.** 300 days is dialable (`LEAD_MIN` = 30),
+    /// and 648 km is outside the 500 km band the previous session shipped. So the
+    /// same failure the 900 d test pins — a plan the map calls CLEAR that flies
+    /// the rock back into Earth — recurred one lead down, at a constant that had
+    /// just been raised 5× to prevent it. The **200 d** door is further out again
+    /// at **+786.0 km**, which is what set `KEYHOLE_PLACEMENT_KM` = 800, and this
+    /// test is what stops it drifting back.
+    ///
+    /// **And it is not the impulse.** The 200 d door floors at a *smaller* Δv than
+    /// the 300 d one (2.4785 against 2.8798 m/s — the Δv a circle costs is not
+    /// monotone in the lead) and sits *further* from the circle. Impulse down,
+    /// error up.
+    ///
+    /// **It is not where on the circle the plan sits.** This shot lands at
+    /// ξ = +5531 km; the 12 yr shot, whose door centre is +19.3 km, lands at
+    /// ξ = +6103 km. That is 572 km apart on a circle of radius 74 855 km —
+    /// **0.48° of arc** — with a 34× difference in how wrong the map is. Every
+    /// earlier point had the lead and the position on the circle moving together;
+    /// this pair separates them, and the position loses.
+    #[test]
+    fn the_placement_error_follows_the_lead_and_not_the_place_on_the_circle() {
+        if !have_kernels() {
+            eprintln!("skipping the_placement_error_follows_the_lead: no DE kernel");
+            return;
+        }
+        let mut mc = MissionCore::load().expect("load kernels");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+
+        // The two shots, both on the 3:4 Minus branch of the same circle: the
+        // campaign's own 12 yr lead (not dialable) and 300 days (dialable).
+        let long_lead_s = mc.impact_tdb_seconds() - mc.epoch0_tdb_seconds();
+        let mut flown = Vec::new();
+        for (label, lead_s, dv) in [
+            ("4383 d", long_lead_s, -0.216_548_269_9),
+            ("300 d", 300.0 * 86_400.0, -2.879_756_546_8),
+            ("200 d", 200.0 * 86_400.0, -2.478_471_262_1),
+        ] {
+            mc.set_plan(lead_s, dv).expect("the plan solves");
+            let r = mc
+                .keyhole_readout(7, PLACEMENT_BAND_KM)
+                .expect("a readout for a plan with a b-point");
+            // The 3:4 by name out of the readout's own census — never whichever
+            // row a ranking returned, because this is a flown measurement that
+            // belongs to that circle.
+            let f = mc.opik.as_ref().expect("frame");
+            let p = f.project(
+                &mc.plan
+                    .as_ref()
+                    .expect("plan")
+                    .encounter
+                    .expect("encounter")
+                    .b_vector,
+            );
+            let circles = f.resonant_circles(2..=7, 24, 60.0 * f.capture_radius);
+            let three_four = f
+                .keyhole_proximities(&circles, p)
+                .into_iter()
+                .find(|k| k.circle.resonance.h == 3 && k.circle.resonance.k == 4)
+                .expect("the 3:4 circle is in the readout's own census");
+            println!(
+                "{label}: b {:.0} km at (xi {:.0}, zeta {:.0}); 3:4 d {:+.1} km, width \
+                 {:.1} km, margin {:.1} km; doors in a {PLACEMENT_BAND_KM:.0} km band: {}",
+                r.b_km,
+                r.plan_point_km.0,
+                r.plan_point_km.1,
+                three_four.signed_distance / M_PER_KM,
+                three_four.keyhole.width / M_PER_KM,
+                three_four.margin() / M_PER_KM,
+                r.doors_in_band
+            );
+            flown.push((
+                label,
+                p.x / M_PER_KM,
+                three_four.signed_distance / M_PER_KM,
+                three_four.margin() / M_PER_KM,
+                r.doors_in_band,
+            ));
+        }
+        let (long, short, shortest) = (&flown[0], &flown[1], &flown[2]);
+
+        // The probe's two door centres, reproduced. Wide bands because the
+        // binding re-solves each plan rather than replaying the probe's
+        // trajectory; what is pinned is the order of magnitude, not the digits.
+        assert!(
+            (10.0..30.0).contains(&long.2),
+            "the 12 yr shot sits {:.1} km from the 3:4 circle; the probe measured +19.3 km",
+            long.2
+        );
+        assert!(
+            (560.0..740.0).contains(&short.2),
+            "the 300 d shot sits {:.1} km from the 3:4 circle; the probe measured +648.2 km \
+             and bisected the door's edges at +634.4 and +661.9 km. Outside this band the \
+             binding and the probe are no longer flying the same shot",
+            short.2
+        );
+
+        // Same place on the circle. This is the load-bearing comparison: without
+        // it the pair is just two more points with the lead and the position
+        // confounded, which is what every earlier measurement was.
+        let arc_km = (short.1 - long.1).abs();
+        assert!(
+            arc_km < 1200.0,
+            "the two shots must land on nearly the same part of the 3:4 circle for the \
+             comparison to say anything: xi {:.0} km vs {:.0} km is {arc_km:.0} km apart on \
+             a 74 855 km circle. Past this they are two different places and the position \
+             on the circle is a live explanation again",
+            long.1,
+            short.1
+        );
+        assert!(
+            short.2 > 10.0 * long.2,
+            "the 300 d shot is {:.1} km out and the 12 yr shot {:.1} km, {:.1}x apart at the \
+             same place on the same circle. If that ratio has collapsed, the placement error \
+             does not track the lead after all and KEYHOLE_PLACEMENT_KM's doc is wrong",
+            short.2,
+            long.2,
+            short.2 / long.2
+        );
+
+        // And the impulse, which is the other thing a shorter lead forces and the
+        // other candidate this pins out. The 200 d door needs a **smaller** nudge
+        // than the 300 d one — the Δv a circle costs is not monotone in the lead —
+        // and it is further from the circle. Impulse down, error up.
+        //
+        // On its own this pair does not settle it: the 200 d shot lands at
+        // ξ = −21 412 km, so it is not at the same place on the circle either. It is
+        // decisive only *after* the assertion above, which has already shown the
+        // error is not a function of position alone. What survives both is that of
+        // lead, Δv, ξ and the angle round the circle, **only the lead orders all the
+        // flown doors** — the other three are each non-monotone somewhere.
+        assert!(
+            2.478_471_262_1_f64 < 2.879_756_546_8_f64 && shortest.2 > short.2,
+            "the 200 d door is flown at a smaller Δv than the 300 d one and must still \
+             sit further out: {:.1} km against {:.1} km. If that has reversed, the \
+             placement error tracks the impulse after all and KEYHOLE_PLACEMENT_KM's \
+             doc names the wrong variable",
+            shortest.2,
+            short.2
+        );
+        assert!(
+            (700.0..870.0).contains(&shortest.2),
+            "the 200 d shot sits {:.1} km from the 3:4 circle; the probe measured \
+             +786.0 km and bisected the door's edges at +780.1 and +791.9 km",
+            shortest.2
+        );
+
+        // And the band this forced. The retired 500 km would have read CLEAR on
+        // both of these, and each of them flies the rock back into Earth.
+        const RETIRED_BAND_KM: f64 = 500.0;
+        for (label, m) in [("300 d", short.3), ("200 d", shortest.3)] {
+            assert!(
+                m > RETIRED_BAND_KM,
+                "the {label} plan returns the rock to Earth and scores {m:.1} km of \
+                 margin; the retired ±{RETIRED_BAND_KM:.0} km band would have had to \
+                 alert on it to be safe. If this ever fails, 500 was adequate and this \
+                 batch's headline is wrong"
+            );
+            assert!(
+                m <= PLACEMENT_BAND_KM,
+                "the shipping band must alert on a plan that flies the rock back into \
+                 Earth; the {label} one scores {m:.1} km of margin against a \
+                 {PLACEMENT_BAND_KM:.0} km band"
+            );
+        }
     }
 
     /// Kernel-gated. The planner's keyhole readout — *a miss can be worse than a
@@ -5997,7 +6177,7 @@ mod tests {
              plotted {plotted:.1} km vs |B| {b_km:.1} km"
         );
 
-        // ---- the frame question, measured rather than assumed ---------------
+        // ---- the frame question, re-measured on the quantity that matters ---
         //
         // The readout places the DEFLECTED b-point on circles computed in the
         // NOMINAL encounter's Öpik frame. `core::keyhole_target` argues the
@@ -6005,15 +6185,34 @@ mod tests {
         // different asymptote means the old axes carry no meaning — so the two
         // have to be reconciled rather than left to look inconsistent.
         //
-        // The reconciliation is that a resonant circle depends on the encounter
-        // only through `c = μ⊕/v∞²` and `θ`, and a small along-track nudge years
-        // out moves *where* the rock arrives enormously while barely changing
-        // *how fast* or *from what direction*. A return three years later is a
-        // different encounter entirely; a nudged version of the same flyby is
-        // not. That is an argument, so here is the measurement: rebuild the
-        // frame from the deflected encounter and compare the 3:4 circle it
-        // produces against the one the readout used. The gap has to be small
-        // beside the 24.9 km door, or the reported 20.4 km is partly frame error.
+        // An earlier version of this block compared the two frames' 3:4 circles
+        // by `|Δζ_c| + |ΔR|` at ONE epoch and asserted the sum was under a
+        // quarter of a door. `probe_keyhole_placement frame` (2026-09-07) showed
+        // that check has two blind spots, and neither is small:
+        //
+        //   * **it compared circle parameters, not the placed point.** The
+        //     readout's number is a *signed distance*, which also moves when the
+        //     ξ̂/ζ̂ axes rotate under the b-vector. On this very plan the circle
+        //     parameters agree to well under a door while the signed distance
+        //     moves **+15.1 km** — over twice the old threshold.
+        //   * **it built both frames on the nominal clock.** The deflected pass
+        //     reaches closest approach **≈1.9 h after** the nominal impact, and
+        //     in 1.9 h Earth moves ~209 000 km. Rebuilding the frame on the
+        //     flight's own clock moves the placed point by a further
+        //     **+211 km** — the timing term is the *dominant* one, and it had
+        //     never been measured.
+        //
+        // So the frame ambiguity on the 3:4 is of order **hundreds of km**, not
+        // a fraction of a door. **It is a sensitivity, not a correction**: the
+        // flown door at this lead sits +19.3 km from the nominal frame's circle
+        // and +245.5 km from its own frame's, so the map's choice is empirically
+        // the better one and rebuilding per plan would make the reported number
+        // worse. What it is not is free — and that size is one closed-form
+        // reason `KEYHOLE_PLACEMENT_KM` is 500 and not 25.
+        //
+        // Every number below belongs to **this plan at the campaign's 12 yr
+        // lead**. The probe re-measured all three frames at 900, 450 and 150 day
+        // leads and they are different there; nothing here is a bound.
         let f_nom = mc.opik.as_ref().expect("nominal frame");
         let defl = mc
             .plan
@@ -6021,36 +6220,72 @@ mod tests {
             .expect("plan")
             .encounter
             .expect("encounter");
-        let t_ca = Epoch::from_tdb_seconds_past_j2000(mc.impact_tdb_seconds());
-        let f_def = opik_frame_for(&defl, t_ca, &mc.ephemeris).expect("deflected frame");
+        let three_four_res = asteroid_core::Resonance { h: 3, k: 4 };
         let c_nom = f_nom
-            .resonant_circle(asteroid_core::Resonance { h: 3, k: 4 })
+            .resonant_circle(three_four_res)
             .expect("3:4 in the nominal frame");
-        let c_def = f_def
-            .resonant_circle(asteroid_core::Resonance { h: 3, k: 4 })
-            .expect("3:4 in the deflected frame");
-        let d_centre = (c_nom.center_zeta - c_def.center_zeta).abs() / M_PER_KM;
-        let d_radius = (c_nom.radius - c_def.radius).abs() / M_PER_KM;
-        println!(
-            "frame check: v_inf {:.3} vs {:.3} m/s ({:+.2e} rel); 3:4 centre {:.1} km apart, \
-             radius {:.1} km apart, against a {:.1} km door",
-            f_nom.v_inf,
-            f_def.v_inf,
-            (f_def.v_inf - f_nom.v_inf) / f_nom.v_inf,
-            d_centre,
-            d_radius,
-            tf_w_km
+        let d_nom = c_nom.signed_distance(f_nom.project(&defl.b_vector)) / M_PER_KM;
+
+        // Where the placed point lands when the frame is rebuilt from the
+        // deflected encounter, as a function of how much of the arrival slip is
+        // allowed in. 0 s is the old check's frame (v∞ and θ only); 6927 s is the
+        // slip `probe_keyhole_placement frame` measured for this exact impulse.
+        let t_ca_nominal = mc.impact_tdb_seconds();
+        let mut placed = Vec::new();
+        for slip_s in [0.0_f64, 3600.0, 6927.4] {
+            let f_def = opik_frame_for(
+                &defl,
+                Epoch::from_tdb_seconds_past_j2000(t_ca_nominal + slip_s),
+                &mc.ephemeris,
+            )
+            .expect("deflected frame");
+            let c_def = f_def
+                .resonant_circle(three_four_res)
+                .expect("3:4 in the deflected frame");
+            let d_def = c_def.signed_distance(f_def.project(&defl.b_vector)) / M_PER_KM;
+            println!(
+                "frame check, slip {slip_s:6.1} s: v_inf {:.3} vs {:.3} m/s ({:+.2e} rel); \
+                 3:4 centre {:+.1} km, radius {:+.1} km; PLACED POINT {:+.3} km vs the \
+                 readout's {:+.3} km (moves {:+.3} km), door {:.1} km",
+                f_nom.v_inf,
+                f_def.v_inf,
+                (f_def.v_inf - f_nom.v_inf) / f_nom.v_inf,
+                (c_def.center_zeta - c_nom.center_zeta) / M_PER_KM,
+                (c_def.radius - c_nom.radius) / M_PER_KM,
+                d_def,
+                d_nom,
+                d_def - d_nom,
+                tf_w_km
+            );
+            placed.push(d_def - d_nom);
+        }
+
+        // The v∞/θ term on its own — the only one the old check could see, and
+        // already over the quarter-door it asserted.
+        let geometry_only = placed[0];
+        assert!(
+            (10.0..21.0).contains(&geometry_only),
+            "rebuilding the Öpik frame from the deflected encounter on the SAME clock moves \
+             the placed 3:4 point by {geometry_only:+.1} km against a {tf_w_km:.1} km door; \
+             +15.1 km was measured at this 12 yr lead. This is the term the retired \
+             |Δζ_c|+|ΔR| check was reaching for and understated"
+        );
+        // And the timing term, which nothing here used to see at all.
+        let timing_only = placed[2] - placed[0];
+        assert!(
+            timing_only.abs() > tf_w_km,
+            "the ~1.9 h arrival slip of the deflected pass moves the placed 3:4 point by only \
+             {timing_only:+.1} km against a {tf_w_km:.1} km door. +211 km was measured. If \
+             this has genuinely collapsed then the frame is nearly free after all and \
+             KEYHOLE_PLACEMENT_KM should be re-argued, not left at 500"
         );
         assert!(
-            d_centre + d_radius < 0.25 * tf_w_km,
-            "rebuilding the Öpik frame from the deflected encounter moves the 3:4 circle by \
-             {:.1} km (centre) + {:.1} km (radius) against a {:.1} km keyhole. The readout \
-             places the deflected b-point on the NOMINAL frame's circles so the panel and the \
-             drawn map agree; at this size that choice is no longer free and the reported \
-             distance is partly frame error",
-            d_centre,
-            d_radius,
-            tf_w_km
+            placed[2].abs() > 5.0 * d_nom.abs(),
+            "the flight's own frame places the 3:4 point {:+.1} km away against the map's \
+             {d_nom:+.1} km. The map's frame is supposed to be the better of the two here \
+             (the flown door is +19.3 km out, not +245.5), which is why the readout is NOT \
+             being rebuilt per plan; if that has reversed, that decision is back open",
+            placed[2]
         );
 
         // The rows are self-consistent, and consistent with the drawn circles.

@@ -35,6 +35,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **The two drawn claims nobody had measured**: the b-plane view's resonant circles clipped to the viewport and tessellated to a pixel budget, and the Tier-3 ellipse's *shape* put through the ±3σ shell along its own axes | **done 2026-09-07**; the old whole-circle tessellation drew the widest resonance **59.9 px** off inside a 720 px view (now 0.113 px, and 3 points instead of 256), and the drawn ellipse holds everywhere the σ knob reaches — but the linearity scalar that was supposed to say so reads **130× too small** on the axis that matters | `godot/scripts/plot_geometry.gd`, `godot/tests/test_geometry.gd`, `core/examples/probe_tier3_drawn_shape.rs`, `core/tests/tier3_drawn_shape.rs` |
 | **The ranking that was a ratio**: resonant circles ranked by kilometres from their own *door* (`margin`) instead of by keyhole *widths*, the planner's alert cut on that same row, and the note branch nobody had seen fire finally executed | **done 2026-09-07**; the width ratio divides away exactly the additive placement error the five-door batch measured — though on this rock the two rankings never actually parted company, in 2 000 random geometries or on any plan the planner can dial | `core/src/keyhole.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/sim.gd`, `godot/tests/{test_orrery,_shot}.gd` |
 | **The calibration taken outside its own domain**: the same 3:4 door flown at four deflection lead times, the lead-sweep gate that made it affordable, and the placement band resized on what the planner can actually dial | **done 2026-09-07**; the door centre moves **+19.3 km -> +210.6 km -> +467.9 km -> no door at all** across leads 4383, 900, 450 and 150 days, and **only the first of those is not dialable** - so the five doors that set `KEYHOLE_PLACEMENT_KM = 100` were every one of them flown outside the range the constant is used in | `core/examples/probe_keyhole_placement.rs`, `core/src/keyhole.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/sim.gd` |
+| **The lead was the variable, and the crowded register fired**: the 3:4 door flown at 300 d and at 200 d, the frame proposed as the mechanism and falsified, and the several-doors register searched for on real physics | **done 2026-09-07**; of lead, Δv, ξ and the angle round the circle, **only the lead orders all five flown doors** — not the impulse (the 200 d door takes a *smaller* nudge and sits *further* out, +786.0 vs +648.2 km) and not the place on the circle (the 300 d and 12 yr doors are **0.48° of arc** apart with 34× the error). Rebuilding each flight's own Öpik frame makes the spread **worse**, 767 → 1375 km. `KEYHOLE_PLACEMENT_KM` 500 → **800**, and the width claim moves from ≤1.44× to **≤2.11×** on a door that is closing | `core/examples/probe_keyhole_placement.rs`, `godot/rust/src/mission_core.rs`, `godot/scripts/sim.gd`, `godot/tests/{test_orrery,_shot}.gd` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -4152,3 +4153,330 @@ Third, the 150 d column - a door that stops existing as you move round a circle 
 is recorded and not explained. `xi2` is the coordinate that decides it, and how
 `xi2` depends on where on the circle you enter is exactly the question the return
 half of this layer has never been asked.
+
+### The lead was the variable - 2026-09-07 session (roadmap item 4's two live threads)
+
+The lead sweep closed item 4 and left two sentences behind it that were not
+results:
+
+> The placement error is now known to depend on the deflection lead, and
+> **nothing here says why**. Three points on one circle plus five circles at one
+> lead is a measurement, not a model.
+
+> `doors_in_band` is measured to be 1 on the only plan flown to a return, so the
+> crowded register ships tested but **not yet observed on real physics**.
+
+Both are now answered, and answering them moved a shipping constant a second
+time, in the same batch that made it 5x bigger last session.
+
+#### Two proxies had to die before "the lead" meant anything
+
+"The error depends on the lead" was never a safe sentence, because on one
+resonant circle a shorter lead drags two other things with it. It slides the
+plan **round the circle** (the along-track curve crosses the 3:4 at
+xi = +6104 km at 12 yr and at -52 860 km at 150 d), and it forces a **bigger
+impulse** for the same `b`. Every point measured before this session had all
+three moving together, so "the lead" was one of three candidate labels for the
+same ladder. Two flights separated them.
+
+**It is not where on the circle.** The 3:4 door flown at a **300 d** lead lands
+at xi = +5531 km; the 12 yr door lands at +6103 km. That is 572 km apart on a
+circle of radius 74 855 km - **0.48 degrees of arc**, the two shots at
+phi = -85.80 and -85.32 degrees - and the map is wrong about one of them by
+**+19.3 km** and about the other by **+648.2 km**. Same circle, same branch,
+same probe, essentially the same place on it, 34x the error. The lead between
+them is 14.6x.
+
+**It is not the size of the impulse either.** That was the other live reading,
+and it survived the 300 d flight (dv had gone 0.2165 -> 2.8798 as the error went
+19 -> 648). It does not survive the **200 d** one. The dv a circle costs is
+*not* monotone in the lead - the 200 d door floors at **2.4785 m/s**, less than
+the 300 d door's 2.8798 - and its placement error is **larger**: **+786.0 km**
+against +648.2. Impulse down, error up, on the same circle.
+
+**The order of those two eliminations matters and the second does not stand
+alone.** The 200 d shot lands at xi = -21 412 km, so it is *not* at the same
+place on the circle as the 300 d one; taken by itself that pair confounds the
+impulse with the position again. It is only decisive *after* the same-phi pair
+has shown the error is not a function of position alone. What survives both is
+simply this: of the four candidate variables, **only the lead orders all five
+flown doors.**
+
+| ordered by | values across the five doors | monotone with the error? |
+|---|---|---|
+| lead | 4383, 900, 450, 300, 200 d | **yes** |
+| dv | 0.2165, 0.9322, 1.2519, 2.8798, 2.4785 m/s | no |
+| xi | +6103, +4386, -15812, +5531, -21412 km | no |
+| phi on the circle | -85.3, -86.7, -102.2, -85.8, -106.4 deg | no |
+
+So the ladder is indexed by the lead itself:
+
+| lead | dialable? | dv (m/s) | xi at the door | door centre from the circle | flown door | linearised / flown |
+|---|---|---|---|---|---|---|
+| 4383 d | **no** | 0.2165 | +6 103 km | +19.255 km | 26.919 km | 0.924 |
+| 900 d | yes | 0.9322 | +4 386 km | +210.632 km | 27.913 km | 0.891 |
+| 450 d | yes | 1.2519 | -15 812 km | +467.869 km | 20.407 km | 1.219 |
+| 300 d | yes | 2.8798 | +5 531 km | +648.174 km | 27.506 km | 0.904 |
+| 200 d | yes | 2.4785 | -21 412 km | **+785.988 km** | **11.812 km** | **2.106** |
+| 150 d | yes | - | - | no door at all | - | - |
+
+Read it as five flown doors on one circle. It is not a law and no law is offered.
+
+#### The mechanism that should have explained it, and does not
+
+The best candidate was the **frame**. A resonant circle is a function of the
+encounter - `c = mu_earth/v_inf^2`, the angle `theta` between the incoming
+asymptote and Earth's velocity, and Earth's own heliocentric state - and the
+probe, `MissionCore::keyhole_readout` and the drawn map all build that frame from
+the **nominal, undeflected** encounter, then place the **deflected** point on it.
+The deflection changes all three, and all three grow with the impulse. That is
+the right shape for the ladder, so it was flown rather than argued
+(`probe_keyhole_placement frame`, one flight per lead, no doors and no
+refinement). The decision rule was written into the stage's doc comment before
+it ran.
+
+It is wrong, and the way it is wrong is informative. Rebuilding each flight's
+circle in that flight's own frame does not collapse the spread; it **enlarges**
+it.
+
+| lead | door centre d0 | frame term dd | d0 + dd | of which v_inf/theta | of which timing | d0 and dd from |
+|---|---|---|---|---|---|---|
+| 4383 d | +19.255 km | +226.333 km | **+245.588 km** | +15.145 km | +211.187 km | one flight |
+| 900 d | +210.632 km | +125.641 km | **+336.273 km** | -82.888 km | +208.529 km | one flight |
+| 450 d | +467.869 km | +885.810 km | **+1353.679 km** | +721.955 km | +163.855 km | **two flights** |
+| 300 d | +648.174 km | -367.904 km | **+280.270 km** | -580.596 km | +212.692 km | one flight |
+| 200 d | +785.988 km | +834.626 km | **+1620.614 km** | +683.819 km | +150.807 km | one flight |
+
+If the frame were the mechanism, the `d0 + dd` column would be **one number**
+belonging to the 3:4 circle. It is not: over the four same-flight rows it spreads
+**1375.0 km**, against 766.7 km for the uncorrected `d0` and a 24.9 km door. The
+correction makes the answer **1.79x worse**. (The 450 d row is marked because its
+`d0` is a door centre while its `dd` was read at the crossing dv, at
+phi = -102.2 degrees rather than -85; since the correction contains
+`-d_zeta_c*sin(phi)` that mismatch is exactly the term that swings, so the stage
+now flags such rows and reports the spread with and without them. Here it changes
+nothing - both spreads are 1375.0 km - but it had to be checked rather than
+assumed, and on the four-row table it was the 200 d row that made the negative
+unambiguous.)
+
+**The frame is nonetheless a large effect, and one sub-term of it had never been
+measured at all.** The deflected pass reaches closest approach **~1.9 h after**
+the nominal impact; in 1.9 h Earth moves ~210 000 km; and that alone moves the
+3:4 circle's placed point by **~+200 km**. It is +211.2, +208.5, +163.9, +212.7
+and +150.8 km across the five leads - very nearly a constant, because all five
+sit at nearly the same `b` (141 900 to 153 700 km) and slip by nearly the same
+1.6 to 1.9 h. That is a **closed-form
+reason for a band of hundreds of kilometres** arrived at without flying a single
+door - and it is precisely the wrong shape to explain a ladder, because it does
+not move with the lead.
+
+It is a **sensitivity, not a correction**. The flown 12 yr door sits +19.3 km
+from the nominal frame's circle and +245.5 km from its own frame's, so the map's
+choice is empirically the better of the two and rebuilding the frame per plan
+would make the reported number worse. It is also not free, which is why
+`keyhole_readout` is left alone: it and `keyhole_circles` are bound to each other
+by live assertions, and a plan-dependent frame would move the drawn circles as
+the player drags the lead slider. That is a design decision to be taken
+deliberately, not a side effect of an explanation task.
+
+**The binding test that was supposed to cover this had two blind spots**, both
+found by the probe and both now closed. It compared the two frames' circles by
+`|dzeta_c| + |dR|` and asserted the sum was under a quarter of a door - but the
+readout's number is a *signed distance*, which also moves when the axes rotate
+under the b-vector, and on that very plan the circle parameters agree to well
+under a door while the placed point moves **+15.1 km**, over twice the threshold
+being asserted. And it built **both** frames on the nominal clock, so the +211 km
+timing term - the dominant one - had never been in the test at all. The block now
+walks the arrival slip (0 s, 3600 s, the measured 6927.4 s), asserts on the
+placed point, and names the lead every number belongs to. It reproduces the
+probe to three decimals.
+
+#### The band moved again, and this time the unmeasured region is below it
+
+`KEYHOLE_PLACEMENT_KM` is **800.0**. 200 days is dialable (`LEAD_MIN` = 30) and
+786 km is outside the 500 km the last session shipped, so the same failure that
+session's test pins - a plan the map calls CLEAR that flies the rock back into
+Earth three years later - **recurred one lead down, at a constant that had just
+been raised 5x to prevent it**. That plan is now a binding test of its own.
+
+The constant's doc says in as many words that this is a measured maximum over ten
+doors and **not a bound, and that the unmeasured region is BELOW the last row
+rather than between rows**. The 3:4 has no door at 150 d, so its ladder stops at
+200; nothing has been flown between 30 and 200 days on any resonance; and the
+trend is still climbing where the measurements run out.
+
+**The width claim moved too, and it is the first door to break it.** The
+linearised width had been within 0.89x-1.44x of the flown one over nine doors.
+The 200 d door is **11.812 km flown against 24.879 km drawn - 2.106x**. That is
+where the 3:4 door is closing: it does not exist at all by 150 d, and its
+return's irreducible sideways offset `xi2` is already -10 300 km at 200 d. A
+closing door narrows faster than the linearisation knows. The formula stays
+**conservative** - it draws the door wider than it is, so the panel alerts where
+it need not, which is the safe direction - but "within 1.44x" was a nine-door
+statement and is retired.
+
+#### The crowded register fired, and the search that found it had to be fixed twice
+
+The several-doors register - the panel declining to name one resonance when the
+band holds more than one door - shipped last session tested on a hand-built row
+and **never observed on real physics**. `probe_keyhole_placement crowding` looked
+for it: fly the whole dialable dv range at a lead in both directions, interpolate
+the flown curve, scan 40 000 points of it in closed form for free, then fly the
+candidate windows. The census is the **readout's** (2..=7 yr, k <= 24,
+b <= 60 x capture radius), because a window among circles the frontend does not
+draw would prove nothing about the frontend.
+
+**Two things had to be fixed before its answer was worth anything.**
+
+*The evidence that motivated the register was in the wrong metric.* The 402 /
+83.6 / 8.3 km figures came from `spacing`, which measures gaps between
+neighbouring circles along a line of **constant xi**. The register cuts on
+`margin` - the distance from the **plan's own point** to a door - and a plan
+reaches a given `b` at its own xi, not at the one the spacing sweep asked about.
+This is the same class of error as ranking circles by widths instead of
+kilometres, which the previous session fixed one layer up. It is also why the
+first sweep found nothing at 900 d and 600 d while `spacing` implied crowding was
+everywhere.
+
+*And the first run's answer was worthless.* Ungated, it reported the register
+firing at 300, 150 and 30 days - and **every plan it found sat at b between
+4 593 and 9 526 km against an 11 311 km capture radius, i.e. still an impact**.
+Circles crowd near Earth because that is where every resonance's circle has to
+pass, so an ungated search finds its answer there every time and the answer means
+nothing: a plan that has not yet turned the hit into a miss has no keyhole
+question to get wrong. The stage now keeps only points with `!enc.is_hit()` and
+reports how many rungs it rejected.
+
+Gated, and at the shipping band, **the register fires on a genuine miss a player
+can dial.**
+
+| lead | Δv found (m/s) | b at the plan | miss by | doors in the band | runner-up's best margin on the whole curve |
+|---|---|---|---|---|---|
+| 900 d | +0.10935 | 16 938.5 km | 1.50x capture | **2** | 644.9 km |
+| 600 d | +0.16756 | 16 966.5 km | 1.50x capture | **2** | 647.3 km |
+| 450 d | +0.12187 | 15 123.9 km | 1.34x capture | **2** | 543.6 km |
+| 300 d | +0.33958 | 17 014.1 km | 1.50x capture | **2** | 649.7 km |
+| 150 d | +0.21480 | 12 383.0 km | 1.09x capture | **2** | 393.7 km |
+| 30 d | +2.07657 | 11 637.5 km | **1.03x capture** | **2** | 696.3 km |
+
+Every lead the planner allows, on a prograde nudge of a tenth of a metre per
+second - `DV_MIN` is 0.1 - and at four of the six the plan is at b ~ 17 000 km,
+half again the capture radius, which is a comfortable miss rather than a
+technicality. The 30 d row is not: 11 637 km against an 11 311 km capture radius
+is **a miss by 3 %**, and it is quoted as such.
+
+And this is where the band width earns the register. The runner-up door's best
+margin anywhere on the 900 d curve is **644.9 km** - between the retired 500 km
+band and the shipping 800 km one. That is exactly why last session's search found
+nothing and this one finds two doors at every lead: the register did not start
+firing because the physics changed, it started firing because **the band widened
+past the runner-up**. A wider band is a weaker claim about which resonance you
+are near, and the panel now has to say so.
+
+The claim is kept to what that measures: **the panel cannot name one resonance
+there**. It does not say two impact keyholes exist at that point - that would
+need two returns flown to Earth and four edge bisections, which is a different
+question and about 50 minutes of flights. And a negative now carries a distance:
+where no window exists the stage reports the runner-up door's best margin
+anywhere on the curve, so "not reachable" says by how much rather than just
+"no".
+
+#### What a band 8x the original did to the app, measured
+
+A band eight times the original 100 km could have traded a false CLEAR for an
+alarm that is always on - the failure the very first version of this constant
+warned about in its own comment. `_shot.gd` (windowed; it takes screenshots, and
+under `--headless` it hangs at the first capture rather than failing) says it did
+not:
+
+```text
+SHOT  planner keyhole: ** 174 KM OFF 3:5 - INSIDE THE PLACEMENT BAND
+      | CIRCLE PLACED TO +/-800 KM AT THIS LEAD - ONLY A FLOWN RETURN CONFIRMS
+SHOT  keyhole sweep dv=0.10 -> CLEAR - NEAREST 3:5 IS 1,656 KM OFF
+SHOT  keyhole sweep dv=0.15 -> ** 787 KM OFF 7:11 - INSIDE THE PLACEMENT BAND
+SHOT  keyhole sweep dv=0.20 -> CLEAR - NEAREST 2:3 IS 4,249 KM OFF
+SHOT  keyhole sweep dv=0.90 -> CLEAR - NEAREST 3:4 IS 4,996 KM OFF
+SHOT  keyhole sweep dv=1.40 -> CLEAR - NEAREST 3:4 IS 76,071 KM OFF
+SHOT  closest a player can dial: dv=0.13313 at 900 d (margin 1.5 km, d 1.845 km,
+      door 0.718 km, old rule 5.14 half-widths vs cut 4.0)
+      -> ** 1 KM OFF 5:8 - INSIDE THE PLACEMENT BAND (alert=true)
+SHOT  doors inside the 800 km placement band: 1
+```
+
+Three readings, the same three the 500 km change was measured on. **CLEAR is
+still reachable across the whole dialable impulse sweep** - 1 656 to 76 071 km
+off - so the band grew without becoming unconditional. **The closest plan a
+player can dial has not moved**: `dv=0.13313 at 900 d`, 5:8, margin 1.5 km, every
+digit unchanged across two band changes, so nothing recorded about it is stale.
+And exactly **one verdict flips**, `dv=0.15`, from `CLEAR - NEAREST 7:11 IS 787 KM
+OFF` to `** 787 KM OFF 7:11 - INSIDE THE PLACEMENT BAND`. That is the intended
+effect: 787 km is inside the placement error now measured at a dialable lead, so
+the map cannot honestly call it clear.
+
+`doors_in_band` reads **1** on this shot's own plans, which is not a contradiction
+of the crowding result above - the crowded region is at b ~ 17 000 km on a
+*prograde* nudge and none of the shot's plans sits there. The register has been
+seen on real physics; it has not been seen on *these* plans, and the count is
+printed so the two claims stay separable.
+
+#### What shipped
+
+- `probe_keyhole_placement frame` - the two-term model, its decision rule written
+  before the run, the three-frame split (map's / this flight's geometry on the
+  map's clock / this flight's own), and a `same_flight` provenance flag on every
+  row so a mixed-provenance row cannot quietly widen a spread.
+- `probe_keyhole_placement crowding` - the gated search, the free 40 000-point
+  scan between flown rungs, the miss gate, and the runner-up margin that makes a
+  negative quantitative.
+- `KEYHOLE_PLACEMENT_KM` 500 -> **800**, its doc rewritten rather than appended
+  to: the ladder by lead, the two proxies killed, the frame measured and
+  rejected, the metric caveat on the old crowding evidence, and the crowded
+  register recorded as **measured** rather than inferred.
+- A binding test `the_placement_error_follows_the_lead_and_not_the_place_on_the_circle`
+  that flies both the 12 yr and the 300 d plan, pins that they land within 0.48
+  degrees of arc of each other, pins the 34x error ratio, and pins that the
+  retired 500 km band would have read CLEAR on the 300 d one.
+- The frame block of `the_keyhole_readout_finds_the_three_four_door_the_probe_flew`
+  rewritten onto the placed point and across the arrival slip.
+
+#### Checks
+
+Core `--lib` **262/262** with kernels required (`ASTEROID_REQUIRE_KERNELS=1`, so
+nothing skipped silently). The three kernel-gated binding tests green -
+`the_keyhole_readout_finds_the_three_four_door_the_probe_flew` (which now
+reproduces the probe's +15.145 and +226.331 km frame terms to three decimals),
+`a_dialable_plan_that_returns_is_not_reported_clear`, and the new
+`the_placement_error_follows_the_lead_and_not_the_place_on_the_circle`, which
+re-solves all three plans in the binding and gets +19.2, +648.2 and +786.0 km
+against the probe's +19.3, +648.2 and +786.0. `test_orrery.gd` **0 failures**,
+including the crowded register, the single-door register, CLEAR outside the band
+and the constant itself. `_shot.gd` windowed with no FAIL line. `cargo fmt
+--check` clean; no new clippy warnings (the nine on the lib are pre-existing
+`neg_cmp_op_on_partial_ord`).
+
+Two harness notes worth keeping. `test_orrery.gd` `extends SceneTree` and is run
+with `godot --headless --path godot --script res://tests/test_orrery.gd`, **not**
+through `run_harness.ps1` - as an autoload it fails with "does not inherit from
+Node" and then sits until the timeout. And `_shot.gd` must run **windowed**; under
+`--headless` it reached the first screenshot and hung.
+
+#### What this leaves
+
+**The mechanism is still open, and it is now a much sharper question.** The
+variable is the lead. It is not where on the circle, not the impulse, and not the
+frame - and those were the three things that could have been read off the
+existing machinery. Whatever it is, it is something about applying the impulse
+*closer to the encounter* that the closed form does not model, at fixed `b`,
+fixed circle, and nearly fixed v_inf (the four flights agree on v_inf to
+4e-4). The obvious next place to look is the incoming heliocentric orbit itself:
+Opik's construction assumes the rock arrives on an orbit the circle was drawn
+for, and a late impulse changes that orbit's own shape more per unit of b-plane
+displacement than an early one does.
+
+**The band is not a bound below 200 days**, and the app allows 30. Flying a door
+on some resonance at 100 d and at 50 d would say whether 800 survives, and the
+150 d result says the honest answer there may be "the door does not exist",
+which is a different kind of answer and worth having.
+
+**The three-door register is still only geometry.** Two doors has now been flown;
+three has not.

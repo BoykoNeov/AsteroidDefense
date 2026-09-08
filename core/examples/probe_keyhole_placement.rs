@@ -127,11 +127,24 @@ const LARGEST_PLACEMENT_ERROR_KM: f64 = 786.0;
 /// Earth Hill radii out it is.
 const SAMPLE_DAYS: [f64; 6] = [10.0, 20.0, 30.0, 60.0, 90.0, 180.0];
 
-/// Where the revolution-mean window opens, days past closest approach. By here
-/// the rock is ~13 Earth Hill radii out and its heliocentric energy has stopped
-/// moving; the 10 d sample is 350 km-equivalent away from the rest and is printed
-/// only to show that.
+/// Where the revolution-mean window opens, days past closest approach.
+///
+/// **Calibrated to this rock's `v∞`, not derived.** What matters is the
+/// *geocentric distance* at the opening — the CA+10 d sample is 350 km-equivalent
+/// off every later one because at 4.4 Earth Hill radii Earth is still moving the
+/// rock's heliocentric energy. At these flights' ~5 km/s, 30 days buys ~13 Hill
+/// radii; a slower flyby, or a resonance reached at a lower `v∞`, would open the
+/// window nearer in and quietly re-import that contamination. The stage prints
+/// each sample's distance in Hill radii, and the guard test asserts the opening
+/// clears [`SETTLE_HILL_RADII`], so this constant cannot rot silently — but it
+/// must be re-checked, not inherited, on a different encounter.
 const SETTLE_DAYS: f64 = 30.0;
+
+/// A second opening for the same mean, days — the settling check. The
+/// half-revolution shift asks whether the window is one revolution; this asks
+/// whether it opened late enough. Where the two answers differ the row has not
+/// settled and its number is a convention, not a measurement.
+const SETTLE_LATE_DAYS: f64 = 60.0;
 
 /// How many points the revolution-mean averages over.
 const MEAN_SAMPLES: usize = 32;
@@ -2511,6 +2524,11 @@ fn stage_outgoing(args: &[String]) {
         // not a revolution or the arc is not settled, and nothing here is safe.
         let a_shifted = mean_from(SETTLE_DAYS + period / 86_400.0 / 2.0);
         let spread_km = (a_mid - a_shifted).abs() / grad_n.abs() / 1e3;
+        // A second convention check, on the other axis: opening the window later
+        // still. The half-revolution shift asks whether the window is a
+        // revolution; this asks whether it opened late enough for Earth to have
+        // let go. A row where the two disagree has not settled.
+        let a_late = mean_from(SETTLE_LATE_DAYS);
 
         // The r ≈ R⊕ column: the same circle with vis-viva evaluated at the rock's
         // own heliocentric distance instead of Earth's.
@@ -2554,6 +2572,11 @@ fn stage_outgoing(args: &[String]) {
             "  a'_closed {:.9} AU; the mean's own error bar (window shifted half a revolution) {spread_km:.1} km against a recorded error of {:.1} km",
             a_closed / AU_M,
             recorded / 1e3
+        ));
+        log(&format!(
+            "  same mean opened at CA+{SETTLE_LATE_DAYS:.0} d instead: (a_true − a_res)/∇a'·n̂ {:+.1} km (moved {:+.1} km) — if this walks toward the other leads' −15 km the row was still settling",
+            (a_late - a_res) / grad_n / 1e3,
+            (a_late - a_mid) / grad_n / 1e3
         ));
         // Can the map get that radial offset without flying? The b-vector is the
         // rock's displacement from Earth in the b-plane, so `r⊕ + unproject(p)` is

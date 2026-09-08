@@ -98,7 +98,8 @@
 //!
 //! What the same measurement *does* license is the other half. The resonance
 //! **condition** is sound: a flown door centre leaves the rock 14 to 49 km-equivalent
-//! from `a_res` at every lead — half a door width, flat, while the door's distance
+//! from `a_res` at every lead — half a door width, and −14 to −16 km at three of the
+//! four — while the door's distance
 //! from its circle runs 19 → 786 km. So `a' = a_res` is the right target and this
 //! module's `a'` is the wrong prediction of it, which is a sharper statement of
 //! where the map is broken than "order 1e-4 somewhere". Pinned by

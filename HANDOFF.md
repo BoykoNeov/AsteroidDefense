@@ -37,7 +37,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **The calibration taken outside its own domain**: the same 3:4 door flown at four deflection lead times, the lead-sweep gate that made it affordable, and the placement band resized on what the planner can actually dial | **done 2026-09-07**; the door centre moves **+19.3 km -> +210.6 km -> +467.9 km -> no door at all** across leads 4383, 900, 450 and 150 days, and **only the first of those is not dialable** - so the five doors that set `KEYHOLE_PLACEMENT_KM = 100` were every one of them flown outside the range the constant is used in | `core/examples/probe_keyhole_placement.rs`, `core/src/keyhole.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/sim.gd` |
 | **The lead was the variable, and the crowded register fired**: the 3:4 door flown at 300 d and at 200 d, the frame proposed as the mechanism and falsified, and the several-doors register searched for on real physics | **done 2026-09-07**; of lead, Δv, ξ and the angle round the circle, **only the lead orders all five flown doors** — not the impulse (the 200 d door takes a *smaller* nudge and sits *further* out, +786.0 vs +648.2 km) and not the place on the circle (the 300 d and 12 yr doors are **0.48° of arc** apart with 34× the error). Rebuilding each flight's own Öpik frame makes the spread **worse**, 767 → 1375 km. `KEYHOLE_PLACEMENT_KM` 500 → **800**, and the width claim moves from ≤1.44× to **≤2.11×** on a door that is closing | `core/examples/probe_keyhole_placement.rs`, `godot/rust/src/mission_core.rs`, `godot/scripts/sim.gd`, `godot/tests/{test_orrery,_shot}.gd` |
 | **The shape number promoted out of its probe**: the per-axis linearity residual moved from two private copies into `LinearityReport::shape_residual`, with pure-math tests that know the right answer, and the blind scalar's under-reading factored | **done 2026-09-08**; behaviour identical (shipping minor 0.0007, top stop 0.5610, scalar 0.0043) and the 130x gap turns out **not** to be the 206:1 aspect ratio - it is 143 drawn half-widths of shell reach x 0.90 of the residual lying across the needle, because `shell_scale` is 0.693 of the 3sigma half-length, not equal to it. The move also flipped an eigenvector sign nothing tested - the drawn angle read **-90.26 against a published 89.736** with every ratio unchanged - now pinned in the module and folded into a half-turn at the print | `core/src/uncertainty.rs`, `core/tests/tier3_drawn_shape.rs`, `core/examples/probe_tier3_{drawn_shape,uncertainty}.rs` |
-| **Which half of the keyhole map is wrong**: the semi-major axis the flyby *actually* produces, read on four flown 3:4 doors as a mean over one post-encounter revolution, against both things a resonant circle assumes | **done 2026-09-08**; the resonance **condition** is sound — a flown door leaves the rock **14 to 49 km-equivalent** from `a_res` at every lead, flat, inside the measurement's own ±41 km bar — while the closed form's **prediction** of `a'` is wrong by −33, −227, −665 and −839 km, which *is* the 19 → 786 km ladder. Both available repairs are dead: the `r ≈ R⊕` substitution explains **0.4 %** at the 300 d door (where the rock is 53 km from Earth's distance and the error is at full size), and rebuilding the frame from the flight's own encounter is worse at three leads of four | `core/examples/probe_keyhole_placement.rs`, `core/tests/keyhole_prediction_bias.rs`, `core/src/keyhole.rs` |
+| **Which half of the keyhole map is wrong**: the semi-major axis the flyby *actually* produces, read on four flown 3:4 doors as a mean over one post-encounter revolution, against both things a resonant circle assumes | **done 2026-09-08**; the resonance **condition** is sound — a flown door leaves the rock **14 to 49 km-equivalent** from `a_res` at every lead — **−14 to −16 km at three of the four leads and −49 km at 200 d**, a spread inside the measurement's own ±41 km bar — while the closed form's **prediction** of `a'` is wrong by −33, −227, −665 and −839 km, which *is* the 19 → 786 km ladder. Both available repairs are dead: the `r ≈ R⊕` substitution explains **0.4 %** at the 300 d door (where the rock is 53 km from Earth's distance and the error is at full size), and rebuilding the frame from the flight's own encounter is worse at three leads of four | `core/examples/probe_keyhole_placement.rs`, `core/tests/keyhole_prediction_bias.rs`, `core/src/keyhole.rs` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -4890,9 +4890,21 @@ inconclusive rather than as a small answer.
 | 300 d | +648.2 km | **−13.9 km** | −664.6 km | 1.4e-4 |
 | 200 d | +786.0 km | **−48.8 km** | −838.6 km | 1.8e-4 |
 
-The middle column is **flat at about −15 km** - half a door width, inside the
-±41 km error bar of the measurement itself - while the door error it is supposed
-to explain runs 19 → 786 km. The right-hand column *is* that ladder.
+The middle column sits at **−14 to −16 km at three of the four leads** and −49 km
+at 200 d - half a door width, and a spread of 35 km inside the ±41 km error bar of
+the measurement itself - while the door error it is supposed to explain runs
+19 → 786 km. The right-hand column *is* that ladder.
+
+**The 200 d row's −49 is not the convention wobbling**, which is the first thing
+it could have been: it is 3x the other three and sits at the edge of the bar. Its
+own check is cheap - reopen the averaging window 30 days later and see where the
+number walks - and the answer is that the window shift is **common-mode**. All
+four rows move by the same amount, −21.2, −21.3, −21.4 and −20.5 km, and the 200 d
+row stays ~33 km below the other three in both conventions. So the window's
+opening carries a ~21 km systematic of its own (inside the bar, and it cancels
+exactly in any comparison *between* rows), while the 200 d offset survives it. The
+stage prints the second window on every row rather than only where a number looked
+suspicious.
 
 So: **`a' = a_res` is the right condition, and this module's `a'` is the wrong
 prediction of it.** The rock that flies through a door really is on the resonant

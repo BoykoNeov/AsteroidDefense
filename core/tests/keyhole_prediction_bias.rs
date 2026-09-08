@@ -25,10 +25,16 @@
 //!    200 d   +786.0 km       −48.8 km            −838.6 km
 //! ```
 //!
-//! The condition column is **flat at about −15 km** — half a door width, inside
-//! the ±41 km error bar of the measurement itself — while the door error runs
-//! 19 → 786 km. So the resonance condition is sound at every lead, and the whole
-//! ladder lives in the closed form's prediction of the outgoing orbit.
+//! The condition column sits at **−14 to −16 km at three of the four leads** and
+//! −49 km at 200 d — half a door width, and a spread inside the ±41 km error bar
+//! of the measurement itself — while the door error runs 19 → 786 km. So the
+//! resonance condition is sound at every lead, and the whole ladder lives in the
+//! closed form's prediction of the outgoing orbit.
+//!
+//! The 200 d row's −49 is real rather than the convention wobbling: reopening the
+//! averaging window 30 days later moves all four rows by the same ~−21 km, and it
+//! stays ~33 km below the other three. The window's opening carries a systematic;
+//! comparisons between rows do not.
 //!
 //! Both candidate repairs were run on the same flights and both are dead. The
 //! `r ≈ R⊕ₒᵣᵦ` substitution (which `keyhole.rs`'s module doc names as the source
@@ -72,7 +78,25 @@ const BIAS_FLOOR_KM: f64 = 500.0;
 /// Where the revolution-mean window opens, days past closest approach. Earlier
 /// than this the rock is still inside Earth's residual pull: the CA+10 d sample
 /// is ~350 km-equivalent away from every later one.
+///
+/// **A day count is the wrong unit for that and is used anyway**, because the
+/// probe's arc is sampled on a day cadence. What the physics cares about is how
+/// far out of Earth's grip the reading is taken, and 30 days buys that only at
+/// *this* rock's ~5 km/s: a slower flyby would open the window nearer in and
+/// quietly re-import the contamination. So the test asserts the distance rather
+/// than trusting the days — see [`SETTLE_HILL_RADII`].
 const SETTLE_DAYS: f64 = 30.0;
+
+/// How far out of Earth's grip the window must open, in Earth Hill radii. The
+/// contaminated CA+10 d sample sits at 4.4; these flights reach ~13 by
+/// [`SETTLE_DAYS`]. The gate is set at 10 — below the measured value, above the
+/// one known to be wrong — so it fails loudly on an encounter slow enough to need
+/// a longer wait instead of returning a number that looks like the others.
+const SETTLE_HILL_RADII: f64 = 10.0;
+
+/// Earth's Hill radius, metres — 0.01 AU to two figures. A scale for the gate
+/// above, nothing else.
+const EARTH_HILL_RADIUS_M: f64 = 1.5e9;
 
 /// How many points the revolution mean averages. The osculating value swings
 /// ±100 km-equivalent through a revolution; averaging over exactly one kills that
@@ -170,6 +194,19 @@ fn the_placement_error_is_in_the_prediction_and_not_in_the_resonance_condition()
             .expect("post-encounter arc");
         let period = std::f64::consts::TAU * (a_closed.powi(3) / mu_sun).sqrt();
         let t_open = ca.epoch.shifted_by_seconds(SETTLE_DAYS * 86_400.0);
+        let hill_radii = (onward
+            .state_at(t_open)
+            .expect("state at the window")
+            .position
+            - earth.state_at(t_open).expect("Earth").position)
+            .norm()
+            / EARTH_HILL_RADIUS_M;
+        assert!(
+            hill_radii > SETTLE_HILL_RADII,
+            "lead {lead_days} d: the mean's window opens {hill_radii:.1} Hill radii out, under the \
+             {SETTLE_HILL_RADII} this reading needs — SETTLE_DAYS is calibrated to a v∞ this \
+             encounter does not have, and the answer would carry Earth's residual pull"
+        );
         let a_true = (0..MEAN_SAMPLES)
             .map(|i| {
                 let t = t_open.shifted_by_seconds(period * i as f64 / MEAN_SAMPLES as f64);

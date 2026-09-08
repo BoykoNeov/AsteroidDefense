@@ -56,7 +56,15 @@
 //!   probe_keyhole_placement ladder [rungs]        # ~5 min, writes the b(Δv) curve
 //!   probe_keyhole_placement screen [max_flights]  # ~15 s per candidate
 //!   probe_keyhole_placement door h k branch dir [iters]   # ~10 min per resonance
+//!   probe_keyhole_placement outgoing [h k branch] [leads]  # ~4 s per flown door
 //! ```
+//!
+//! `outgoing` answers a different question from the rest and needs no ladder: it
+//! re-flies **recorded** door centres and measures the orbit the flyby actually
+//! produces, which splits the map's error into the part that is a wrong
+//! *prediction* of the outgoing orbit and the part that is a wrong *condition*
+//! for a return. See its own doc comment for the decision rule, which was written
+//! before it ran.
 //!
 //! `ladder` must run first; the other two read `keyhole_ladder.tsv` from the work
 //! directory (`ASTEROID_PROBE_DIR`, default `W:/temp/claude/keyhole_placement`).
@@ -65,13 +73,14 @@
 //!
 //! Requires kernels.
 
-use anise::constants::frames::{EARTH_J2000, SUN_J2000};
+use anise::constants::frames::{EARTH_J2000, SSB_J2000, SUN_J2000};
 use asteroid_core::{
-    aim_at_resonance, along_track_unit, fly_keyhole_shot, refine_keyhole_return, BPlaneEncounter,
-    CircleBranch, ImpactorConfig, KeyholeAim, KeyholeAiming, KeyholeRefineTol, KeyholeShot,
-    KeyholeShotOptions, OpikFrame, RealFieldScenario, Resonance, ResonantCircle, AU_M,
+    aim_at_resonance, along_track_unit, closest_approach, fly_keyhole_shot, refine_keyhole_return,
+    BPlaneEncounter, CircleBranch, EphemerisPerturber, Epoch, ImpactorConfig, KeyholeAim,
+    KeyholeAiming, KeyholeRefineTol, KeyholeShot, KeyholeShotOptions, OpikFrame, RealFieldScenario,
+    Resonance, ResonantCircle, ScanOptions, StateVector, AU_M,
 };
-use nalgebra::Vector3;
+use nalgebra::{Vector2, Vector3};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -112,6 +121,26 @@ const LARGEST_PLACEMENT_ERROR_KM: f64 = 786.0;
 /// as the lead changes and is no longer the same displacement. Scaling by it
 /// over-covers, which is what a bracket is for; reading it as the physics would
 /// be a claim this probe's own table contradicts.
+/// Where past closest approach the `outgoing` stage reads the flyby's true
+/// outgoing orbit, days. The first samples are **not** expected to be converged —
+/// they are printed so the settling can be seen, and each row carries how many
+/// Earth Hill radii out it is.
+const SAMPLE_DAYS: [f64; 6] = [10.0, 20.0, 30.0, 60.0, 90.0, 180.0];
+
+/// Where the revolution-mean window opens, days past closest approach. By here
+/// the rock is ~13 Earth Hill radii out and its heliocentric energy has stopped
+/// moving; the 10 d sample is 350 km-equivalent away from the rest and is printed
+/// only to show that.
+const SETTLE_DAYS: f64 = 30.0;
+
+/// How many points the revolution-mean averages over.
+const MEAN_SAMPLES: usize = 32;
+
+/// Earth's Hill radius, metres — 0.01 AU to two figures. Only a scale for the
+/// sample table's "how far out of Earth's grip is this reading" column; nothing
+/// is computed from it.
+const EARTH_HILL_RADIUS_M: f64 = 1.5e9;
+
 const LADDER_DV_LO: f64 = 0.004;
 const LADDER_DV_HI: f64 = 0.80;
 const LADDER_RUNGS: usize = 14;
@@ -450,9 +479,10 @@ fn main() {
         "xi_sweep" => stage_xi_sweep(&args),
         "frame" => stage_frame(&args),
         "crowding" => stage_crowding(&args),
+        "outgoing" => stage_outgoing(&args),
         other => {
             eprintln!(
-                "unknown stage {other:?}; expected ladder | screen | door | spacing | xi_sweep | frame | crowding"
+                "unknown stage {other:?}; expected ladder | screen | door | spacing | xi_sweep | frame | crowding | outgoing"
             );
             std::process::exit(2);
         }
@@ -2235,4 +2265,364 @@ fn stage_crowding(args: &[String]) {
              to; the doc's claim must not be upgraded on it.",
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 8 — the outgoing orbit itself: is the map's `a'` wrong, or is `a' = a_res`
+// the wrong condition?
+// ---------------------------------------------------------------------------
+
+/// Fly a recorded door centre and measure the semi-major axis the flyby **really**
+/// leaves the rock on, against the two things the map assumes about it.
+///
+/// Every previous stage measured the door's *position* and compared candidate
+/// explanations for where it sits. All of them worked inside the closed form: the
+/// `frame` stage rebuilt `c`, `θ` and Earth's clock and re-drew the circle, and
+/// made the spread worse. None of them ever asked the propagator what orbit the
+/// flyby actually produced. That number has never been measured in this repo —
+/// [`KeyholeShot::a_prime_m`] is the *closed form's* answer at the flown point,
+/// not the flown one.
+///
+/// Two claims are folded into one circle, and this stage separates them:
+///
+/// 1. **the prediction** — at a b-plane point `p`, the flyby leaves the rock on
+///    the `a'` that [`OpikFrame::post_encounter_semi_major_axis`] says it does;
+/// 2. **the condition** — landing on `a' = a_res` is what produces a resonant
+///    return impact `h` years later.
+///
+/// The circle is drawn where claim 1 says claim 2 is met. A door 786 km away from
+/// it means at least one of them is false there.
+///
+/// **The decision rule, written before the run.** Let `E` be the recorded
+/// placement error of the row (19.3 km at 4383 d, 786.0 km at 200 d) and let
+/// `∇a'·n̂` convert an `a'` difference into a distance along the circle's outward
+/// normal — exact, not a proxy, because the circles *are* the level sets of `a'`,
+/// so `∇a'` is normal to them.
+///
+/// - If `(a_true − a_res)/∇a'·n̂` is small against `E` at both leads, while
+///   `(a_true − a'_closed)/∇a'·n̂ ≈ −d₀` and tracks the 34× ratio between them:
+///   **the condition is right and the prediction is biased.** The map draws the
+///   circle in the wrong place because it mispredicts the outgoing orbit, and the
+///   next question is which of the closed form's approximations does it.
+/// - If `(a_true − a'_closed)/∇a'·n̂` is small against `E` while
+///   `(a_true − a_res)/∇a'·n̂ ≈ d₀`: **the prediction is right and the condition is
+///   wrong.** A resonant return does not need `a = a_res`, and the missing term is
+///   phase/timing — the next question is what sets the offset.
+/// - A third outcome (both small, with `d₀` large) is not a physical answer, it is
+///   a broken conversion. The stage prints `(a'_closed − a_res)/∇a'·n̂` beside `d₀`
+///   as the arithmetic identity check; if those two disagree, nothing else on the
+///   row may be read.
+///
+/// **The sampling convention is the risk, so it is measured rather than chosen.**
+/// An osculating heliocentric `a` after the flyby is not convention-free: the
+/// planets wander it, and the signal being discriminated is only
+/// `∇a'·n̂ × 800 km`. Three epochs — 10, 30 and 90 days past closest approach, i.e.
+/// ~3, ~9 and ~27 Earth Hill radii out — and the **spread between them is printed
+/// in the same kilometres as the answer**. If the spread reaches a third of `E`,
+/// this stage cannot discriminate at that lead and says so instead of picking the
+/// epoch that gives a tidy answer.
+///
+/// The `r ≈ R⊕ₒᵣᵦ` column is free once a flight exists.
+/// [`OpikFrame::cos_theta_out_for_semi_major_axis`] evaluates vis-viva at
+/// **Earth's** heliocentric distance while the rock is 140 000–150 000 km away,
+/// and `gradient_semi_major_axis`'s own doc calls itself "the one output the
+/// `r ≈ R⊕ₒᵣᵦ` approximation does *not* corrupt to first order" — an admission
+/// that `a'` is corrupted by it. So the stage re-draws the circle with `r` set to
+/// the rock's own heliocentric distance at closest approach and reports where that
+/// circle then sits relative to the flown door. It costs no extra flight, and it
+/// may well come back negative: the offset's radial part varies with where on the
+/// circle the plan lands, and ξ is one of the variables already shown *not* to
+/// order the five errors.
+///
+/// Runs the two extremes only by default — 4383 d (error 19.3 km) and 200 d
+/// (786.0 km). If the gap does not track the 34× between them, the middle rows
+/// cannot rescue it. The 450 d and 150 d rows are excluded outright: the first is
+/// the mixed-provenance row (`same_flight = false`), the second has no door.
+fn stage_outgoing(args: &[String]) {
+    let (_, args) = take_lead(args);
+    let h: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
+    let k: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4);
+    let branch = match args.get(3).map(|s| s.to_lowercase()) {
+        Some(s) if s.starts_with('p') => CircleBranch::Plus,
+        _ => CircleBranch::Minus,
+    };
+    let resonance = Resonance { h, k };
+    let wanted: Vec<f64> = args[4.min(args.len())..]
+        .iter()
+        .filter_map(|s| s.parse::<f64>().ok())
+        .collect();
+    let leads: Vec<f64> = if wanted.is_empty() {
+        vec![4383.0, 200.0]
+    } else {
+        wanted
+    };
+
+    let s = setup(None);
+    let ds = s.scenario.deflection().expect("deflection");
+    let eph = s.scenario.ephemeris().clone();
+    let mu_sun = eph.sun_gm_m3_s2().expect("sun GM");
+    let a_res = resonance.semi_major_axis_m();
+
+    let Some(c0) = s.frame.resonant_circle(resonance) else {
+        eprintln!("{resonance} has no circle in the nominal frame");
+        std::process::exit(1);
+    };
+    let aim = aim_at_resonance(&s.frame, resonance, s.xi, branch).unwrap_or_else(|e| {
+        eprintln!("cannot aim at {resonance}: {e}");
+        std::process::exit(1);
+    });
+    let sign = if aim.target.y < 0.0 { -1.0 } else { 1.0 };
+    log(&format!(
+        "\n{resonance} {branch:?}: a_res {:.9} AU, circle centre ζ {:.3} km, radius {:.3} km",
+        a_res / AU_M,
+        c0.center_zeta / 1e3,
+        c0.radius / 1e3
+    ));
+    log(&format!(
+        "flying recorded door centres; {} nudge; osculating a sampled at CA+10/30/90 d",
+        if sign < 0.0 { "retrograde" } else { "prograde" }
+    ));
+
+    let impact = s.scenario.impact_epoch();
+    let scan = ScanOptions {
+        max_sample_dt: 6.0 * 3600.0,
+        time_tol_seconds: 1.0e-3,
+        max_distance: Some(5.0e8),
+    };
+    let t0 = Instant::now();
+
+    for &(lead_days, dv, door_centre, same_flight) in FLOWN_34_BY_LEAD {
+        if !leads.iter().any(|w| (w - lead_days).abs() < 0.5) {
+            continue;
+        }
+        let Some(recorded) = door_centre else {
+            log(&format!(
+                "lead {lead_days:8.1} d: no door recorded — skipped"
+            ));
+            continue;
+        };
+        if !same_flight {
+            log(&format!(
+                "lead {lead_days:8.1} d: mixed-provenance row — skipped"
+            ));
+            continue;
+        }
+        let epoch = if (lead_days - s.default_lead_days).abs() < 1.0 {
+            s.scenario.epoch0()
+        } else {
+            impact.shifted_by_seconds(-lead_days * 86_400.0)
+        };
+        let Ok(seed) = ds.nominal().state_at(epoch) else {
+            log(&format!(
+                "lead {lead_days:8.1} d: the nominal has no state here"
+            ));
+            continue;
+        };
+        let Some(dir) = along_track_unit(seed).map(|u| u * sign) else {
+            log(&format!("lead {lead_days:8.1} d: no along-track heading"));
+            continue;
+        };
+
+        let (clock, _) = match ds.deflected_trajectory(epoch, dir * dv) {
+            Ok(t) => t,
+            Err(e) => {
+                log(&format!("lead {lead_days:8.1} d: {e}"));
+                continue;
+            }
+        };
+        let earth = EphemerisPerturber::new(eph.clone(), EARTH_J2000);
+        let ca = match closest_approach(&clock, &earth, scan) {
+            Ok(Some(ca)) => ca,
+            Ok(None) => {
+                log(&format!("lead {lead_days:8.1} d: no encounter in the gate"));
+                continue;
+            }
+            Err(e) => {
+                log(&format!("lead {lead_days:8.1} d: {e}"));
+                continue;
+            }
+        };
+        let enc = match ca.b_plane(s.frame.mu_earth, s.nominal.earth_radius) {
+            Ok(e) => e,
+            Err(e) => {
+                log(&format!("lead {lead_days:8.1} d: {e}"));
+                continue;
+            }
+        };
+        let p = s.frame.project(&enc.b_vector);
+        let d0 = c0.signed_distance(p);
+
+        // The conversion, exact rather than a proxy: the circles are the level
+        // sets of a', so ∇a' lies along the circle's outward normal.
+        let n_hat = (p - Vector2::new(0.0, c0.center_zeta)).normalize();
+        let grad = s.frame.gradient_semi_major_axis(p);
+        let grad_n = grad.dot(&n_hat);
+        let a_closed = s.frame.post_encounter_semi_major_axis(p);
+        let identity_km = (a_closed - a_res) / grad_n / 1e3;
+
+        // The rock's own heliocentric state at closest approach, and at three
+        // epochs after it — far enough out that Earth is no longer holding it.
+        let helio = |t: Epoch, st: &StateVector| {
+            let (rs_km, vs_km) = eph
+                .state_km_s(SUN_J2000, SSB_J2000, t.as_hifitime())
+                .expect("Sun state");
+            (st.position - rs_km * 1e3, st.velocity - vs_km * 1e3)
+        };
+        let at_ca = clock.state_at(ca.epoch).expect("state at CA");
+        let (r_ca, _) = helio(ca.epoch, &at_ca);
+
+        let t10 = ca.epoch.shifted_by_seconds(10.0 * 86_400.0);
+        let seed10 = clock.state_at(t10).expect("state 10 d after CA");
+        let onward = s
+            .scenario
+            .propagate_free(t10, seed10, 10.0 * 86_400.0, 50)
+            .expect("post-encounter arc");
+        let osculating = |t: Epoch| {
+            let st = onward.state_at(t).expect("post-encounter state");
+            let (r_h, v_h) = helio(t, &st);
+            1.0 / (2.0 / r_h.norm() - v_h.norm_squared() / mu_sun)
+        };
+        let mut a_true = Vec::new();
+        for days in SAMPLE_DAYS {
+            let t = ca.epoch.shifted_by_seconds(days * 86_400.0);
+            let r_geo = (onward.state_at(t).expect("state").position
+                - earth.state_at(t).expect("Earth").position)
+                .norm();
+            a_true.push((days, osculating(t), r_geo));
+        }
+        // The osculating value is not the observable. It wobbles through the
+        // revolution — the samples above swing ±100 km-equivalent — so the number
+        // the verdict rests on is its **mean over one full post-encounter
+        // revolution**, which is what kills a periodic term. The window opens at
+        // `SETTLE_DAYS`, by when the rock is ~13 Hill radii out and Earth's
+        // residual pull has stopped moving its energy.
+        let period = std::f64::consts::TAU * (a_closed.powi(3) / mu_sun).sqrt();
+        let mean_from = |start_days: f64| {
+            let t0 = ca.epoch.shifted_by_seconds(start_days * 86_400.0);
+            let n = MEAN_SAMPLES;
+            (0..n)
+                .map(|i| osculating(t0.shifted_by_seconds(period * i as f64 / n as f64)))
+                .sum::<f64>()
+                / n as f64
+        };
+        let a_mid = mean_from(SETTLE_DAYS);
+        // The convention's own error bar: the same mean taken over a revolution
+        // that starts half a revolution later. If the two disagree, the window is
+        // not a revolution or the arc is not settled, and nothing here is safe.
+        let a_shifted = mean_from(SETTLE_DAYS + period / 86_400.0 / 2.0);
+        let spread_km = (a_mid - a_shifted).abs() / grad_n.abs() / 1e3;
+
+        // The r ≈ R⊕ column: the same circle with vis-viva evaluated at the rock's
+        // own heliocentric distance instead of Earth's.
+        let mut f_r = s.frame;
+        f_r.r_earth = r_ca;
+        let d_r = f_r.resonant_circle(resonance).map(|c| c.signed_distance(p));
+
+        log(&format!(
+            "\nlead {lead_days:.0} d, Δv {dv:.10} m/s, CA {}",
+            ca.epoch.as_hifitime()
+        ));
+        log(&format!(
+            "  flown point ξ {:+.1} km ζ {:+.1} km, b {:.1} km; d₀ {:+.3} km against the recorded {:+.3} km",
+            p.x / 1e3,
+            p.y / 1e3,
+            enc.impact_parameter / 1e3,
+            d0 / 1e3,
+            recorded / 1e3
+        ));
+        log(&format!(
+            "  ∇a'·n̂ {grad_n:.4} m/m; identity (a'_closed − a_res)/∇a'·n̂ {identity_km:+.3} km against d₀ {:+.3} km",
+            d0 / 1e3
+        ));
+        for (days, a, r_geo) in &a_true {
+            log(&format!(
+                "  a_true(CA+{days:>3.0} d, {:5.2} Hill) {:.9} AU → (a_true − a_res)/∇a'·n̂ {:+10.1} km, (a_true − a'_closed)/∇a'·n̂ {:+10.1} km",
+                r_geo / EARTH_HILL_RADIUS_M,
+                a / AU_M,
+                (a - a_res) / grad_n / 1e3,
+                (a - a_closed) / grad_n / 1e3
+            ));
+        }
+        log(&format!(
+            "  a_true over one revolution ({:.1} d) {:.9} AU → (a_true − a_res)/∇a'·n̂ {:+.1} km, (a_true − a'_closed)/∇a'·n̂ {:+.1} km",
+            period / 86_400.0,
+            a_mid / AU_M,
+            (a_mid - a_res) / grad_n / 1e3,
+            (a_mid - a_closed) / grad_n / 1e3
+        ));
+        log(&format!(
+            "  a'_closed {:.9} AU; the mean's own error bar (window shifted half a revolution) {spread_km:.1} km against a recorded error of {:.1} km",
+            a_closed / AU_M,
+            recorded / 1e3
+        ));
+        // Can the map get that radial offset without flying? The b-vector is the
+        // rock's displacement from Earth in the b-plane, so `r⊕ + unproject(p)` is
+        // the offset a drawn circle could correct for on its own.
+        let r_map = s.frame.r_earth + s.frame.unproject(p);
+        log(&format!(
+            "\n  radial offset: flown {:+.1} km, map's own r⊕ + B̂ estimate {:+.1} km (miss {:+.1} km)",
+            (r_ca.norm() - s.frame.r_earth.norm()) / 1e3,
+            (r_map.norm() - s.frame.r_earth.norm()) / 1e3,
+            (r_map.norm() - r_ca.norm()) / 1e3
+        ));
+        match d_r {
+            Some(d) => log(&format!(
+                "  r ≈ R⊕ column: rock at {:.6} AU vs Earth at {:.6} AU; circle moves d₀ {:+.3} → {:+.3} km (shift {:+.1} km against the {:+.1} km the truth needs)",
+                r_ca.norm() / AU_M,
+                s.frame.r_earth.norm() / AU_M,
+                d0 / 1e3,
+                d / 1e3,
+                (d - d0) / 1e3,
+                (a_mid - a_closed) / grad_n / 1e3
+            )),
+            None => log("  r ≈ R⊕ column: the substituted frame cannot reach this resonance"),
+        }
+        // The map builds `c`, `θ` and Earth's state from the **nominal**, undeflected
+        // encounter and then places the deflected point on it. The `frame` stage
+        // asked what rebuilding that does to the circle's *position* (it makes the
+        // spread worse). This asks the different question this stage can now settle:
+        // does rebuilding fix the **prediction**? Same flight, no extra propagation.
+        let (r1_km, v1_km) = eph
+            .state_km_s(EARTH_J2000, SUN_J2000, ca.epoch.as_hifitime())
+            .expect("Earth at this flight's own CA");
+        match OpikFrame::new(&enc, r1_km * 1e3, v1_km * 1e3, mu_sun) {
+            Ok(f_own) => {
+                let a_own = f_own.post_encounter_semi_major_axis(f_own.project(&enc.b_vector));
+                log(&format!(
+                    "  built from this flight's own encounter: a' {:.9} AU → bias (a_true − a'_own)/∇a'·n̂ {:+.1} km, against {:+.1} km for the map's frame",
+                    a_own / AU_M,
+                    (a_mid - a_own) / grad_n / 1e3,
+                    (a_mid - a_closed) / grad_n / 1e3
+                ));
+            }
+            Err(e) => log(&format!("  own-frame column: {e}")),
+        }
+        // Which heliocentric distance *would* have been right? The outgoing speed
+        // does not depend on `r` at all — `cos θ'` is a b-plane quantity — so `a'`
+        // depends on it only through vis-viva, and the `r` that reproduces the
+        // flown orbit inverts in closed form rather than being searched for.
+        let v2_out = {
+            let v = s.frame.v_earth.norm();
+            let u = s.frame.v_inf;
+            v * v + u * u + 2.0 * v * u * s.frame.cos_theta_out(p)
+        };
+        let r_star = 2.0 / (1.0 / a_mid + v2_out / mu_sun);
+        log(&format!(
+            "  the r that would have been right: {:+.1} km from Earth's, i.e. {:.2} of the way to the rock's own {:+.1} km",
+            (r_star - s.frame.r_earth.norm()) / 1e3,
+            (r_star - s.frame.r_earth.norm()) / (r_ca.norm() - s.frame.r_earth.norm()),
+            (r_ca.norm() - s.frame.r_earth.norm()) / 1e3
+        ));
+        let verdict = if spread_km >= recorded.abs() / 3e3 {
+            "INCONCLUSIVE at this lead — the sampling spread is not small against the error being explained"
+        } else if ((a_mid - a_res) / grad_n).abs() < 0.25 * recorded.abs() {
+            "the CONDITION holds and the PREDICTION is biased — the flyby does not leave the rock where the closed form says"
+        } else if ((a_mid - a_closed) / grad_n).abs() < 0.25 * recorded.abs() {
+            "the PREDICTION holds and the CONDITION is wrong — a return does not need a = a_res"
+        } else {
+            "NEITHER: both differences are large, which the decision rule does not cover"
+        };
+        log(&format!("  verdict (revolution mean): {verdict}"));
+    }
+    log(&format!("\nstage took {:.1} s", t0.elapsed().as_secs_f64()));
 }

@@ -37,6 +37,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **The calibration taken outside its own domain**: the same 3:4 door flown at four deflection lead times, the lead-sweep gate that made it affordable, and the placement band resized on what the planner can actually dial | **done 2026-09-07**; the door centre moves **+19.3 km -> +210.6 km -> +467.9 km -> no door at all** across leads 4383, 900, 450 and 150 days, and **only the first of those is not dialable** - so the five doors that set `KEYHOLE_PLACEMENT_KM = 100` were every one of them flown outside the range the constant is used in | `core/examples/probe_keyhole_placement.rs`, `core/src/keyhole.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/sim.gd` |
 | **The lead was the variable, and the crowded register fired**: the 3:4 door flown at 300 d and at 200 d, the frame proposed as the mechanism and falsified, and the several-doors register searched for on real physics | **done 2026-09-07**; of lead, Δv, ξ and the angle round the circle, **only the lead orders all five flown doors** — not the impulse (the 200 d door takes a *smaller* nudge and sits *further* out, +786.0 vs +648.2 km) and not the place on the circle (the 300 d and 12 yr doors are **0.48° of arc** apart with 34× the error). Rebuilding each flight's own Öpik frame makes the spread **worse**, 767 → 1375 km. `KEYHOLE_PLACEMENT_KM` 500 → **800**, and the width claim moves from ≤1.44× to **≤2.11×** on a door that is closing | `core/examples/probe_keyhole_placement.rs`, `godot/rust/src/mission_core.rs`, `godot/scripts/sim.gd`, `godot/tests/{test_orrery,_shot}.gd` |
 | **The shape number promoted out of its probe**: the per-axis linearity residual moved from two private copies into `LinearityReport::shape_residual`, with pure-math tests that know the right answer, and the blind scalar's under-reading factored | **done 2026-09-08**; behaviour identical (shipping minor 0.0007, top stop 0.5610, scalar 0.0043) and the 130x gap turns out **not** to be the 206:1 aspect ratio - it is 143 drawn half-widths of shell reach x 0.90 of the residual lying across the needle, because `shell_scale` is 0.693 of the 3sigma half-length, not equal to it. The move also flipped an eigenvector sign nothing tested - the drawn angle read **-90.26 against a published 89.736** with every ratio unchanged - now pinned in the module and folded into a half-turn at the print | `core/src/uncertainty.rs`, `core/tests/tier3_drawn_shape.rs`, `core/examples/probe_tier3_{drawn_shape,uncertainty}.rs` |
+| **Which half of the keyhole map is wrong**: the semi-major axis the flyby *actually* produces, read on four flown 3:4 doors as a mean over one post-encounter revolution, against both things a resonant circle assumes | **done 2026-09-08**; the resonance **condition** is sound — a flown door leaves the rock **14 to 49 km-equivalent** from `a_res` at every lead, flat, inside the measurement's own ±41 km bar — while the closed form's **prediction** of `a'` is wrong by −33, −227, −665 and −839 km, which *is* the 19 → 786 km ladder. Both available repairs are dead: the `r ≈ R⊕` substitution explains **0.4 %** at the 300 d door (where the rock is 53 km from Earth's distance and the error is at full size), and rebuilding the frame from the flight's own encounter is worse at three leads of four | `core/examples/probe_keyhole_placement.rs`, `core/tests/keyhole_prediction_bias.rs`, `core/src/keyhole.rs` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -118,7 +119,19 @@ Read this table first, then the session that owns the layer you are touching.
    there - `screen` scores **zero hits at 200 and 300 d where the door is known**,
    the ladder aim is geometrically unusable below ~150 d (four `bracketed = false`
    walls), and `xi_sweep` was reporting a hole in the curve as its end. See *The
-   band's domain floor, measured*.
+   band's domain floor, measured*. **And the mechanism thread it kept open moved
+   2026-09-08**, by measuring the one thing six sessions never had: the orbit the
+   flyby *actually* leaves the rock on. A resonant circle folds two claims into
+   one locus, and only one of them is false. The **condition** (`a' = a_res`
+   produces the return) holds at every flown door to 14–49 km-equivalent — flat,
+   half a door width, inside the ±41 km bar of the measurement — while the
+   **prediction** (that the flyby leaves the rock where the closed form says) is
+   off by −33, −227, −665 and −839 km across the four leads, which is exactly the
+   19 → 786 km ladder. So everything about the *return* is excluded, and the
+   remaining search space is inside `cos θ'` — where the two cheap candidates, the
+   `r ≈ R⊕ₒᵣᵦ` substitution and rebuilding the frame from the deflected flight's
+   own encounter, are now both measured and both dead. See *Which half of the map
+   is wrong*.
 5. ~~**dop853 → IAS15 crossover.**~~ **RETIRED 2026-09-06 — measured, and no second
    integrator is warranted.** Three corrections to that line. (a) The premise was
    wrong: it leaned on the 15.1 km residual vs JPL, which is *unmodelled forces*
@@ -4808,3 +4821,179 @@ test prints. The probe is the thing that prints it.
   others are in `keyhole.rs` (3), `sbdb.rs` (4 total), `deflection.rs`,
   `keyhole_target.rs` and `probe_keyhole_floor.rs`. Nothing in this batch touches
   them, and CI does not pass `-D warnings`.
+
+### Which half of the map is wrong - 2026-09-08 session (item 4's mechanism thread: the condition is sound, the prediction carries the whole ladder)
+
+Six sessions have measured *where* a keyhole door sits against where the map
+draws its circle, and the last of them left the question in its sharpest form:
+
+> **The mechanism is still open, and it is now a much sharper question.** The
+> variable is the lead. It is not where on the circle, not the impulse, and not
+> the frame - and those were the three things that could have been read off the
+> existing machinery.
+
+Every one of those attempts worked *inside* the closed form: rebuild `c`, `θ`,
+Earth's clock, re-draw the circle, re-measure the distance. None of them ever
+asked the propagator what orbit the flyby actually produced. That number had
+never been measured in this repo - `KeyholeShot::a_prime_m` is the closed form's
+answer at the flown point, not the flown one - and measuring it splits the
+question in half.
+
+#### The two claims a circle folds into one locus
+
+A resonant circle is drawn where **the prediction** says **the condition** is met:
+
+1. *the prediction* - at a b-plane point `p`, the flyby leaves the rock on the
+   `a'` that `OpikFrame::post_encounter_semi_major_axis` says it does;
+2. *the condition* - landing on `a' = a_res` is what produces a resonant return
+   impact `h` years later.
+
+A door 786 km from its circle means at least one of them is false there, and no
+amount of re-deriving the circle can say which. Flying the door and reading the
+outgoing orbit can. `probe_keyhole_placement outgoing` re-flies **recorded** door
+centres - the Δv is the door's own refined floor, so the flight lands on the door
+by construction - and converts every `a'` difference into b-plane kilometres
+through `∇a'·n̂`. That conversion is exact rather than a proxy: the circles *are*
+the level sets of `a'`, so `∇a'` is normal to them. The stage prints
+`(a'_closed − a_res)/∇a'·n̂` beside `d₀` as an arithmetic identity check, and the
+four rows agree to under 4 km (+19.161 vs +19.158, +210.903 vs +210.632, +650.739
+vs +648.174, +789.754 vs +785.988), so nothing below rests on a broken conversion.
+What is left there is the linearisation's own curvature over 786 km of circle, which
+grows with `d₀` exactly as it should - which is why the guard test allows 5 km
+rather than pretending the identity is exact.
+
+The decision rule was written into the stage's doc comment before it ran.
+
+#### The observable had to be built before it could be read
+
+An osculating heliocentric `a` after a flyby is not a convention-free number, and
+the first run said so loudly. At **CA + 10 days** the rock is 4.4 Earth Hill radii
+out and still inside Earth's residual pull: that sample sits ~350 km-equivalent
+away from every later one, at *both* leads. And even once free, the osculating
+value swings through the revolution - at the 12 yr door it reads −4, +83, +147,
++74 and −41 km-equivalent at 20, 30, 60, 90 and 180 days. A single epoch would
+have let the answer be chosen by picking one.
+
+So the observable is the **mean over one full post-encounter revolution** (274 d),
+opened at CA + 30 d where the rock is ~13 Hill radii out, sampled 32 times. Its
+own error bar is the same mean taken over a revolution starting half a revolution
+later: **40.8 to 41.7 km-equivalent** across the four flights. That is the number
+every claim below is read against, and it is why the 12 yr row is reported as
+inconclusive rather than as a small answer.
+
+#### The result: the condition column is flat and the prediction column is the ladder
+
+| lead | door `d₀` | `a_true − a_res` | `a_true − a'_closed` | `δa'/a'` of the bias |
+|---|---|---|---|---|
+| 4383 d | +19.2 km | **−14.2 km** | −33.3 km | 7.0e-6 |
+| 900 d | +210.6 km | **−15.7 km** | −226.6 km | 4.8e-5 |
+| 300 d | +648.2 km | **−13.9 km** | −664.6 km | 1.4e-4 |
+| 200 d | +786.0 km | **−48.8 km** | −838.6 km | 1.8e-4 |
+
+The middle column is **flat at about −15 km** - half a door width, inside the
+±41 km error bar of the measurement itself - while the door error it is supposed
+to explain runs 19 → 786 km. The right-hand column *is* that ladder.
+
+So: **`a' = a_res` is the right condition, and this module's `a'` is the wrong
+prediction of it.** The rock that flies through a door really is on the resonant
+orbit, to within half a door width, at every lead including the one where the map
+is 786 km out. The map is not wrong about what a resonant return needs; it is
+wrong about where the flyby leaves the rock.
+
+That is a strictly sharper statement than the file has carried until now, and it
+retires a whole family of candidate mechanisms without flying them: anything about
+the *return* - the phase of Earth at the second encounter, the h-year leg's own
+perturbations, a timing correction to the resonance - is now excluded, because the
+condition is met at the flown door to within the noise.
+
+#### Both repairs that were available on the same flights are dead
+
+**The `r ≈ R⊕ₒᵣᵦ` substitution.** `keyhole.rs`'s module doc has named this as the
+source of the absolute error since the module was written ("taking the encounter
+position as Earth's own costs `η ≈ 7e-5` ... hence `δa'/a' ≈ 1.3e-4`"), and
+`gradient_semi_major_axis`'s doc calls itself "the one output the `r ≈ R⊕ₒᵣᵦ`
+approximation does *not* corrupt" - an admission that `a'` is corrupted by it.
+`cos_theta_out_for_semi_major_axis` evaluates vis-viva at **Earth's** heliocentric
+distance while the rock is 140 000-150 000 km away, so re-drawing the circle at
+the rock's own distance costs no extra flight. It does not work, and one flight
+would have said it did:
+
+| lead | rock's radial offset | circle moves | what the truth needs |
+|---|---|---|---|
+| 4383 d | +516.9 km | +27.9 km | −33.3 km |
+| 900 d | −1 129.7 km | −61.1 km | −226.6 km |
+| 300 d | −52.6 km | −2.8 km | −664.6 km |
+| 200 d | −25 622.8 km | −1 369.1 km | −838.6 km |
+
+The 200 d row alone looks like a mechanism found: right sign, and the distance
+that would have been *exactly* right is 0.61 of the way to the rock's own. Run
+across the ladder it collapses. **At the 300 d door the rock is 53 km from
+Earth's heliocentric distance** - a relative `3.6e-7`, some **200x below** the
+`7e-5` the module doc charges - **while the bias is at its full 665 km**, and the substitution explains
+0.4 % of it. The "fraction of the way" column reads −1.19, 3.70, 232.24, 0.61.
+There is no law there. The offset does not order the errors because it is a
+*radial* projection of the b-vector, and where the b-point sits on the circle
+does not follow the lead.
+
+**Rebuilding the frame from the deflected flight's own encounter.** The `frame`
+stage already found this makes the *circle's position* worse. That left a real
+gap, because a circle's position also moves when the axes rotate under the
+b-vector, so the negative was about a compound quantity. This asks the clean
+version - does rebuilding fix the **prediction**? - and the answer is the same
+only more so: the bias goes −260.0, −352.6, −294.5 and −1686.4 km against the
+map's −33.3, −226.6, −664.6 and −838.6. Worse at three leads of four, and twice as
+bad at the one that matters most. The map's choice of the nominal frame is
+empirically the better one, for the second time and now measured on the
+prediction itself rather than on the drawn circle.
+
+#### What shipped
+
+- `probe_keyhole_placement outgoing` - the new stage: re-flies recorded door
+  centres, reads the flown outgoing orbit as a revolution mean with its own error
+  bar, and prints the identity check, the settling table with each sample's
+  distance in Earth Hill radii, the `r ≈ R⊕` column, the own-frame column, and the
+  heliocentric distance that *would* have been right (closed form - `a'` depends
+  on `r` only through vis-viva, so it inverts rather than being searched for).
+- `core/tests/keyhole_prediction_bias.rs` - the finding as a guard rather than a
+  log line: it flies the two extreme doors, asserts each reproduces its recorded
+  centre to a kilometre, asserts the gradient identity, and pins the split - the
+  condition residual under 100 km-equivalent at both leads, the prediction bias
+  over 500 km at 200 d. Reproduces the probe exactly (−14.2 / −33.3 and
+  −48.8 / −838.6). 22.7 s.
+- `keyhole.rs`'s module doc corrected where it was wrong rather than appended to:
+  the size of the absolute error is confirmed and given its measured range
+  (`7e-6` to `1.8e-4`, by lead), the `r ≈ R⊕ₒᵣᵦ` attribution is recorded as
+  falsified with the 300 d row as the counterexample, and the condition's
+  soundness - the thing the module can now legitimately claim - is stated with the
+  test that pins it.
+
+Nothing in the shipping path changed. `KEYHOLE_PLACEMENT_KM` is still 800: this
+batch explains *where* the error lives, and does not shrink it.
+
+#### Checks
+
+The probe and the test agree to the decimal on both flown doors, which is the
+check that matters here - they build the flight independently (the probe from its
+own `setup`, the test from a bare scenario) and the numbers are identical.
+`cargo test --release --test keyhole_prediction_bias` with
+`ASTEROID_REQUIRE_KERNELS=1`: 1 passed, 22.68 s. Core `--lib` with kernels
+required: unchanged by this batch (nothing in `keyhole.rs` moved but a doc
+comment). `cargo fmt --check` clean.
+
+#### What this leaves
+
+- **The mechanism is still open, and the search space is now much smaller.** It is
+  in the prediction of `a'` at a b-plane point, it is not the heliocentric
+  distance, it is not the frame, and it is nothing about the return leg. What is
+  left inside `cos θ'` is the assumption that the encounter is an instantaneous
+  two-body rotation of `v∞` about Earth - the solar tide across the flyby, and the
+  finite time the turn actually takes, neither of which is in Öpik's construction
+  and both of which grow as the approach geometry departs from the nominal.
+- **The four leads are one resonance.** Everything above is the 3:4. A second
+  resonance would say whether the condition column stays flat at −15 km when the
+  return is seven years instead of three, which is the cheapest way to find out
+  whether "the condition is sound" is a property of the theory or of this circle.
+- **The 12 yr row is inconclusive, and honestly so.** Its door error, 19 km, is
+  smaller than the measurement's own 41 km error bar. Nothing in the table's top
+  row should be quoted as a measurement of anything except that the error is small
+  there.

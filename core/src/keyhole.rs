@@ -83,6 +83,27 @@
 //! *return encounter* still has to come from the propagator; this module is the
 //! map that says where to fly.
 //!
+//! **The size of that paragraph is right and its named cause is not** — measured
+//! 2026-09-08 against four flown 3:4 doors by `probe_keyhole_placement outgoing`,
+//! which read the semi-major axis the propagator actually produces (as a mean over
+//! one post-encounter revolution, ±41 km-equivalent) rather than the one this
+//! module predicts. The absolute error is real and runs `δa'/a'` from `7e-6` at a
+//! 12-year deflection lead to `1.8e-4` at 200 days. But it is **not** the
+//! `r ≈ R⊕ₒᵣᵦ` substitution above: at the 300 d door the rock is **53 km** from
+//! Earth's heliocentric distance — a relative `3.6e-7`, some **200× below** the
+//! `7e-5` this paragraph charges — while the error is at its full `1.4e-4`, and substituting the rock's
+//! own distance moves the circle 2.8 km against the 665 km wanted. Nor is it the
+//! frame: rebuilding `c`, `θ` and Earth's state from the deflected flight's own
+//! encounter makes the prediction worse at three of the four leads.
+//!
+//! What the same measurement *does* license is the other half. The resonance
+//! **condition** is sound: a flown door centre leaves the rock 14 to 49 km-equivalent
+//! from `a_res` at every lead — half a door width, flat, while the door's distance
+//! from its circle runs 19 → 786 km. So `a' = a_res` is the right target and this
+//! module's `a'` is the wrong prediction of it, which is a sharper statement of
+//! where the map is broken than "order 1e-4 somewhere". Pinned by
+//! `core/tests/keyhole_prediction_bias.rs`.
+//!
 //! # The keyhole width, as a definition rather than a claim
 //!
 //! A `Δa'` shifts the period by `ΔT/T = 1.5·Δa'/a'`; after the `k` revolutions of

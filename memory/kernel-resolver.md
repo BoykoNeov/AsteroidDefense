@@ -26,6 +26,18 @@ silent-green failure straight back. `ASTEROID_REQUIRE_KERNELS` turns "nothing
 resolved" into a panic naming the test that would have lied. Unset, the skip is
 still green, so offline CI keeps working — that is deliberate, don't "fix" it.
 
+**2026-09-08, the move to W: — the resolver's anchor is a *relative walk*, and
+it is the thing that breaks next time.** Both mirrors find the scratch kernels
+by walking up from the repo, so they encode the surrounding folder layout, not
+just a path. Old layout had `temp/` *inside* `claud_projects/` beside the repo,
+so one `..` reached it. The new layout does not, so the walk is now two levels:
+`core/src/kernels.rs` uses `repo.join("../../temp/claude/AsteroidDefense/kernels")`
+and `godot/scripts/kernels.gd` uses `res://../../../temp/claude/...` (one extra
+`..` because `res://` is `<repo>/godot`, not the repo). The old sibling walk is
+kept as a fallback, so an unmoved checkout still resolves. **Move the repo or
+the scratch root again and both numbers are wrong** — and the failure is the
+silent-green one this whole memory exists to prevent, unless REQUIRE=1 is set.
+
 `user://kernels.cfg` is deliberately NOT read from Rust (`user://` is Godot's
 per-platform app-data path; reconstructing it would be a guess that rots).
 

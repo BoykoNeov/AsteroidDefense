@@ -2351,6 +2351,23 @@ fn stage_crowding(args: &[String]) {
 /// (786.0 km). If the gap does not track the 34× between them, the middle rows
 /// cannot rescue it. The 450 d and 150 d rows are excluded outright: the first is
 /// the mixed-provenance row (`same_flight = false`), the second has no door.
+/// One row of the ingredient swap: `(lead days, ∇a'·n̂, the bias to explain, and then
+/// the km-equivalent each of `Ŝ`, `v∞`, Earth's position and Earth's velocity moves
+/// the prediction on its own, all four at once, how far the flown b-vector lies out
+/// of the nominal plane, and how much of the `Ŝ` term is only the `|b|` that drops).
+type IngredientRow = (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64);
+
+/// One row of the two-leg split: `(lead days, ξ of the flown point, the incoming error
+/// in the nominal frame and in the flight's own, the outgoing error in each, the true
+/// change across the encounter and the change predicted by each frame, and the
+/// incoming mean's own error bar)`. Kilometres throughout.
+type LegRow = (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64);
+
+/// One row of the repair: `(lead days, the door's distance from the circle as the map
+/// draws it today, the same distance if the circle were placed on the revolution-mean
+/// change in `a`, the same on a single osculating sample, the baseline's error bar)`.
+type RepairRow = (f64, f64, f64, f64, f64);
+
 fn stage_outgoing(args: &[String]) {
     let (_, args) = take_lead(args);
     let h: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
@@ -2403,6 +2420,9 @@ fn stage_outgoing(args: &[String]) {
         max_distance: Some(5.0e8),
     };
     let t0 = Instant::now();
+    let mut split: Vec<IngredientRow> = Vec::new();
+    let mut inbound: Vec<LegRow> = Vec::new();
+    let mut repair: Vec<RepairRow> = Vec::new();
 
     for &(lead_days, dv, door_centre, same_flight) in FLOWN_34_BY_LEAD {
         if !leads.iter().any(|w| (w - lead_days).abs() < 0.5) {
@@ -2600,26 +2620,225 @@ fn stage_outgoing(args: &[String]) {
             )),
             None => log("  r ≈ R⊕ column: the substituted frame cannot reach this resonance"),
         }
-        // The map builds `c`, `θ` and Earth's state from the **nominal**, undeflected
-        // encounter and then places the deflected point on it. The `frame` stage
-        // asked what rebuilding that does to the circle's *position* (it makes the
-        // spread worse). This asks the different question this stage can now settle:
-        // does rebuilding fix the **prediction**? Same flight, no extra propagation.
+        // ---- The four ingredients the closed form takes from the NOMINAL rock ----
+        //
+        // The map builds `Ŝ`, `v∞`, `c`, `θ` and Earth's state from the
+        // **nominal**, undeflected encounter and then places the deflected point
+        // on it. Six sessions have tested that as a whole — rebuild every
+        // ingredient at once ("the own frame") and see whether the answer
+        // improves. It does not, and non-monotonically in the lead, which is the
+        // signature of terms that partially cancel; a compound test cannot see
+        // them. This swaps them **one at a time**, on the same flight, with no
+        // extra propagation.
+        //
+        // Two candidates the previous session left open — the solar tide across
+        // the flyby, and the finite time the turn actually takes — are excluded
+        // before this runs, by a number already on record rather than by a new
+        // flight. The 300 d and the 12 yr doors sit **0.48° of arc apart on the
+        // same circle**: they share `c`, share `b` to under 1 %, and share `v∞`
+        // to 4e-4, i.e. they are the *same encounter* — and their biases differ
+        // 20×. No encounter-local mechanism can do that. Whatever varies with the
+        // lead varies *before* the rock arrives, and the incoming heliocentric
+        // orbit is exactly what a Δv of 0.2165 at 12 yr and 2.880 at 300 d differ
+        // in — which is what these four ingredients describe.
+        //
+        // Each frame is rebuilt through `OpikFrame::new` rather than by poking
+        // fields, so everything a swapped ingredient determines — the axes, `θ`,
+        // `c` — follows it. A frame carrying a new `v_earth` beside a stale `ζ̂`
+        // is not a frame. And each re-*projects* the b-vector: the b-vector is the
+        // physical object and `(ξ, ζ)` are coordinates in whichever frame is being
+        // asked. (`capture_radius` is left at the nominal value when `v∞` is
+        // swapped; nothing on this path reads it.)
         let (r1_km, v1_km) = eph
             .state_km_s(EARTH_J2000, SUN_J2000, ca.epoch.as_hifitime())
             .expect("Earth at this flight's own CA");
-        match OpikFrame::new(&enc, r1_km * 1e3, v1_km * 1e3, mu_sun) {
-            Ok(f_own) => {
-                let a_own = f_own.post_encounter_semi_major_axis(f_own.project(&enc.b_vector));
-                log(&format!(
-                    "  built from this flight's own encounter: a' {:.9} AU → bias (a_true − a'_own)/∇a'·n̂ {:+.1} km, against {:+.1} km for the map's frame",
-                    a_own / AU_M,
-                    (a_mid - a_own) / grad_n / 1e3,
-                    (a_mid - a_closed) / grad_n / 1e3
-                ));
+        let (r1, v1) = (r1_km * 1e3, v1_km * 1e3);
+        let predict = |s_hat: Vector3<f64>, v_inf: f64, r_e: Vector3<f64>, v_e: Vector3<f64>| {
+            let mut e = s.nominal;
+            e.s_hat = s_hat;
+            e.v_inf = v_inf;
+            OpikFrame::new(&e, r_e, v_e, mu_sun)
+                .ok()
+                .map(|f| f.post_encounter_semi_major_axis(f.project(&enc.b_vector)))
+        };
+        // Every delta below is converted with the **same** nominal `∇a'·n̂` as the
+        // bias it is being compared against, so the terms and the bias share one
+        // unit conversion and can legitimately be summed.
+        let km_eq = |a: Option<f64>| a.map_or(f64::NAN, |a| (a - a_closed) / grad_n / 1e3);
+        let sn = s.frame.eta_hat;
+        let un = s.frame.v_inf;
+        let rn = s.frame.r_earth;
+        let vn = s.frame.v_earth;
+        let d_shat = km_eq(predict(enc.s_hat, un, rn, vn));
+        let d_vinf = km_eq(predict(sn, enc.v_inf, rn, vn));
+        let d_rearth = km_eq(predict(sn, un, r1, vn));
+        let d_vearth = km_eq(predict(sn, un, rn, v1));
+        let d_all = km_eq(predict(enc.s_hat, enc.v_inf, r1, v1));
+        let sum = d_shat + d_vinf + d_rearth + d_vearth;
+        let bias_km = (a_mid - a_closed) / grad_n / 1e3;
+        // The part of the `Ŝ` term that is not a rotation at all: the flown
+        // b-vector is perpendicular to its *own* asymptote, not to the nominal
+        // `η̂`, so `project()` silently drops a component and the closed form is
+        // evaluated at a shortened radius. Restoring `|b|` along the same in-plane
+        // direction isolates how much of `d_shat` is only that.
+        let out_of_plane = enc.b_vector.dot(&sn);
+        let p_full = p * (enc.impact_parameter / p.norm());
+        let d_bmag = (s.frame.post_encounter_semi_major_axis(p_full) - a_closed) / grad_n / 1e3;
+        log("\n  --- the nominal frame's four ingredients, swapped one at a time ---");
+        log(&format!("  the bias to explain (a_true − a'_closed)/∇a'·n̂ = {bias_km:+.1} km, at ∇a'·n̂ = {grad_n:.4} m/m"));
+        log(&format!("  Ŝ (incoming asymptote) alone {d_shat:+10.1} km — of which {d_bmag:+.1} km is only the |b| the nominal projection drops ({:+.1} km of b lies out of the nominal plane)", out_of_plane / 1e3));
+        log(&format!(
+            "  v∞ alone                     {d_vinf:+10.1} km — δv∞ {:+.4} m/s ({:+.2e} rel)",
+            enc.v_inf - un,
+            (enc.v_inf - un) / un
+        ));
+        log(&format!("  Earth's position alone       {d_rearth:+10.1} km — Earth moved {:.0} km since the nominal CA", (r1 - rn).norm() / 1e3));
+        log(&format!("  Earth's velocity alone       {d_vearth:+10.1} km — |δV⊕| {:.4} m/s, turned {:.3e} rad", (v1 - vn).norm(), (v1.normalize().dot(&vn.normalize())).clamp(-1.0, 1.0).acos()));
+        log(&format!("  sum of the four {sum:+.1} km | all four at once (the own frame) {d_all:+.1} km | the bias {bias_km:+.1} km"));
+        let linear = (sum - d_all).abs() <= 0.10 * d_all.abs().max(1.0);
+        let owned = (d_all - bias_km).abs() <= 0.25 * bias_km.abs().max(1.0);
+        log(&format!(
+            "  → linearity {} | these four {} the bias",
+            if linear {
+                "HOLDS: the sum is the compound, so each term stands alone"
+            } else {
+                "FAILS: the terms cross, so no single one owns the answer"
+            },
+            if owned {
+                "ACCOUNT FOR"
+            } else {
+                "do NOT account for"
             }
-            Err(e) => log(&format!("  own-frame column: {e}")),
-        }
+        ));
+        split.push((
+            lead_days,
+            grad_n,
+            bias_km,
+            d_shat,
+            d_vinf,
+            d_rearth,
+            d_vearth,
+            d_all,
+            out_of_plane / 1e3,
+            d_bmag,
+        ));
+        // ---- The same question asked on the leg BEFORE the encounter ----
+        //
+        // The four ingredients above are all *inputs* to the construction, and
+        // none of them is the ladder. What is left is the construction itself,
+        // and it makes the same claim twice: `incoming_semi_major_axis` is the
+        // identical arithmetic — `V⊕ + v∞·Ŝ`, vis-viva at Earth's distance — with
+        // the incoming asymptote in place of the outgoing one. The module doc
+        // already records that round-trip as good only to `8.7e-5`, which at this
+        // gradient is hundreds of kilometres, i.e. the size of the residual the
+        // four ingredients leave behind. So: is the error in the **turn**, or in
+        // the **baseline** the turn is applied to?
+        //
+        // Read in *both* frames on purpose. The nominal frame's incoming `a` is
+        // one number for all four flights (it does not depend on the lead), so a
+        // spread against it would be `a_in_true` moving and nothing else. The
+        // flight's own frame is the cell that discriminates.
+        //
+        // The observable mirrors the outgoing one exactly: the window **closes**
+        // at CA − `SETTLE_DAYS` and runs one full revolution backward, the same
+        // `MEAN_SAMPLES` points, with the same half-revolution shift as its error
+        // bar. Mirrored so that `a_out − a_in` is a difference of two means taken
+        // the same way and the convention cancels out of it.
+        //
+        // For the short-lead flights that backward arc runs past the impulse
+        // epoch, onto a continuation the rock never flew. That is deliberate and
+        // it is the right observable: what is wanted is *the orbit the rock is on
+        // as it arrives*, which is a property of its state at CA − 30 d, not of
+        // how it got there.
+        let f_own = OpikFrame::new(&enc, r1, v1, mu_sun).expect("own frame");
+        let a_own = f_own.post_encounter_semi_major_axis(f_own.project(&enc.b_vector));
+        let a_in_nom = s.frame.incoming_semi_major_axis();
+        let a_in_own = f_own.incoming_semi_major_axis();
+        let t_in = ca.epoch.shifted_by_seconds(-SETTLE_DAYS * 86_400.0);
+        let seed_in = clock.state_at(t_in).expect("state before CA");
+        let back = s
+            .scenario
+            .propagate_free(t_in, seed_in, -10.0 * 86_400.0, 50)
+            .expect("pre-encounter arc");
+        let osc_in = |t: Epoch| {
+            let st = back.state_at(t).expect("pre-encounter state");
+            let (r_h, v_h) = helio(t, &st);
+            1.0 / (2.0 / r_h.norm() - v_h.norm_squared() / mu_sun)
+        };
+        // The period comes from the *incoming* orbit, not the outgoing one — a
+        // window sized by the wrong revolution is not a revolution.
+        let period_in = std::f64::consts::TAU * (a_in_own.powi(3) / mu_sun).sqrt();
+        let mean_in_closing = |close_days: f64| {
+            let t_close = ca.epoch.shifted_by_seconds(-close_days * 86_400.0);
+            let n = MEAN_SAMPLES;
+            (0..n)
+                .map(|i| osc_in(t_close.shifted_by_seconds(-period_in * i as f64 / n as f64)))
+                .sum::<f64>()
+                / n as f64
+        };
+        let a_in_mid = mean_in_closing(SETTLE_DAYS);
+        let a_in_shifted = mean_in_closing(SETTLE_DAYS + period_in / 86_400.0 / 2.0);
+        let in_spread_km = (a_in_mid - a_in_shifted).abs() / grad_n.abs() / 1e3;
+        let r_geo_in = (back.state_at(t_in).expect("state").position
+            - earth.state_at(t_in).expect("Earth").position)
+            .norm();
+        // The four cells, all in the same km-equivalent as everything above.
+        let in_err_nom = (a_in_mid - a_in_nom) / grad_n / 1e3;
+        let in_err_own = (a_in_mid - a_in_own) / grad_n / 1e3;
+        let out_err_nom = (a_mid - a_closed) / grad_n / 1e3;
+        let out_err_own = (a_mid - a_own) / grad_n / 1e3;
+        // The sharper form: does the construction get the *change* right even
+        // where it gets both absolutes wrong? If it does, a circle should be
+        // drawn on `Δa`, not on `a'`.
+        let d_true = (a_mid - a_in_mid) / grad_n / 1e3;
+        let d_pred_nom = (a_closed - a_in_nom) / grad_n / 1e3;
+        let d_pred_own = (a_own - a_in_own) / grad_n / 1e3;
+        log("\n  --- the same construction, asked on the incoming leg (the 2x2) ---");
+        log(&format!("  incoming window closes at CA-{SETTLE_DAYS:.0} d ({:.2} Hill), one revolution of {:.1} d backward, {MEAN_SAMPLES} samples; its own error bar (window closed half a revolution earlier) {in_spread_km:.1} km", r_geo_in / EARTH_HILL_RADIUS_M, period_in / 86_400.0));
+        log(&format!("  a_in_true {:.9} AU | a_in nominal frame {:.9} AU (err {in_err_nom:+.1} km) | a_in own frame {:.9} AU (err {in_err_own:+.1} km)", a_in_mid / AU_M, a_in_nom / AU_M, a_in_own / AU_M));
+        log(&format!("  a_out_true {:.9} AU | a' nominal frame (err {out_err_nom:+.1} km) | a' own frame (err {out_err_own:+.1} km)", a_mid / AU_M));
+        log(&format!("  the CHANGE across the encounter: true {d_true:+.1} km | predicted, nominal frame {d_pred_nom:+.1} km (out by {:+.1}) | predicted, own frame {d_pred_own:+.1} km (out by {:+.1})", d_pred_nom - d_true, d_pred_own - d_true));
+        // Where the *own* frame's baseline error comes from. `incoming_semi_major_axis`
+        // evaluates vis-viva at **Earth's** heliocentric distance while the rock is
+        // tens of thousands of kilometres away; the incoming speed does not depend on
+        // `r` at all, so re-evaluating at the rock's own distance is exact arithmetic
+        // rather than a re-solve. This is the `r ~ R_earth` substitution the module
+        // doc has blamed since it was written, asked on the leg it actually applies to.
+        let v2_in_own = (f_own.v_earth + f_own.v_inf * f_own.eta_hat).norm_squared();
+        let a_in_at_rock = 1.0 / (2.0 / r_ca.norm() - v2_in_own / mu_sun);
+        let radial_km = (a_in_at_rock - a_in_own) / grad_n / 1e3;
+        log(&format!("  of that own-frame baseline error, the r ~ R_earth substitution accounts for {radial_km:+.1} km (rock {:+.1} km from Earth's distance), leaving {:+.1} km against a bar of {in_spread_km:.0} km", (r_ca.norm() - f_own.r_earth.norm()) / 1e3, in_err_own - radial_km));
+        let baseline = (in_err_own - out_err_own).abs() <= 0.25 * out_err_own.abs().max(1.0);
+        log(&format!("  -> in the flight's own frame the incoming error is {in_err_own:+.1} km against an outgoing {out_err_own:+.1} km: {}", if baseline { "THE SAME — a baseline offset the turn carries through, so the circle belongs on the change in a" } else { "NOT the same — the baseline is not what is wrong, and the turn owns the residual" }));
+        inbound.push((
+            lead_days,
+            p.x / 1e3,
+            in_err_nom,
+            in_err_own,
+            out_err_nom,
+            out_err_own,
+            d_true,
+            d_pred_nom,
+            d_pred_own,
+            in_spread_km,
+        ));
+        // What the map would draw if the circle were placed on the **change** in
+        // `a` instead of on the absolute `a'`: the locus where the closed form's
+        // `a' − a_in` equals `a_res − a_in_true`, with `a_in_true` the flight's
+        // own measured incoming orbit. Along the normal that is a pure shift of
+        // the circle by `(a_in_true − a_in_closed)/∇a'`, so it needs no re-solve.
+        //
+        // Two versions, because what ships has to be affordable: the 32-sample
+        // revolution mean (one extra backward integration of ~288 d), and the
+        // single osculating sample at the window's own closing epoch (free — the
+        // planner already holds that state). If the cheap one is as flat, the
+        // repair costs nothing.
+        let a_in_one = osc_in(t_in);
+        let d0_km = d0 / 1e3;
+        let d0_mean = d0_km + (a_in_mid - a_in_nom) / grad_n / 1e3;
+        let d0_one = d0_km + (a_in_one - a_in_nom) / grad_n / 1e3;
+        log(&format!("  if the circle were drawn on the CHANGE in a: door at {d0_mean:+.1} km (revolution mean) or {d0_one:+.1} km (one sample at CA-{SETTLE_DAYS:.0} d), against {d0_km:+.1} km as it ships"));
+        repair.push((lead_days, d0_km, d0_mean, d0_one, in_spread_km));
         // Which heliocentric distance *would* have been right? The outgoing speed
         // does not depend on `r` at all — `cos θ'` is a b-plane quantity — so `a'`
         // depends on it only through vis-viva, and the `r` that reproduces the
@@ -2646,6 +2865,71 @@ fn stage_outgoing(args: &[String]) {
             "NEITHER: both differences are large, which the decision rule does not cover"
         };
         log(&format!("  verdict (revolution mean): {verdict}"));
+    }
+    if !split.is_empty() {
+        log("\n=== WHICH NOMINAL INGREDIENT CARRIES THE PREDICTION BIAS? ===\n");
+        log("Every column is km-equivalent on the b-plane, converted with that row's own nominal ∇a'·n̂.");
+        log("`bias` is what the flown orbit says the prediction is out by; each ingredient column is how far swapping that one ingredient alone moves the prediction. A column that reproduces `bias` is the mechanism.\n");
+        log("| lead | ∇a'·n̂ (m/m) | bias | Ŝ alone | v∞ alone | r⊕ alone | V⊕ alone | sum | all four | b out of plane | of which b-magnitude |");
+        log("|---|---|---|---|---|---|---|---|---|---|---|");
+        for (lead, g, bias, ds, dv, dr, dvv, dall, oop, dbm) in &split {
+            log(&format!("| {lead:.0} d | {g:.4} | **{bias:+.1} km** | {ds:+.1} | {dv:+.1} | {dr:+.1} | {dvv:+.1} | {:+.1} | {dall:+.1} | {oop:+.1} km | {dbm:+.1} |", ds + dv + dr + dvv));
+        }
+        // The gradient is the closed form's own, and it scales every km-equivalent
+        // in the ladder this campaign exists to explain. If it moved materially
+        // across the leads, part of the 19 → 786 km ladder would be a unit
+        // conversion rather than an `a'` error, and nothing below could be read.
+        let gmin = split.iter().map(|r| r.1).fold(f64::INFINITY, f64::min);
+        let gmax = split.iter().map(|r| r.1).fold(f64::NEG_INFINITY, f64::max);
+        log(&format!("\n∇a'·n̂ across these leads: {gmin:.4} to {gmax:.4} m/m, a spread of {:.2}%. The km-equivalents above are commensurable to that much, and no more.", 100.0 * (gmax - gmin) / gmax.abs()));
+    }
+    if !inbound.is_empty() {
+        log("\n=== IS IT THE TURN, OR THE BASELINE THE TURN IS APPLIED TO? ===\n");
+        log("The same construction asked on both legs of the same flight. Columns are km-equivalent at that row's nominal ∇a'·n̂. `err` is measured minus predicted, so a negative number means the construction says the orbit is bigger than it is.\n");
+        log("| lead | ξ of the flown point | a_in err, nominal frame | a_in err, own frame | a_out err, nominal frame | a_out err, own frame | error bar on a_in |");
+        log("|---|---|---|---|---|---|---|");
+        for (lead, xi, en, eo, on_, oo, _, _, _, bar) in &inbound {
+            log(&format!("| {lead:.0} d | {xi:+.0} km | {en:+.1} | **{eo:+.1}** | {on_:+.1} | **{oo:+.1}** | ±{bar:.1} |"));
+        }
+        log("\nAnd the same rows as a change across the encounter, which is what a resonant circle actually needs to get right:\n");
+        log("| lead | true Δa | predicted Δa, nominal frame | out by | predicted Δa, own frame | out by |");
+        log("|---|---|---|---|---|---|");
+        for (lead, _, _, _, _, _, dt, dn, dw, _) in &inbound {
+            log(&format!(
+                "| {lead:.0} d | {dt:+.1} km | {dn:+.1} km | {:+.1} | {dw:+.1} km | {:+.1} |",
+                dn - dt,
+                dw - dt
+            ));
+        }
+    }
+    if !repair.is_empty() {
+        log("\n=== WHAT THE REPAIR WOULD BUY: THE CIRCLE DRAWN ON THE CHANGE IN a ===\n");
+        log("`as shipped` is the door's distance from the circle the map draws today. The other two place the same circle at the locus where the closed form's a' − a_in equals a_res − a_in_true, using the flight's own incoming orbit as the baseline.\n");
+        log("| lead | as shipped | on the change (revolution mean) | on the change (one sample) | error bar on the baseline |");
+        log("|---|---|---|---|---|");
+        for (lead, d0k, dm, do1, bar) in &repair {
+            log(&format!(
+                "| {lead:.0} d | {d0k:+.1} km | **{dm:+.1} km** | {do1:+.1} km | ±{bar:.1} km |"
+            ));
+        }
+        let span = |f: fn(&RepairRow) -> f64| {
+            let lo = repair.iter().map(f).fold(f64::INFINITY, f64::min);
+            let hi = repair.iter().map(f).fold(f64::NEG_INFINITY, f64::max);
+            (lo, hi, hi - lo)
+        };
+        let (s_lo, s_hi, s_sp) = span(|r| r.1);
+        let (m_lo, m_hi, m_sp) = span(|r| r.2);
+        let (o_lo, o_hi, o_sp) = span(|r| r.3);
+        log(&format!(
+            "\nas shipped: {s_lo:+.1} to {s_hi:+.1} km, a ladder {s_sp:.1} km wide."
+        ));
+        log(&format!(
+            "on the revolution-mean change: {m_lo:+.1} to {m_hi:+.1} km, spread {m_sp:.1} km."
+        ));
+        log(&format!(
+            "on one osculating sample: {o_lo:+.1} to {o_hi:+.1} km, spread {o_sp:.1} km."
+        ));
+        log("The number a band has to cover is the spread, not the offset: a constant offset is a circle drawn in the wrong place by a fixed amount, which is a correction; a ladder is not.");
     }
     log(&format!("\nstage took {:.1} s", t0.elapsed().as_secs_f64()));
 }

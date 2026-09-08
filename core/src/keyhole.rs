@@ -83,27 +83,56 @@
 //! *return encounter* still has to come from the propagator; this module is the
 //! map that says where to fly.
 //!
-//! **The size of that paragraph is right and its named cause is not** — measured
-//! 2026-09-08 against four flown 3:4 doors by `probe_keyhole_placement outgoing`,
-//! which read the semi-major axis the propagator actually produces (as a mean over
-//! one post-encounter revolution, ±41 km-equivalent) rather than the one this
-//! module predicts. The absolute error is real and runs `δa'/a'` from `7e-6` at a
-//! 12-year deflection lead to `1.8e-4` at 200 days. But it is **not** the
-//! `r ≈ R⊕ₒᵣᵦ` substitution above: at the 300 d door the rock is **53 km** from
-//! Earth's heliocentric distance — a relative `3.6e-7`, some **200× below** the
-//! `7e-5` this paragraph charges — while the error is at its full `1.4e-4`, and substituting the rock's
-//! own distance moves the circle 2.8 km against the 665 km wanted. Nor is it the
-//! frame: rebuilding `c`, `θ` and Earth's state from the deflected flight's own
-//! encounter makes the prediction worse at three of the four leads.
+//! **The size of that paragraph is right, its named cause is not, and the error
+//! is in the wrong half of the construction** — measured 2026-09-08 against four
+//! flown 3:4 doors by `probe_keyhole_placement outgoing`, which reads the
+//! semi-major axis the propagator actually produces (a mean over one full
+//! revolution, ±41 km-equivalent going out and ±136 coming in) rather than the one
+//! this module predicts. Three findings, in the order they were established.
 //!
-//! What the same measurement *does* license is the other half. The resonance
-//! **condition** is sound: a flown door centre leaves the rock 14 to 49 km-equivalent
-//! from `a_res` at every lead — half a door width, and −14 to −16 km at three of the
-//! four — while the door's distance
-//! from its circle runs 19 → 786 km. So `a' = a_res` is the right target and this
-//! module's `a'` is the wrong prediction of it, which is a sharper statement of
-//! where the map is broken than "order 1e-4 somewhere". Pinned by
-//! `core/tests/keyhole_prediction_bias.rs`.
+//! **The resonance condition is sound.** A flown door centre leaves the rock 14 to
+//! 49 km-equivalent from `a_res` at every lead — half a door width, and −14 to
+//! −16 km at three of the four — while the door's distance from its circle runs
+//! 19 → 786 km. So `a' = a_res` is the right target and this module's `a'` is the
+//! wrong prediction of it.
+//!
+//! **Every input to the prediction is innocent.** Swapped one at a time into the
+//! nominal frame — the flown asymptote `Ŝ`, the flown `v∞`, Earth's position and
+//! Earth's velocity at the flight's own encounter — each moves the answer, none of
+//! them orders by lead, and their sum is not the bias either (they are additive to
+//! within 10 %, so this is not a cancellation). The `r ≈ R⊕ₒᵣᵦ` substitution named
+//! above is dead as the cause: at the 300 d door the rock is **53 km** from
+//! Earth's heliocentric distance — a relative `3.6e-7`, some **200× below** the
+//! `7e-5` this paragraph charges — while the error is at its full `1.4e-4`, and
+//! substituting the rock's own distance moves the circle 2.8 km against the 665 km
+//! wanted. Nor is it the component the nominal projection drops when the flown
+//! b-vector tips out of the nominal plane: that is second order, and 149 km out of
+//! plane costs **0.0 km**. Nor is it the frame — rebuilding `c`, `θ` and Earth's
+//! state from the deflected flight's own encounter makes the prediction worse at
+//! three of the four leads.
+//!
+//! **The error is in the baseline, not in the turn.** Asking the same construction
+//! on the leg *before* the encounter splits it, because
+//! [`OpikFrame::incoming_semi_major_axis`] is the identical arithmetic with the
+//! incoming asymptote in place of the outgoing one. The baseline error — which
+//! orbit the rock arrives on — runs **+293, +84, −422, −458** km-equivalent across
+//! deflection leads of 4383, 900, 300 and 200 days; the outgoing error runs −33,
+//! −227, −665, −839; and **their difference, the error in the change across the
+//! encounter and the only part the flyby itself owns, is flat at −326, −310, −242,
+//! −381**, a 55 km spread at the two extremes against 750 and 805 km in the two
+//! absolutes, and inside the ±136 km bar of the measurement. In the flight's own
+//! frame it is flatter still: −372, −365, −374 at three of the four leads.
+//!
+//! The shippable consequence, measured but **not yet shipped**: place the circle
+//! where `a' − a_in` equals `a_res − a_in_true`, taking `a_in_true` from the flight
+//! the planner has already propagated, and the door offsets go from
+//! `+19 / +211 / +648 / +786` — a 767 km ladder — to `+312 / +294 / +226 / +329`, a
+//! spread of 103 km about a constant. A single osculating sample at CA − 30 d,
+//! which costs nothing because the planner already holds that state, is exactly as
+//! flat (spread 102 km, at a +380 km offset instead). Pinned by
+//! `core/tests/keyhole_prediction_bias.rs`. It is one resonance and four leads, and
+//! the residual spread sits at the measurement's own noise floor, which is why the
+//! frontend's `KEYHOLE_PLACEMENT_KM` band has not moved.
 //!
 //! # The keyhole width, as a definition rather than a claim
 //!
@@ -637,6 +666,16 @@ impl OpikFrame {
     /// arrives: `V⊕ + v∞·Ŝ` at Earth's position. Compare this against the real
     /// pre-encounter orbit and the frame is validated end to end (the reach
     /// probe's round-trip gate, `8.7e-5` on the shipping rock).
+    ///
+    /// **This is also where the keyhole map's placement error lives** (measured
+    /// 2026-09-08). That `8.7e-5` gate is taken on the *nominal* rock, which is the
+    /// rock the frame is built from; on the **deflected** flights that actually fly
+    /// a door, the same number is wrong by `+293`, `+84`, `−422` and `−458` b-plane
+    /// km-equivalent at deflection leads of 4383, 900, 300 and 200 days. That
+    /// ladder — and not anything the flyby does — is what puts a flown door 19 to
+    /// 786 km from its circle: the error in the *change* across the encounter is
+    /// flat at about −320 km at every lead. See the module doc and
+    /// `core/tests/keyhole_prediction_bias.rs`.
     pub fn incoming_semi_major_axis(&self) -> f64 {
         self.semi_major_axis_of(&(self.v_earth + self.v_inf * self.eta_hat))
     }

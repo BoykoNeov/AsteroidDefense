@@ -44,11 +44,40 @@
 //! rather than the nominal one the map uses, makes the prediction **worse** at
 //! three of the four leads (−260, −353, −295, −1686 km).
 //!
-//! What this pins is the split, not a mechanism: the condition holds, the
-//! prediction carries the ladder. Requires kernels.
+//! # Where the ladder actually is (added 2026-09-08, the same day)
+//!
+//! Splitting the prediction from the condition left "the prediction is wrong" as
+//! a whole. It is not a whole. The construction makes the same claim twice —
+//! `OpikFrame::incoming_semi_major_axis` is the identical arithmetic with the
+//! incoming asymptote in place of the outgoing one — so asking it on **both legs
+//! of the same flight** separates *which orbit the rock arrives on* from *what the
+//! flyby does to it*:
+//!
+//! ```text
+//!   lead     door d₀    baseline err    outgoing err    THE CHANGE    door on the change
+//!   4383 d   + 19.2 km    +292.8 km       − 33.3 km      −326.1 km        +311.9 km
+//!    200 d   +786.0 km    −457.4 km       −838.6 km      −381.2 km        +328.6 km
+//!   apart      766.8         750.2           805.2          55.1              16.6
+//! ```
+//!
+//! The two absolute errors run a ladder 750 and 805 km wide across the two extreme
+//! doors. The error in the **change**, which is the only part the encounter itself
+//! owns, is 55 km apart — inside the ±136 km bar of the incoming measurement. So
+//! the flyby is predicted correctly to a constant, and the whole ladder is the
+//! construction misjudging the orbit the deflected rock arrives on. (The four-lead
+//! table in `probe_keyhole_placement outgoing` fills in 900 d and 300 d, where the
+//! change reads −310.4 and −242.3 km.)
+//!
+//! The right-hand column is why that matters: draw the circle where `a' − a_in`
+//! equals `a_res − a_in_true` and the same two doors land 16.6 km apart instead of
+//! 766.8. That repair is **measured, not shipped** — one resonance, four leads, and
+//! a residual spread at the measurement's own noise floor.
+//!
+//! What this pins is the whole decomposition: the condition holds, the turn is a
+//! constant, and the baseline carries the ladder. Requires kernels.
 
 use asteroid_core::{
-    aim_at_resonance, along_track_unit, closest_approach, CircleBranch, EphemerisPerturber,
+    aim_at_resonance, along_track_unit, closest_approach, CircleBranch, EphemerisPerturber, Epoch,
     ImpactorConfig, OpikFrame, RealFieldScenario, Resonance, ScanOptions,
 };
 use nalgebra::Vector2;
@@ -102,9 +131,47 @@ const EARTH_HILL_RADIUS_M: f64 = 1.5e9;
 /// ±100 km-equivalent through a revolution; averaging over exactly one kills that
 /// periodic term and takes the measurement's own error bar to ~41 km.
 const MEAN_SAMPLES: usize = 32;
+/// How far apart the error in the **change** of semi-major axis may be, in
+/// b-plane kilometres, at the two extreme doors before "the flyby's own error is
+/// a constant" stops being true. Measured −326.1 km at 4383 d against −381.1 km
+/// at 200 d, i.e. **55.0 km apart**, while the two *absolute* errors are 805 km
+/// apart. The limit is set at 150 — comfortably under a third of the contrast it
+/// is being read against, and above the ±136 km bar of the measurement.
+const TURN_SPREAD_LIMIT_KM: f64 = 150.0;
+
+/// How far apart the *absolute* errors must stay for that contrast to mean
+/// anything. Measured **750 km** on the incoming leg and **805 km** on the
+/// outgoing one, against a 55 km spread in the change. If this floor is ever not
+/// met the two doors no longer bracket a ladder and nothing above is a contrast.
+const ABSOLUTE_SPREAD_FLOOR_KM: f64 = 500.0;
+
+/// The incoming revolution mean's own error bar, in b-plane kilometres — the same
+/// mean taken over a revolution closing half a revolution earlier. Measured 133.6
+/// to 136.5 km across the four flown doors, **three times** the outgoing leg's
+/// ±41 km. That is why the ~100 km residual left after the repair is reported as
+/// *at* this measurement's noise floor rather than as a resolved number.
+const INCOMING_BAR_LIMIT_KM: f64 = 250.0;
+
+/// One row of the two-door contrast, in b-plane kilometres throughout.
+struct Row {
+    lead_days: f64,
+    /// The door's distance from the circle the map draws today.
+    d0: f64,
+    /// `a_in_true − a_in_closed`: how wrong the construction is about the orbit
+    /// the rock arrives on.
+    incoming: f64,
+    /// `a_out_true − a'_closed`: how wrong it is about the orbit the flyby leaves.
+    outgoing: f64,
+    /// The difference of those two — the error in the *change* across the
+    /// encounter, which is the only part the flyby itself owns.
+    turn: f64,
+    /// Where the door would sit if the circle were placed on that change instead
+    /// of on the absolute `a'`.
+    repaired: f64,
+}
 
 #[test]
-fn the_placement_error_is_in_the_prediction_and_not_in_the_resonance_condition() {
+fn the_condition_holds_the_ladder_is_in_the_baseline_and_the_turn_is_a_constant() {
     if asteroid_core::kernels::resolve_for_test("keyhole prediction-bias guard").is_none() {
         return;
     }
@@ -138,6 +205,7 @@ fn the_placement_error_is_in_the_prediction_and_not_in_the_resonance_condition()
         max_distance: Some(5.0e8),
     };
     let earth = EphemerisPerturber::new(eph.clone(), EARTH_J2000);
+    let mut rows: Vec<Row> = Vec::new();
 
     for &(lead_days, dv, recorded) in DOORS {
         // The campaign's own lead is `epoch0()` exactly, not `impact − 4383 d`:
@@ -241,5 +309,125 @@ fn the_placement_error_is_in_the_prediction_and_not_in_the_resonance_condition()
                  exists to pin has gone"
             );
         }
+
+        // ---- The same construction, asked on the leg BEFORE the encounter ----
+        //
+        // `incoming_semi_major_axis` is the identical arithmetic — `V⊕ + v∞·Ŝ`,
+        // vis-viva at Earth's heliocentric distance — with the incoming asymptote
+        // in place of the outgoing one. Asking it on both legs of the same flight
+        // splits the prediction error into a *baseline* (which orbit the rock
+        // arrives on) and a *turn* (what the flyby does to it), and only the
+        // second is anything the encounter owns.
+        //
+        // The observable mirrors the outgoing one exactly: the window **closes**
+        // at CA − `SETTLE_DAYS` and runs one full revolution backward, the same
+        // `MEAN_SAMPLES` points, the same half-revolution shift as its error bar,
+        // and the same Hill-radii gate. Mirrored on purpose, so that the
+        // difference of the two means is a difference of like for like.
+        //
+        // At the 200 d door that backward arc runs past the impulse epoch, onto a
+        // continuation the rock never flew. That is deliberate and it is the right
+        // observable: what is wanted is the orbit the rock **is on** as it
+        // arrives, which is a property of its state at CA − 30 d and not of how it
+        // got there.
+        let a_in_closed = frame.incoming_semi_major_axis();
+        let t_in = ca.epoch.shifted_by_seconds(-SETTLE_DAYS * 86_400.0);
+        let seed_in = clock.state_at(t_in).expect("state before CA");
+        let hill_in = (seed_in.position - earth.state_at(t_in).expect("Earth").position).norm()
+            / EARTH_HILL_RADIUS_M;
+        assert!(
+            hill_in > SETTLE_HILL_RADII,
+            "lead {lead_days} d: the incoming mean's window closes {hill_in:.1} Hill radii out, under the {SETTLE_HILL_RADII} this reading needs"
+        );
+        let back = scenario
+            .propagate_free(t_in, seed_in, -10.0 * 86_400.0, 50)
+            .expect("pre-encounter arc");
+        // The period comes from the *incoming* orbit: a window sized by the
+        // outgoing revolution is not a revolution of the orbit being averaged.
+        let period_in = std::f64::consts::TAU * (a_in_closed.powi(3) / mu_sun).sqrt();
+        let mean_in = |close: Epoch| {
+            (0..MEAN_SAMPLES)
+                .map(|i| {
+                    let t = close.shifted_by_seconds(-period_in * i as f64 / MEAN_SAMPLES as f64);
+                    let st = back.state_at(t).expect("pre-encounter state");
+                    let (rs_km, vs_km) = eph
+                        .state_km_s(SUN_J2000, SSB_J2000, t.as_hifitime())
+                        .expect("Sun state");
+                    let r_h = st.position - rs_km * 1e3;
+                    let v_h = st.velocity - vs_km * 1e3;
+                    1.0 / (2.0 / r_h.norm() - v_h.norm_squared() / mu_sun)
+                })
+                .sum::<f64>()
+                / MEAN_SAMPLES as f64
+        };
+        let a_in_true = mean_in(t_in);
+        let in_bar_km = (a_in_true - mean_in(t_in.shifted_by_seconds(-period_in / 2.0))).abs()
+            / grad_n.abs()
+            / 1e3;
+        assert!(
+            in_bar_km < INCOMING_BAR_LIMIT_KM,
+            "lead {lead_days} d: the incoming revolution mean's own error bar is {in_bar_km:.1} km, over the {INCOMING_BAR_LIMIT_KM} that licenses reading it — the window is not one revolution or the arc has not settled"
+        );
+        let incoming_km = (a_in_true - a_in_closed) / grad_n / 1e3;
+        let turn_km = bias_km - incoming_km;
+        // Placing the circle on the change is a pure shift of it along the normal
+        // by the baseline error, so the repaired door needs no re-solve.
+        let repaired_km = d0 / 1e3 + incoming_km;
+        println!(
+            "lead {lead_days:6.0} d: baseline (a_in_true − a_in_closed) {incoming_km:+8.1} km ±{in_bar_km:.0} | turn (the change) {turn_km:+8.1} km | door on the change {repaired_km:+8.1} km"
+        );
+        rows.push(Row {
+            lead_days,
+            d0: d0 / 1e3,
+            incoming: incoming_km,
+            outgoing: bias_km,
+            turn: turn_km,
+            repaired: repaired_km,
+        });
     }
+
+    // ---- The two-door contrast, which is what this file now pins ----
+    //
+    // The absolute errors run a ladder; the error in the change across the
+    // encounter does not. Asserted as a *contrast* rather than as two separate
+    // tolerances, because either half alone would pass on a run where the whole
+    // measurement had gone flat.
+    assert_eq!(rows.len(), DOORS.len(), "a door failed to fly");
+    let (lo, hi) = (&rows[0], &rows[1]);
+    let apart = |a: f64, b: f64| (a - b).abs();
+    println!(
+        "\n{:.0} d vs {:.0} d: door {:.1} km apart | baseline {:.1} km apart | outgoing {:.1} km apart | THE CHANGE {:.1} km apart | repaired door {:.1} km apart",
+        lo.lead_days,
+        hi.lead_days,
+        apart(lo.d0, hi.d0),
+        apart(lo.incoming, hi.incoming),
+        apart(lo.outgoing, hi.outgoing),
+        apart(lo.turn, hi.turn),
+        apart(lo.repaired, hi.repaired)
+    );
+    assert!(
+        apart(lo.d0, hi.d0) > ABSOLUTE_SPREAD_FLOOR_KM,
+        "the two doors are only {:.1} km apart — there is no ladder here to explain",
+        apart(lo.d0, hi.d0)
+    );
+    assert!(
+        apart(lo.incoming, hi.incoming) > ABSOLUTE_SPREAD_FLOOR_KM,
+        "the baseline error is only {:.1} km apart at the two extremes — it is not what carries the ladder after all",
+        apart(lo.incoming, hi.incoming)
+    );
+    assert!(
+        apart(lo.outgoing, hi.outgoing) > ABSOLUTE_SPREAD_FLOOR_KM,
+        "the outgoing error is only {:.1} km apart at the two extremes",
+        apart(lo.outgoing, hi.outgoing)
+    );
+    assert!(
+        apart(lo.turn, hi.turn) < TURN_SPREAD_LIMIT_KM,
+        "the error in the *change* across the encounter is {:.1} km apart at the two extremes, over the {TURN_SPREAD_LIMIT_KM} that makes it a constant — the flyby itself is carrying part of the ladder after all",
+        apart(lo.turn, hi.turn)
+    );
+    assert!(
+        apart(lo.repaired, hi.repaired) < TURN_SPREAD_LIMIT_KM,
+        "drawing the circle on the change leaves the two doors {:.1} km apart — the repair does not flatten the ladder",
+        apart(lo.repaired, hi.repaired)
+    );
 }

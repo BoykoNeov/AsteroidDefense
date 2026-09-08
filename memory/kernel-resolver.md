@@ -16,7 +16,7 @@ Done 2026-07-19 (commit 525e33a), closing the kernel-skip trap noted in
 `resolve()` takes env → conventional dirs, **both-or-nothing**; every gated site
 in the workspace (core, `validation`, the gdext binding, the examples) goes
 through `resolve_for_test(what)`. Real kernel dir on this machine is
-`M:\claud_projects\temp\AsteroidDefense\kernels` (de440s.bsp + pck11.pca) — note
+`W:\temp\claude\AsteroidDefense\kernels` (de440s.bsp + pck11.pca) — note
 the `AsteroidDefense` segment; earlier notes said `temp/kernels`, which is wrong.
 
 **Why the flag is a separate thing from the resolver, and why both were needed:**

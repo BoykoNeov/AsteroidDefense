@@ -226,8 +226,13 @@ pub fn search_dirs() -> Vec<PathBuf> {
         // A kernels/ folder in the repo — the natural "drop them here" spot for
         // a fresh clone, and the first thing a new contributor will try.
         repo.join("kernels"),
-        // This project's conventional scratch root (../temp/AsteroidDefense),
-        // which is where the dev machine's kernels actually live.
+        // This project's conventional scratch root, which is where the dev
+        // machine's kernels actually live: `<drive>/temp/claude/AsteroidDefense`,
+        // a sibling of the `Claude_projects` directory holding the repo.
+        repo.join("../../temp/claude/AsteroidDefense/kernels"),
+        // The layout this repo lived under before 2026-09-08 — `claud_projects`
+        // with a `temp/` sibling *inside* it. Kept so an unmoved checkout, or a
+        // machine that still follows that convention, resolves without an env var.
         repo.join("../temp/AsteroidDefense/kernels"),
     ];
     // Beside the current executable — where a shipped build would carry them.

@@ -51,8 +51,8 @@ Run under Docker (`assist` has no Windows wheel; compiles from source, needs
 gcc — see SPIKE.md). Kernels are the ASSIST pair, cached & git-ignored:
 
     docker run --rm \
-      -v "M:/claud_projects/AsteroidDefense/pyref:/pyref:ro" \
-      -v "M:/claud_projects/AsteroidDefense/validation/fixtures:/out" \
+      -v "W:/Claude_projects/AsteroidDefense/pyref:/pyref:ro" \
+      -v "W:/Claude_projects/AsteroidDefense/validation/fixtures:/out" \
       -v "<data-cache-dir>:/data" -e ASSIST_DATA_DIR=/data \
       python:3.12-slim \
       bash -c "apt-get update -qq && apt-get install -y -qq gcc \
@@ -72,7 +72,7 @@ DAY_S = 86_400.0
 JD_REF = 2451545.0  # ASSIST default reference epoch = J2000 TDB (hifitime J2000).
 
 DATA_DIR = os.environ.get(
-    "ASSIST_DATA_DIR", "/mnt/m/claud_projects/temp/AsteroidDefense/kernels"
+    "ASSIST_DATA_DIR", "/mnt/w/temp/claude/AsteroidDefense/kernels"
 )
 FILES = {
     # DE440 planetary (1550–2650) + DE441-consistent 16-asteroid small bodies —

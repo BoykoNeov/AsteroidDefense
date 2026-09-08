@@ -4,7 +4,7 @@
 #
 # Build:  docker build -t asteroid-pyref pyref/
 # Run:    docker run --rm \
-#           -v "M:/claud_projects/AsteroidDefense/pyref:/pyref:ro" \
+#           -v "W:/Claude_projects/AsteroidDefense/pyref:/pyref:ro" \
 #           -v "<data-cache-dir>:/data" -e ASSIST_DATA_DIR=/data \
 #           asteroid-pyref python /pyref/spike_assist_de441.py
 #

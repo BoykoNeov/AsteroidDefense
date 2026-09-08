@@ -76,5 +76,5 @@ is **not** a placement error - placement is the midpoint of two flown door *edge
 and there are no edges where there is no door.
 
 Guard: `the_three_four_door_has_ceased_to_exist_by_a_125_day_lead` in
-`M:\claud_projects\AsteroidDefense\core\src\keyhole_target.rs` - one flight, asserts
+`W:\Claude_projects\AsteroidDefense\core\src\keyhole_target.rs` - one flight, asserts
 the return is outside the capture disc **and** that its timing is spent.

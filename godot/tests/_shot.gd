@@ -15,7 +15,7 @@ extends Node
 ## needs `await RenderingServer.frame_post_draw` plus a few frames of warm-up), and
 ## the boot overlay covers everything until dismissed.
 
-const OUT := "M:/claud_projects/temp/AsteroidDefense/shots"
+const OUT := "W:/temp/claude/AsteroidDefense/shots"
 
 
 func _ready() -> void:

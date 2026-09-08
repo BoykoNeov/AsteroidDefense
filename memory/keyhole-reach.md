@@ -91,7 +91,7 @@ owed a re-measurement across a deep flyby, not a landmine.
 **BUILT AND MERGED to `main` 2026-09-02** (branch
 `claude/project-structure-planning-6l2sin`, fast-forwarded, 5 commits, now
 deleted). What the scoping above priced now exists as
-`M:\claud_projects\AsteroidDefense\core\src\keyhole.rs` (~1170 lines, 14
+`W:\Claude_projects\AsteroidDefense\core\src\keyhole.rs` (~1170 lines, 14
 tests) exporting `OpikFrame`, `Resonance`, `ResonantCircle`, `Keyhole`,
 `perigee_state_for_asymptote`. Closed forms in it were re-derived by hand and
 confirmed: `cos θ' = [(b²−c²)cos θ + 2cζ sin θ]/(b²+c²)`, circle centre

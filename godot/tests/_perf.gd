@@ -17,10 +17,10 @@ extends Node
 ##   ffi/frame    — native binding calls Sim made per frame (`Sim.ffi_calls`)
 ##   draw calls   — RenderingServer draw calls per frame
 ##
-## Output goes to stdout and to `M:/claud_projects/temp/AsteroidDefense/perf/<stamp>.txt`
+## Output goes to stdout and to `W:/temp/claude/AsteroidDefense/perf/<stamp>.txt`
 ## so two runs can be diffed.
 
-const OUT_DIR := "M:/claud_projects/temp/AsteroidDefense/perf"
+const OUT_DIR := "W:/temp/claude/AsteroidDefense/perf"
 const FRAMES := 240
 
 var _report: Array[String] = []

@@ -39,7 +39,7 @@ extends Node
 ## 4. **The required-Δv anchor goes absent on a rebuilt orbit and comes back
 ##    from [E]**, rather than silently continuing to quote the shipping constant.
 
-const OUT := "M:/claud_projects/temp/AsteroidDefense/shots"
+const OUT := "W:/temp/claude/AsteroidDefense/shots"
 
 
 func _ready() -> void:

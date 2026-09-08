@@ -40,13 +40,13 @@ two pieces — the in-editor gdextension/EditorPlugin (hosts HTTP on 3571) AND
 license/activation gate) which proxies stdio-MCP↔the 3571 HTTP. Port overridable
 via env `GDAI_MCP_SERVER_PORT` (default 3571).
 - **Registered** in Claude Code **local scope** (`.claude.json`, project
-  M:\claud_projects\AsteroidDefense) as server `gdai-godot`:
+  W:\Claude_projects\AsteroidDefense) as server `gdai-godot`:
   `claude mcp add gdai-godot --scope local -- uv run <abs path to script>`.
   Local (not project/.mcp.json) because addon is gitignored + path is
   machine-specific. `uv` present (0.11.21). Remove:
   `claude mcp remove gdai-godot -s local`.
 - **To go LIVE (both required):** (1) open the editor —
-  `godot -e --path M:\claud_projects\AsteroidDefense\godot` (plugin already
+  `godot -e --path W:\Claude_projects\AsteroidDefense\godot` (plugin already
   enabled in project.godot → hosts :3571); the interactive editor must stay
   open. (2) `/mcp` reconnect (server added mid-session → tools not loaded until
   reconnect/restart). With editor CLOSED, `claude mcp get gdai-godot` shows

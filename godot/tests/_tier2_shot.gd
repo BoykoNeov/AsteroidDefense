@@ -10,7 +10,7 @@ extends Node
 ## formatting) never executes in a passive run — exactly the gap that let a wrong
 ## panel ship a whole phase elsewhere in this project.
 
-const OUT := "M:/claud_projects/temp/AsteroidDefense/shots"
+const OUT := "W:/temp/claude/AsteroidDefense/shots"
 
 
 func _ready() -> void:

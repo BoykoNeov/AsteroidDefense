@@ -13,7 +13,7 @@ extends Node
 ## being tested is project.godot action → main.gd handler → Sim → core, not a
 ## direct call that would bypass the part most likely to be miswired.
 
-const OUT := "M:/claud_projects/temp/AsteroidDefense/shots"
+const OUT := "W:/temp/claude/AsteroidDefense/shots"
 
 
 func _ready() -> void:

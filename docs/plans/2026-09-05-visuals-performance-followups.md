@@ -13,7 +13,7 @@ plan starts from.
    powershell -File godot/tests/run_harness.ps1 -Harness _perf.gd -Headless
    ```
    Keep both outputs (they are also written to
-   `M:\claud_projects\temp\AsteroidDefense\perf\<stamp>.txt`). The numbers to
+   `W:\temp\claude\AsteroidDefense\perf\<stamp>.txt`). The numbers to
    compare are **frame ms avg** (headless = CPU cost) and **ffi/frame** (native
    binding calls; deterministic, so it is the cleanest signal). Windowed runs are
    pinned to the monitor refresh by the compositor and cannot show a speed-up.
@@ -21,7 +21,7 @@ plan starts from.
    ```powershell
    powershell -File godot/tests/run_harness.ps1 -Harness _shot.gd
    ```
-   writes PNGs to `M:\claud_projects\temp\AsteroidDefense\shots\`. Open the ones
+   writes PNGs to `W:\temp\claude\AsteroidDefense\shots\`. Open the ones
    your change touches. A view that is hidden until a key is pressed executes its
    `_draw` **zero** times in a passive run, so the shot harness is the only check.
 3. **After ANY Rust change:** `cargo build -p asteroid_gdext && cargo build -p
@@ -30,7 +30,7 @@ plan starts from.
    DLL: list them with
    `Get-CimInstance Win32_Process | ? { $_.Name -like 'godot*' } | select ProcessId, CommandLine`
    and kill **only** the one whose command line is this project's harness
-   (`--path M:/claud_projects/AsteroidDefense/godot`), by PID. Other projects'
+   (`--path W:/Claude_projects/AsteroidDefense/godot`), by PID. Other projects'
    Godot processes may be running; never kill by name.
 4. **Run the existing checks before committing:**
    `godot --headless --path godot --script res://tests/test_orrery.gd` (83 PASS,

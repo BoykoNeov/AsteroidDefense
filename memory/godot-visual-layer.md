@@ -174,7 +174,7 @@ count; use the micro numbers as a **gauge for whether two runs are comparable at
 **New traps.** (a) A **parse error in an autoload hangs a headless run forever** — stderr says "Failed
 to instantiate an autoload", stdout through a pipe never flushes, so it reads as "still working" (one
 sat 1 h at 30 s CPU). Launch via `Start-Process -RedirectStandardOutput` with a timeout; read the `.err`.
-Runner: `M:\claud_projects\temp\AsteroidDefense\runs\run_orrery.ps1`. **`_shot.gd` hung the same way**, and it was the ONLY check that caught the comet split:
+Runner: `W:\temp\claude\AsteroidDefense\runs\run_orrery.ps1`. **`_shot.gd` hung the same way**, and it was the ONLY check that caught the comet split:
 it reaches its comet section on `mission_online`, which no longer means the catalog is complete, so it
 photographs an empty `comet_el` and dies inside an `await` chain — hanging instead of failing. It now
 waits on `Sim._comet_pending`. **Run `_shot.gd` for any frontend change: it is the only thing that

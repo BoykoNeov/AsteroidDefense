@@ -24,7 +24,7 @@ extends Node
 ##    being extrapolated into a regime where it is 1.73× wrong.
 ## 4. **A probe stops being labelled current the moment a knob moves.**
 
-const OUT := "M:/claud_projects/temp/AsteroidDefense/shots"
+const OUT := "W:/temp/claude/AsteroidDefense/shots"
 
 
 func _ready() -> void:

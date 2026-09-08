@@ -20,7 +20,7 @@ Run under Linux/WSL (rebound/assist do not support native Windows):
     python3 spike_assist_de441.py
 
 Data files are downloaded once to $ASSIST_DATA_DIR (default:
-/mnt/m/claud_projects/temp/AsteroidDefense/kernels) and are git-ignored.
+/mnt/w/temp/claude/AsteroidDefense/kernels) and are git-ignored.
 """
 
 import os
@@ -28,7 +28,7 @@ import sys
 import urllib.request
 
 DATA_DIR = os.environ.get(
-    "ASSIST_DATA_DIR", "/mnt/m/claud_projects/temp/AsteroidDefense/kernels"
+    "ASSIST_DATA_DIR", "/mnt/w/temp/claude/AsteroidDefense/kernels"
 )
 
 FILES = {

@@ -77,7 +77,7 @@ Canonical invocation (from repo root, Windows):
 
 ```
 docker run --rm \
-  -v "M:/claud_projects/AsteroidDefense/pyref:/pyref:ro" \
+  -v "W:/Claude_projects/AsteroidDefense/pyref:/pyref:ro" \
   -v "<data-cache-dir>:/data" -e ASSIST_DATA_DIR=/data \
   python:3.12-slim \
   bash -c "apt-get update -qq && apt-get install -y -qq gcc \

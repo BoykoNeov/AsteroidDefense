@@ -29,8 +29,8 @@ Run under Docker (hapsira needs astropy<7; native Windows Python here is 3.14,
 which numba does not yet support):
 
     docker run --rm \
-      -v "M:/claud_projects/AsteroidDefense/pyref:/pyref:ro" \
-      -v "M:/claud_projects/AsteroidDefense/validation/fixtures:/out" \
+      -v "W:/Claude_projects/AsteroidDefense/pyref:/pyref:ro" \
+      -v "W:/Claude_projects/AsteroidDefense/validation/fixtures:/out" \
       python:3.12-slim \
       bash -c "pip install -r /pyref/requirements-hapsira.txt \
                && python /pyref/generate_kepler_fixture.py /out/kepler_two_body.json"

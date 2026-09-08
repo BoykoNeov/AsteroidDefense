@@ -2351,6 +2351,12 @@ fn stage_crowding(args: &[String]) {
 /// (786.0 km). If the gap does not track the 34× between them, the middle rows
 /// cannot rescue it. The 450 d and 150 d rows are excluded outright: the first is
 /// the mixed-provenance row (`same_flight = false`), the second has no door.
+/// The three row aliases below exist to name their columns and to keep `clippy::type_complexity`
+/// quiet. **Two of them are structurally identical** (`f64 × 10`), so the compiler will
+/// not stop a future edit pushing a [`LegRow`] into the [`IngredientRow`] vector. They are
+/// aliases rather than structs only because this is one stage of one probe and every
+/// use site destructures immediately; promote them to structs the moment a row crosses a
+/// function boundary.
 /// One row of the ingredient swap: `(lead days, ∇a'·n̂, the bias to explain, and then
 /// the km-equivalent each of `Ŝ`, `v∞`, Earth's position and Earth's velocity moves
 /// the prediction on its own, all four at once, how far the flown b-vector lies out

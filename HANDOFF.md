@@ -5215,11 +5215,16 @@ The probe and the test agree to the decimal on both flown doors, built
 independently - the probe from its own `setup`, the test from a bare scenario.
 `ASTEROID_REQUIRE_KERNELS=1 cargo test --release --test keyhole_prediction_bias`:
 1 passed, 20.0 s. Core `--lib` with kernels required: **267/267**, 118 s (nothing in
-`keyhole.rs` moved but doc comments). `cargo fmt --check` clean, and `cargo clippy
---all-targets` adds no new warnings — the two `type_complexity` lints the first draft
+`keyhole.rs` moved but doc comments). `cargo fmt --check` clean. `cargo clippy
+--all-targets` adds no new warnings: the two `type_complexity` lints the first draft
 raised are gone, the wide tuples replaced by named aliases that say what each column
-is. The probe was re-run after that refactor and prints every number identically,
-which is the check that discriminates here. Every format
+is, and the probe was re-run after that refactor and prints every number identically —
+which is the check that discriminates for a refactor. **The pre-existing `neg_cmp_op_on_partial_ord` count is 10, and the scope has to be said**, because the
+lib alone reports 9 and the last two sessions recorded the two different numbers without
+naming which they had measured. `--all-targets` on `asteroid_core`: `sbdb.rs` 4, `keyhole.rs` 3,
+and one each in `deflection.rs`, `keyhole_target.rs` and `probe_keyhole_floor.rs` — the last
+of which is the only one outside the lib, and is the whole 9-versus-10. Unchanged by this
+batch, and CI does not pass `-D warnings`. Every format
 string in the new code is written on one line, per the trap this file recorded
 earlier the same day: `cargo fmt` can silently join a backslash-continued string
 literal and bake the indentation into it.

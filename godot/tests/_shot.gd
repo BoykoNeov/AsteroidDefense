@@ -401,21 +401,29 @@ func _run() -> void:
 				"NO ROWS" if near.is_empty() or row.is_empty()
 					else ("DISAGREE" if int(near.get("h", 0)) != int(row.get("h", 0))
 						or int(near.get("k", 0)) != int(row.get("k", 0)) else "agree")])
-		# How many doors the placement band contains here. The band is sized for a
-		# placement error measured at up to 786 km (`Sim.KEYHOLE_PLACEMENT_KM`), and
-		# over stretches of the map the drawn circles are closer together than that,
-		# so the panel has a register for "several doors, none of them singled out".
-		# That register is no longer hypothetical: `probe_keyhole_placement
-		# crowding` flew the whole dialable dv range at six leads and found, at every
-		# one of them, a prograde plan with two doors inside the band - clean misses
-		# against the 11 311 km capture radius, mostly at b ~ 17 000 km. Whether
-		# *this* plan is one of them is what the count below says; the shot's own
-		# plan sits elsewhere on the map.
-		print("SHOT  doors inside the %.0f km placement band: %d%s"
-			% [Sim.KEYHOLE_PLACEMENT_KM,
+		# How many doors the placement band contains here. The band is per-circle -
+		# `Sim.KEYHOLE_PLACEMENT_A_KM` kilometres of semi-major axis, converted by
+		# each circle's own gradient - so the count is printed beside the band the
+		# risk row actually got rather than beside a constant. Over stretches of the
+		# map the drawn circles are closer together than that band, so the panel has
+		# a register for "several doors, none of them singled out".
+		# `probe_keyhole_placement crowding` flew the whole dialable dv range at six
+		# leads and found, at every one, a prograde plan with two doors inside the
+		# OLD 800 km band. A narrower band names fewer circles, so this count is one
+		# to re-read rather than to assume.
+		print("SHOT  doors inside the placement band (%.0f km on the %d:%d row, from %.0f km of a'): %d%s"
+			% [float(row.get("placement_band_km", 0.0)),
+				int(row.get("h", 0)), int(row.get("k", 0)),
+				Sim.KEYHOLE_PLACEMENT_A_KM,
 				int(Sim.plan_keyhole.get("doors_in_band", 0)),
 				"  <- the crowded register fired"
 					if int(Sim.plan_keyhole.get("doors_in_band", 0)) > 1 else ""])
+		print("SHOT  circle placement: %s (arriving orbit %.9f AU), exposure %.1f km"
+			% ["on the change across the encounter"
+					if bool(Sim.plan_keyhole.get("placed_on_the_change", false))
+					else "ABSOLUTE a' - the arriving orbit could not be read",
+				float(Sim.plan_keyhole.get("incoming_a_au", NAN)),
+				Sim.keyhole_exposure_km(row)])
 		print("SHOT  keyhole note: %s" % Sim.keyhole_note())
 
 	get_tree().quit(0)

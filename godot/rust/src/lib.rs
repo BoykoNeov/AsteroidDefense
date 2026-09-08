@@ -2714,27 +2714,36 @@ impl Mission {
     /// unmeasured — say that rather than printing a blank).
     ///
     /// Otherwise: `plan_xi_km`, `plan_zeta_km`, `b_km`, `mapped_b_max_km`,
-    /// `beyond_mapped_region`, and two sub-dictionaries — `nearest`, the closest
-    /// *locus* in kilometres (the circle to name beside the drawn map), and
-    /// `at_risk`, the closest *door edge* (the circle this plan is fewest
-    /// kilometres from being inside, which is what an alert is cut on). Each row
-    /// carries `h`, `k`, `a_prime_au`, `plan_a_prime_au`, `distance_km` (signed,
-    /// + outside the circle), `width_km`, `widths_away`, `margin_km`, `inside`,
-    /// `closest_xi_km`, `closest_zeta_km`.
+    /// `beyond_mapped_region`, `placed_on_the_change`, `incoming_a_au`, and two
+    /// sub-dictionaries — `nearest`, the closest *locus* in kilometres (the circle
+    /// to name beside the drawn map), and `at_risk`, the circle this plan is fewest
+    /// kilometres from being inside **once the map's own placement error is allowed
+    /// for**, which is what the alert is cut on. Each row carries `h`, `k`,
+    /// `a_prime_au`, `plan_a_prime_au`, `distance_km` (signed, + outside the
+    /// circle), `width_km`, `widths_away`, `margin_km`, `inside`, `closest_xi_km`,
+    /// `closest_zeta_km`, `placement_band_km` and `exposure_km`.
+    ///
+    /// **`placement_band_a_km` is kilometres of `a'`, not of b-plane** — the unit
+    /// changed on 2026-09-08 and the argument was renamed so a stale caller cannot
+    /// pass the old number to the new meaning. Each circle converts it through its
+    /// own gradient, because the closed form's placement error is a constant in
+    /// `a'` and the distance that corresponds to is whatever the local geometry
+    /// makes it: 575 km on the 3:4, 57 km on the ten-times-steeper 2:3. The band
+    /// each row got is in its `placement_band_km`, and `exposure_km` is
+    /// `margin_km` less that.
     ///
     /// The second row was `tightest` — ranked by keyhole *widths* — until
-    /// 2026-09-07. Five flown doors put the map's placement error at an additive
-    /// 2 to 27 km that a width ratio divides away at a wide door, so the ranking
-    /// moved to `margin_km` (`|distance| − width/2`) and the key changed name with
-    /// it rather than quietly meaning something else.
+    /// 2026-09-07, then `margin_km`; it is now `exposure_km`, the same expression
+    /// the alert fires on. Each move was made because the previous key stopped
+    /// matching the cut, which is the only reason to move a ranking.
     ///
     /// **The kilometres are a map coordinate, not a prediction of a return** —
     /// see `MissionCore::keyhole_readout`. Closed-form; safe on `plan_changed`.
     #[func]
-    fn keyhole_readout(&self, max_years: i64, placement_band_km: f64) -> VarDictionary {
+    fn keyhole_readout(&self, max_years: i64, placement_band_a_km: f64) -> VarDictionary {
         let mut d = VarDictionary::new();
         let Some(r) = self.core.as_ref().and_then(|c| {
-            c.keyhole_readout(max_years.clamp(2, 20) as u32, placement_band_km.max(0.0))
+            c.keyhole_readout(max_years.clamp(2, 20) as u32, placement_band_a_km.max(0.0))
         }) else {
             return d;
         };
@@ -2746,6 +2755,8 @@ impl Mission {
         d.set("nearest", &Self::keyhole_row(&r.nearest));
         d.set("at_risk", &Self::keyhole_row(&r.at_risk));
         d.set("doors_in_band", r.doors_in_band as i64);
+        d.set("placed_on_the_change", r.placed_on_the_change);
+        d.set("incoming_a_au", r.incoming_a_au.unwrap_or(f64::NAN));
         d
     }
 
@@ -2764,6 +2775,8 @@ impl Mission {
         d.set("inside", r.inside);
         d.set("closest_xi_km", r.closest_point_km.0);
         d.set("closest_zeta_km", r.closest_point_km.1);
+        d.set("placement_band_km", r.placement_band_km);
+        d.set("exposure_km", r.exposure_km);
         d
     }
 

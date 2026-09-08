@@ -101,7 +101,7 @@ func _draw() -> void:
 	# width is conservative by ~1.6x against the one keyhole this project has
 	# flown, so `inside` reads false for a plan that demonstrably returns to
 	# Earth - blinking on it would stay silent for the exact case this row exists
-	# to shout about. Sim owns the threshold; see Sim.KEYHOLE_PLACEMENT_KM.
+	# to shout about. Sim owns the threshold; see Sim.KEYHOLE_PLACEMENT_A_KM.
 	var alert: bool = Sim.keyhole_alert()
 	_t(Vector2(xv, y), Sim.keyhole_label(), bright if not alert or Sim.blink(1.4) else dim)
 	y += lh

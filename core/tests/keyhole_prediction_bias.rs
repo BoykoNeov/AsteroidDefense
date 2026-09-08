@@ -77,8 +77,9 @@
 //! constant, and the baseline carries the ladder. Requires kernels.
 
 use asteroid_core::{
-    aim_at_resonance, along_track_unit, closest_approach, CircleBranch, EphemerisPerturber, Epoch,
-    ImpactorConfig, OpikFrame, RealFieldScenario, Resonance, ScanOptions,
+    aim_at_resonance, along_track_unit, closest_approach, incoming_semi_major_axis_flown,
+    CircleBranch, EphemerisPerturber, Epoch, ImpactorConfig, OpikFrame, RealFieldScenario,
+    Resonance, ScanOptions, SETTLE_HILL_RADII as SHIPPED_SETTLE_HILL_RADII,
 };
 use nalgebra::Vector2;
 
@@ -168,7 +169,21 @@ struct Row {
     /// Where the door would sit if the circle were placed on that change instead
     /// of on the absolute `a'`.
     repaired: f64,
+    /// The same, by the path that actually ships: one osculating sample of the
+    /// arriving orbit and an exactly re-solved circle, rather than a revolution
+    /// mean and a normal shift.
+    shipped: f64,
 }
+
+/// How far apart the two extreme doors may sit once the circle is drawn where the
+/// **shipping** code draws it, km.
+///
+/// Looser than [`TURN_SPREAD_LIMIT_KM`] on purpose: the single osculating sample
+/// this path takes is a point of an element that wobbles through the revolution,
+/// which is exactly what the revolution mean exists to kill. The wobble is the
+/// ±136 km-equivalent bar the frontend's band already carries twice over, so the
+/// limit is set at two of those.
+const SHIPPED_SPREAD_LIMIT_KM: f64 = 280.0;
 
 #[test]
 fn the_condition_holds_the_ladder_is_in_the_baseline_and_the_turn_is_a_constant() {
@@ -205,6 +220,7 @@ fn the_condition_holds_the_ladder_is_in_the_baseline_and_the_turn_is_a_constant(
         max_distance: Some(5.0e8),
     };
     let earth = EphemerisPerturber::new(eph.clone(), EARTH_J2000);
+    let sun = EphemerisPerturber::new(eph.clone(), SUN_J2000);
     let mut rows: Vec<Row> = Vec::new();
 
     for &(lead_days, dv, recorded) in DOORS {
@@ -373,8 +389,33 @@ fn the_condition_holds_the_ladder_is_in_the_baseline_and_the_turn_is_a_constant(
         // Placing the circle on the change is a pure shift of it along the normal
         // by the baseline error, so the repaired door needs no re-solve.
         let repaired_km = d0 / 1e3 + incoming_km;
+
+        // ---- and now the path that actually ships ----
+        //
+        // Everything above is the *measurement's* convention: a 32-sample mean over
+        // a full pre-encounter revolution, and the repair applied as a translation
+        // of the circle along its normal. What ships is one osculating sample taken
+        // where the rock first clears `SETTLE_HILL_RADII`, and an exactly re-solved
+        // circle at a shifted `a'` — a different locus, not a translated one. Both
+        // substitutions are meant to be free; asserting that here is the only place
+        // the published tables and the running code are held to each other.
+        let shipped = incoming_semi_major_axis_flown(&clock, &earth, &sun, mu_sun, ca.epoch)
+            .expect("the arriving orbit is readable off a flown arc");
+        assert!(
+            shipped.settled,
+            "lead {lead_days} d: the shipped baseline stopped {:.1} Hill radii out, under the \
+             {SHIPPED_SETTLE_HILL_RADII} it asks for — at this lead there is no settled \
+             pre-encounter leg and the reading is the best available, not the intended one",
+            shipped.hill_radii
+        );
+        let shipped_circle = frame
+            .resonant_circle_on_change(resonance, shipped.semi_major_axis_m)
+            .expect("the 3:4 circle survives the baseline shift");
+        let shipped_km = shipped_circle.signed_distance(p) / 1e3;
         println!(
-            "lead {lead_days:6.0} d: baseline (a_in_true − a_in_closed) {incoming_km:+8.1} km ±{in_bar_km:.0} | turn (the change) {turn_km:+8.1} km | door on the change {repaired_km:+8.1} km"
+            "lead {lead_days:6.0} d: baseline (a_in_true − a_in_closed) {incoming_km:+8.1} km ±{in_bar_km:.0} | turn (the change) {turn_km:+8.1} km | door on the change {repaired_km:+8.1} km | as shipped {shipped_km:+8.1} km (sample at {:.1} Hill, {:.1} d before CA)",
+            shipped.hill_radii,
+            (ca.epoch.tdb_seconds_past_j2000() - shipped.epoch.tdb_seconds_past_j2000()) / 86_400.0
         );
         rows.push(Row {
             lead_days,
@@ -383,6 +424,7 @@ fn the_condition_holds_the_ladder_is_in_the_baseline_and_the_turn_is_a_constant(
             outgoing: bias_km,
             turn: turn_km,
             repaired: repaired_km,
+            shipped: shipped_km,
         });
     }
 
@@ -429,5 +471,33 @@ fn the_condition_holds_the_ladder_is_in_the_baseline_and_the_turn_is_a_constant(
         apart(lo.repaired, hi.repaired) < TURN_SPREAD_LIMIT_KM,
         "drawing the circle on the change leaves the two doors {:.1} km apart — the repair does not flatten the ladder",
         apart(lo.repaired, hi.repaired)
+    );
+
+    // The shipping path, held to the same contrast. It differs from the row above
+    // in both of the ways a shipped thing usually differs from a measured one — a
+    // single osculating sample instead of a revolution mean, and an exactly
+    // re-solved circle instead of a normal shift — so it is asserted rather than
+    // assumed to inherit the result.
+    println!(
+        "as shipped: {:.0} d {:+.1} km, {:.0} d {:+.1} km — {:.1} km apart",
+        lo.lead_days,
+        lo.shipped,
+        hi.lead_days,
+        hi.shipped,
+        apart(lo.shipped, hi.shipped)
+    );
+    assert!(
+        apart(lo.shipped, hi.shipped) < SHIPPED_SPREAD_LIMIT_KM,
+        "the circle the frontend actually draws leaves the two extreme doors {:.1} km apart, \
+         over the {SHIPPED_SPREAD_LIMIT_KM} this claims — the shipping convention has lost the \
+         repair the measurement above demonstrates",
+        apart(lo.shipped, hi.shipped)
+    );
+    assert!(
+        apart(lo.shipped, hi.shipped) < 0.4 * apart(lo.d0, hi.d0),
+        "as shipped the two doors are {:.1} km apart against {:.1} km on the old placement — \
+         the repair must collapse the ladder, not merely move it",
+        apart(lo.shipped, hi.shipped),
+        apart(lo.d0, hi.d0)
     );
 }

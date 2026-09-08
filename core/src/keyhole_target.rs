@@ -103,6 +103,7 @@
 use anise::constants::frames::{EARTH_J2000, SUN_J2000};
 use nalgebra::{Vector2, Vector3};
 
+use crate::clock::Clock;
 use crate::close_approach::{closest_approach, find_close_approaches, ScanOptions};
 use crate::deflection::{DeflectionError, DeflectionScenario, DvSolveTol};
 use crate::epoch::Epoch;
@@ -1165,6 +1166,121 @@ fn snapshots_to(from: Epoch, to: Epoch, cadence: f64) -> Result<u32, KeyholeTarg
     Ok(((span / cadence).ceil() + 1.0) as u32)
 }
 
+/// Earth's Hill radius, metres (`a⊕·(μ⊕/3μ☉)^(1/3)`, 1.50e9 m ≈ 0.01 AU).
+///
+/// One significant-figure round number on purpose: it is used as a *gate* on how
+/// far out of Earth's grip a reading is taken, never as a dynamical boundary, and
+/// nothing here changes answer between 1.47e9 and 1.5e9.
+/// `core/tests/keyhole_prediction_bias.rs` keeps its own copy deliberately — its
+/// job is to check this module's day counts from outside.
+pub const EARTH_HILL_RADIUS_M: f64 = 1.5e9;
+
+/// How far out of Earth's grip [`incoming_semi_major_axis_flown`] insists on
+/// reading, in Earth Hill radii.
+///
+/// **A day count is the wrong unit for this and was the unit used to discover
+/// it.** The measurement campaign sampled at CA − 30 d, which on the shipping
+/// rock's ~5 km/s flyby is 12.6 to 13 Hill radii; a sample at CA + 10 d, only 4.4
+/// Hill out, sits ~350 km-equivalent away from every later one because Earth is
+/// still holding the rock's energy. A slower flyby would put 30 days *inside*
+/// that contamination without anything saying so, which is why the shipped gate
+/// is the distance and not the days.
+pub const SETTLE_HILL_RADII: f64 = 10.0;
+
+/// The orbit the rock is **on as it arrives**, read off the flown trajectory.
+///
+/// See [`incoming_semi_major_axis_flown`]. Carries the epoch and the clearance so
+/// a caller can say where the reading was taken and whether it got out of Earth's
+/// grip, rather than being handed a bare number that may or may not mean what it
+/// says.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IncomingBaseline {
+    /// Osculating heliocentric semi-major axis at [`epoch`](Self::epoch), metres.
+    pub semi_major_axis_m: f64,
+    /// Where it was read.
+    pub epoch: Epoch,
+    /// The rock's geocentric distance there, in [`EARTH_HILL_RADIUS_M`].
+    pub hill_radii: f64,
+    /// Whether [`SETTLE_HILL_RADII`] was actually reached before the trajectory
+    /// ran out. `false` means the arc begins closer in than that — a deflection
+    /// dialled so late that there is no settled pre-encounter leg to read — and
+    /// the value is the best available rather than a refusal, because a refusal
+    /// would drop the repair exactly where its correction is largest.
+    pub settled: bool,
+}
+
+/// The heliocentric semi-major axis the **flown** rock is on as it arrives at the
+/// encounter — the baseline [`OpikFrame::resonant_circle_on_change`] needs, and
+/// the one thing about a resonant circle six sessions never measured.
+///
+/// [`OpikFrame::incoming_semi_major_axis`] answers the same question in closed
+/// form, from the *nominal* encounter, and is wrong by +293, +84, −422 and −458
+/// b-plane km-equivalent across deflection leads of 4383, 900, 300 and 200 days
+/// on the flown 3:4 doors. That ladder is the whole of the keyhole map's
+/// placement error (see [`keyhole`](crate::keyhole)'s module doc). This reads it
+/// instead.
+///
+/// **One osculating sample, and that is a measured choice, not a shortcut.** The
+/// campaign compared it against a 32-sample mean over a full pre-encounter
+/// revolution — an extra ~288-day backward integration — and the two are equally
+/// flat across the leads (spread 102.2 km against 102.7), differing only by a
+/// constant offset which is not subtracted anyway. The sample costs one
+/// interpolation of a trajectory the caller already holds, so it is what ships,
+/// and the mean stays in `probe_keyhole_placement outgoing` as the thing it was
+/// checked against.
+///
+/// The sample is taken at the last epoch at or before `ca_epoch` at which the
+/// rock is [`SETTLE_HILL_RADII`] Hill radii out, walked back on `clock`'s own
+/// snapshot cadence and clamped to the arc it covers. `None` only if the clock
+/// or the ephemeris cannot answer at the closest approach itself.
+pub fn incoming_semi_major_axis_flown(
+    clock: &Clock,
+    earth: &EphemerisPerturber,
+    sun: &EphemerisPerturber,
+    mu_sun: f64,
+    ca_epoch: Epoch,
+) -> Option<IncomingBaseline> {
+    if !(mu_sun > 0.0) {
+        return None;
+    }
+    let (span_lo, _) = clock.covered_span();
+    let step = clock.cadence_seconds().max(3600.0);
+    let clearance = |t: Epoch| -> Option<(f64, StateVector)> {
+        let st = clock.state_at(t).ok()?;
+        let e = earth.state_at(t).ok()?;
+        Some(((st.position - e.position).norm() / EARTH_HILL_RADIUS_M, st))
+    };
+    // Walk back from the encounter until the rock is out of Earth's grip. The
+    // geocentric distance rises monotonically going backwards from a closest
+    // approach, so a walk is enough and a search would be ceremony; the cap is
+    // there because a *hyperbolic-looking* arc that never clears the gate must
+    // still terminate, and it lands on the earliest state the arc holds.
+    let (mut best_t, mut best) = (ca_epoch, clearance(ca_epoch)?);
+    let mut t = ca_epoch;
+    let mut settled = best.0 >= SETTLE_HILL_RADII;
+    while !settled {
+        let next = t.shifted_by_seconds(-step);
+        if next.tdb_seconds_past_j2000() < span_lo {
+            break;
+        }
+        t = next;
+        let Some(c) = clearance(t) else { break };
+        best_t = t;
+        best = c;
+        settled = c.0 >= SETTLE_HILL_RADII;
+    }
+    let sun_state = sun.state_at(best_t).ok()?;
+    let r = best.1.position - sun_state.position;
+    let v = best.1.velocity - sun_state.velocity;
+    let a = 1.0 / (2.0 / r.norm() - v.norm_squared() / mu_sun);
+    a.is_finite().then_some(IncomingBaseline {
+        semi_major_axis_m: a,
+        epoch: best_t,
+        hill_radii: best.0,
+        settled,
+    })
+}
+
 /// The covariance-independent half of a **return**-encounter Tier-3 answer: the
 /// nominal reduction, the frame it defines, and the 2×6 Jacobian about it.
 ///
@@ -1472,6 +1588,7 @@ mod tests {
                 circle: ResonantCircle {
                     resonance: Resonance { h: 3, k: 4 },
                     a_prime: 0.825 * AU_M,
+                    a_prime_target: 0.825 * AU_M,
                     cos_theta_out: 0.0,
                     center_zeta: -78_703.7e3,
                     radius: 74_836.6e3,

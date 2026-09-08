@@ -58,9 +58,10 @@ use asteroid_core::scenario::{
     Tier2Config, ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES, SAFE_PERIGEE_TARGET_M,
 };
 use asteroid_core::{
-    along_track_unit, BPlaneSensitivity, Clock, DvSolveTol, EphemerisPerturber, Epoch,
-    GravityTractor, HoverGeometry, KeyholeProximity, OpikFrame, OrbitalElements, ResonantCircle,
-    StateCovariance, StateVector, TowDirection, TowSolveTol, TowWindow, AU_M as CORE_AU_M,
+    along_track_unit, incoming_semi_major_axis_flown, BPlaneSensitivity, Clock, DvSolveTol,
+    EphemerisPerturber, Epoch, GravityTractor, HoverGeometry, IncomingBaseline, KeyholeProximity,
+    OpikFrame, OrbitalElements, ResonantCircle, StateCovariance, StateVector, TowDirection,
+    TowSolveTol, TowWindow, AU_M as CORE_AU_M,
 };
 
 /// Kilometres per astronomical unit — the display scale positions cross into.
@@ -283,10 +284,24 @@ pub struct KeyholePlanRow {
     /// The point of the circle nearest the plan, `(ξ, ζ)` km — where the plan
     /// would have to move to.
     pub closest_point_km: (f64, f64),
+    /// How far from **this** circle the map's own placement error can reach, km —
+    /// the band the alert is cut on, converted from `a'` through this circle's own
+    /// gradient (`core::keyhole::Keyhole::placement_band`).
+    ///
+    /// It is per row, not a constant, and that is the 2026-09-08 finding: the
+    /// closed form's placement error is a constant in `a'`, so the *distance* it
+    /// corresponds to is whatever the local gradient makes it — 575 km on the 3:4
+    /// and 57 km on the 2:3, a ten-times-steeper circle on the same encounter.
+    pub placement_band_km: f64,
+    /// `margin_km − placement_band_km`: kilometres from being inside this door
+    /// **once the map's error is allowed for**, negative when the door is within
+    /// reach of it. The number `KeyholeReadout::at_risk` is the minimum of, and the
+    /// one the panel's alert fires on — the same expression, on purpose.
+    pub exposure_km: f64,
 }
 
 impl KeyholePlanRow {
-    fn from_proximity(f: &OpikFrame, p: Vector2<f64>, k: &KeyholeProximity) -> Self {
+    fn from_proximity(f: &OpikFrame, p: Vector2<f64>, k: &KeyholeProximity, band_a: f64) -> Self {
         Self {
             h: k.circle.resonance.h,
             k: k.circle.resonance.k,
@@ -298,6 +313,8 @@ impl KeyholePlanRow {
             margin_km: k.margin() / M_PER_KM,
             inside: k.inside(),
             closest_point_km: (k.closest_point.x / M_PER_KM, k.closest_point.y / M_PER_KM),
+            placement_band_km: k.keyhole.placement_band(band_a) / M_PER_KM,
+            exposure_km: k.exposure(band_a) / M_PER_KM,
         }
     }
 }
@@ -334,7 +351,8 @@ pub struct KeyholeReadout {
     pub beyond_mapped_region: bool,
     /// Closest circle, in kilometres.
     pub nearest: KeyholePlanRow,
-    /// Closest *door*: the smallest `margin_km` in the census.
+    /// Closest *door* once the map's own error is allowed for: the smallest
+    /// `exposure_km` in the census.
     pub at_risk: KeyholePlanRow,
     /// How many doors in the whole census lie within the caller's placement band
     /// — `at_risk` included, so `1` means the band names exactly one resonance
@@ -348,6 +366,19 @@ pub struct KeyholeReadout {
     /// the second, so a panel quoting one circle would be picking one of several
     /// the map cannot separate. This is the number that lets it say so.
     pub doors_in_band: usize,
+    /// Whether these circles are placed on the **change** the flyby makes to the
+    /// orbit (the 2026-09-08 repair) or on the closed form's absolute `a'`.
+    ///
+    /// `true` is the normal case with a plan in hand. `false` means the arriving
+    /// orbit could not be read off the flown arc, and the circles are where they
+    /// were drawn before the repair — which is a placement error of 19 to 786 km
+    /// depending on the deflection lead, not a rounding. Reported rather than
+    /// hidden because the two differ by far more than a keyhole is wide.
+    pub placed_on_the_change: bool,
+    /// The heliocentric semi-major axis the rock is actually on as it arrives, AU,
+    /// read off the flown arc — `None` when it could not be read. The input the
+    /// repair is made of; shown so a reader can see it move with the lead.
+    pub incoming_a_au: Option<f64>,
 }
 
 /// Discover the loaded kernel's usable coverage window by bisecting on whether
@@ -611,6 +642,19 @@ struct PlanState {
     /// invariant `frame_from` used to hold internally, kept here now that the
     /// propagation happens in `set_plan`.
     frame: EncounterFrame,
+    /// The heliocentric orbit this plan's rock is **on as it arrives**, read off
+    /// `clock` once here rather than every time a circle is drawn.
+    ///
+    /// This is what moves a resonant circle from where the closed form predicts the
+    /// post-encounter orbit to where the flyby actually leaves it — the 2026-09-08
+    /// repair (`core::keyhole::OpikFrame::resonant_circle_on_change`). It is a
+    /// property of the *plan*, not of the threat, which is why it lives here: the
+    /// map's placement error runs 19 to 786 b-plane km across the deflection leads
+    /// a player can dial, and all of that ladder is this number moving.
+    ///
+    /// `None` if the trajectory or the almanac could not answer; the circles then
+    /// fall back to the unrepaired placement, which is what shipped before.
+    incoming_baseline: Option<IncomingBaseline>,
 }
 
 /// A safety margin pulled in from each discovered coverage edge, seconds (1 day).
@@ -1626,11 +1670,25 @@ impl MissionCore {
             ENCOUNTER_SAMPLES,
         )?;
 
+        // Read the arriving orbit off the arc that was just flown, once. ~30
+        // interpolations of a clock already in hand — the walk stops as soon as the
+        // rock is `SETTLE_HILL_RADII` out of Earth's grip — so `keyhole_readout`
+        // stays the closed-form microseconds its doc promises.
+        let incoming_baseline = self.ephemeris.sun_gm_m3_s2().ok().and_then(|mu_sun| {
+            incoming_semi_major_axis_flown(
+                &clock,
+                &EphemerisPerturber::new(Arc::clone(&self.ephemeris), EARTH_J2000),
+                &EphemerisPerturber::new(Arc::clone(&self.ephemeris), SUN_J2000),
+                mu_sun,
+                sc.impact_epoch(),
+            )
+        });
         self.plan = Some(PlanState {
             deflection_seconds: deflection_epoch.tdb_seconds_past_j2000(),
             clock,
             encounter,
             frame,
+            incoming_baseline,
         });
         Ok(())
     }
@@ -1768,10 +1826,30 @@ impl MissionCore {
         let Some(f) = self.opik.as_ref() else {
             return Vec::new();
         };
-        f.resonant_circles(2..=max_years.max(2), 24, 60.0 * f.capture_radius)
+        self.plan_circles(f, max_years)
             .iter()
             .map(|c| KeyholeCircleRow::from_circle(f, c))
             .collect()
+    }
+
+    /// The circle census the drawn map and the planner row **both** take, placed on
+    /// the change across the encounter when there is a plan to read the arriving
+    /// orbit off, and on the absolute `a'` when there is not.
+    ///
+    /// One function because the alternative is the map drawing one set of circles
+    /// while the panel measures against another, and the placement repair moves
+    /// every circle by hundreds of kilometres — far more than a keyhole is wide.
+    /// Before a plan exists there is no flown trajectory and nothing to repair
+    /// with, so the pre-plan map is the unrepaired one; that is honest rather than
+    /// convenient, and it is why the readout reports which it got.
+    fn plan_circles(&self, f: &OpikFrame, max_years: u32) -> Vec<ResonantCircle> {
+        let b_max = 60.0 * f.capture_radius;
+        match self.plan.as_ref().and_then(|p| p.incoming_baseline) {
+            Some(b) => {
+                f.resonant_circles_on_change(2..=max_years.max(2), 24, b_max, b.semi_major_axis_m)
+            }
+            None => f.resonant_circles(2..=max_years.max(2), 24, b_max),
+        }
     }
 
     /// Where the **current plan** leaves the rock in keyhole terms: the distance
@@ -1819,24 +1897,30 @@ impl MissionCore {
     pub fn keyhole_readout(
         &self,
         max_years: u32,
-        placement_band_km: f64,
+        placement_band_a_km: f64,
     ) -> Option<KeyholeReadout> {
         let f = self.opik.as_ref()?;
-        let enc = self.plan.as_ref()?.encounter?;
+        let plan = self.plan.as_ref()?;
+        let enc = plan.encounter?;
         let p = f.project(&enc.b_vector);
         let b_max = 60.0 * f.capture_radius;
-        let circles = f.resonant_circles(2..=max_years.max(2), 24, b_max);
+        let band_a = placement_band_a_km * M_PER_KM;
+        let circles = self.plan_circles(f, max_years);
         let nearest = f.nearest_keyhole(&circles, p)?;
-        let at_risk = f.smallest_margin_keyhole(&circles, p)?;
-        let doors_in_band = f.doors_within_band(&circles, p, placement_band_km * M_PER_KM);
+        let at_risk = f.most_exposed_keyhole(&circles, p, band_a)?;
+        let doors_in_band = f.doors_within_band(&circles, p, band_a);
         Some(KeyholeReadout {
             plan_point_km: (p.x / M_PER_KM, p.y / M_PER_KM),
             b_km: enc.impact_parameter / M_PER_KM,
             mapped_b_max_km: b_max / M_PER_KM,
             beyond_mapped_region: enc.impact_parameter > b_max,
-            nearest: KeyholePlanRow::from_proximity(f, p, &nearest),
-            at_risk: KeyholePlanRow::from_proximity(f, p, &at_risk),
+            nearest: KeyholePlanRow::from_proximity(f, p, &nearest, band_a),
+            at_risk: KeyholePlanRow::from_proximity(f, p, &at_risk, band_a),
             doors_in_band,
+            placed_on_the_change: plan.incoming_baseline.is_some(),
+            incoming_a_au: plan
+                .incoming_baseline
+                .map(|b| b.semi_major_axis_m / CORE_AU_M),
         })
     }
 
@@ -5726,15 +5810,21 @@ mod tests {
         );
     }
 
-    /// The placement band these tests query the readout with, km.
+    /// The placement band these tests query the readout with, **kilometres of
+    /// `a'`** — not of b-plane. Each circle turns it into a distance through its own
+    /// gradient; see `core::keyhole::Keyhole::placement_band`.
     ///
-    /// Mirrors `sim.gd`'s `KEYHOLE_PLACEMENT_KM`, which is the shipping value and
+    /// Mirrors `sim.gd`'s `KEYHOLE_PLACEMENT_A_KM`, which is the shipping value and
     /// the one that decides what a player sees; it lives there because it is a
     /// statement about how far the *map* can be trusted, which is a presentation
     /// decision. Kept in step by hand — `test_orrery.gd` is the test that runs
     /// against the real constant, so a drift between the two shows up there as a
     /// changed verdict rather than here as a silent pass.
-    const PLACEMENT_BAND_KM: f64 = 800.0;
+    const PLACEMENT_BAND_A_KM: f64 = 15_000.0;
+
+    /// The 3:4 resonance, by name, for the tests that measure against that circle
+    /// specifically rather than against whichever row a ranking returned.
+    const THREE_FOUR: asteroid_core::Resonance = asteroid_core::Resonance { h: 3, k: 4 };
 
     /// Kernel-gated. **The plan a player can dial that returns the rock to Earth
     /// while the old band called it CLEAR.**
@@ -5772,7 +5862,7 @@ mod tests {
         const FLOWN_DV: f64 = -0.932_165_940_6;
         mc.set_plan(LEAD_S, FLOWN_DV).expect("the plan solves");
         let r = mc
-            .keyhole_readout(7, PLACEMENT_BAND_KM)
+            .keyhole_readout(7, PLACEMENT_BAND_A_KM)
             .expect("a readout for a plan with a b-point");
         println!(
             "900 d flown plan: b {:.0} km at (xi {:.0}, zeta {:.0}); at_risk {}:{} \
@@ -5785,7 +5875,7 @@ mod tests {
             r.at_risk.distance_km,
             r.at_risk.width_km,
             r.at_risk.margin_km,
-            PLACEMENT_BAND_KM,
+            PLACEMENT_BAND_A_KM,
             r.doors_in_band
         );
         assert!(
@@ -5838,12 +5928,26 @@ mod tests {
              headline is wrong",
             three_four.margin() / M_PER_KM
         );
+        // The shipping cut, on the shipping quantity. `exposure_km` is the row's
+        // own margin less the band that row's gradient earns it, and it is the same
+        // expression `keyhole_alert()` fires on — so this asserts what a player sees
+        // rather than a number that resembles it.
         assert!(
-            r.at_risk.margin_km <= PLACEMENT_BAND_KM,
+            r.at_risk.exposure_km <= 0.0,
             "the shipping band must alert on a plan that flies the rock back into Earth; \
-             the smallest margin in the census is {:.1} km against a {PLACEMENT_BAND_KM:.0} \
-             km band",
-            r.at_risk.margin_km
+             the {}:{} row scores {:.1} km of margin against its own {:.1} km band, i.e. \
+             {:.1} km of exposure",
+            r.at_risk.h,
+            r.at_risk.k,
+            r.at_risk.margin_km,
+            r.at_risk.placement_band_km,
+            r.at_risk.exposure_km
+        );
+        assert!(
+            r.placed_on_the_change,
+            "the circles must be placed on the change across the encounter — a plan with a \
+             flown arc always has an arriving orbit to read, and falling back to the \
+             absolute placement here would silently restore the ladder"
         );
 
         // How many doors the band contains — **reported, not asserted to be more
@@ -5882,7 +5986,7 @@ mod tests {
     /// same failure the 900 d test pins — a plan the map calls CLEAR that flies
     /// the rock back into Earth — recurred one lead down, at a constant that had
     /// just been raised 5× to prevent it. The **200 d** door is further out again
-    /// at **+786.0 km**, which is what set `KEYHOLE_PLACEMENT_KM` = 800, and this
+    /// at **+786.0 km**, which is what set the retired 800 km band, and this
     /// test is what stops it drifting back.
     ///
     /// **And it is not the impulse.** The 200 d door floors at a *smaller* Δv than
@@ -5917,7 +6021,7 @@ mod tests {
         ] {
             mc.set_plan(lead_s, dv).expect("the plan solves");
             let r = mc
-                .keyhole_readout(7, PLACEMENT_BAND_KM)
+                .keyhole_readout(7, PLACEMENT_BAND_A_KM)
                 .expect("a readout for a plan with a b-point");
             // The 3:4 by name out of the readout's own census — never whichever
             // row a ranking returned, because this is a flown measurement that
@@ -5931,21 +6035,35 @@ mod tests {
                     .expect("encounter")
                     .b_vector,
             );
+            // The **unrepaired** census on purpose: these three rows reproduce the
+            // probe's flown ladder, which was measured against the circle the map
+            // used to draw. The repaired distance is read beside it, from the same
+            // baseline the readout used, so the two are directly comparable.
             let circles = f.resonant_circles(2..=7, 24, 60.0 * f.capture_radius);
             let three_four = f
                 .keyhole_proximities(&circles, p)
                 .into_iter()
                 .find(|k| k.circle.resonance.h == 3 && k.circle.resonance.k == 4)
                 .expect("the 3:4 circle is in the readout's own census");
+            let a_in = r.incoming_a_au.expect("the arriving orbit was read") * CORE_AU_M;
+            let d_moved = f
+                .resonant_circle_on_change(THREE_FOUR, a_in)
+                .expect("the 3:4 circle survives the baseline shift")
+                .signed_distance(p)
+                / M_PER_KM;
             println!(
-                "{label}: b {:.0} km at (xi {:.0}, zeta {:.0}); 3:4 d {:+.1} km, width \
-                 {:.1} km, margin {:.1} km; doors in a {PLACEMENT_BAND_KM:.0} km band: {}",
+                "{label}: b {:.0} km at (xi {:.0}, zeta {:.0}); 3:4 d {:+.1} km on the old \
+                 placement, {:+.1} km on the change; width {:.1} km, margin {:.1} km; \
+                 at_risk exposure {:.1} km; doors in a {PLACEMENT_BAND_A_KM:.0} km-of-a' \
+                 band: {}",
                 r.b_km,
                 r.plan_point_km.0,
                 r.plan_point_km.1,
                 three_four.signed_distance / M_PER_KM,
+                d_moved,
                 three_four.keyhole.width / M_PER_KM,
                 three_four.margin() / M_PER_KM,
+                r.at_risk.exposure_km,
                 r.doors_in_band
             );
             flown.push((
@@ -5954,6 +6072,8 @@ mod tests {
                 three_four.signed_distance / M_PER_KM,
                 three_four.margin() / M_PER_KM,
                 r.doors_in_band,
+                d_moved,
+                r.at_risk.exposure_km,
             ));
         }
         let (long, short, shortest) = (&flown[0], &flown[1], &flown[2]);
@@ -5991,7 +6111,7 @@ mod tests {
             short.2 > 10.0 * long.2,
             "the 300 d shot is {:.1} km out and the 12 yr shot {:.1} km, {:.1}x apart at the \
              same place on the same circle. If that ratio has collapsed, the placement error \
-             does not track the lead after all and KEYHOLE_PLACEMENT_KM's doc is wrong",
+             does not track the lead after all and KEYHOLE_PLACEMENT_A_KM's doc is wrong",
             short.2,
             long.2,
             short.2 / long.2
@@ -6012,7 +6132,7 @@ mod tests {
             2.478_471_262_1_f64 < 2.879_756_546_8_f64 && shortest.2 > short.2,
             "the 200 d door is flown at a smaller Δv than the 300 d one and must still \
              sit further out: {:.1} km against {:.1} km. If that has reversed, the \
-             placement error tracks the impulse after all and KEYHOLE_PLACEMENT_KM's \
+             placement error tracks the impulse after all and KEYHOLE_PLACEMENT_A_KM's \
              doc names the wrong variable",
             shortest.2,
             short.2
@@ -6027,21 +6147,49 @@ mod tests {
         // And the band this forced. The retired 500 km would have read CLEAR on
         // both of these, and each of them flies the rock back into Earth.
         const RETIRED_BAND_KM: f64 = 500.0;
-        for (label, m) in [("300 d", short.3), ("200 d", shortest.3)] {
+        for (label, m, e) in [
+            ("300 d", short.3, short.6),
+            ("200 d", shortest.3, shortest.6),
+        ] {
             assert!(
                 m > RETIRED_BAND_KM,
                 "the {label} plan returns the rock to Earth and scores {m:.1} km of \
-                 margin; the retired ±{RETIRED_BAND_KM:.0} km band would have had to \
-                 alert on it to be safe. If this ever fails, 500 was adequate and this \
-                 batch's headline is wrong"
+                 margin against the OLD placement; the retired ±{RETIRED_BAND_KM:.0} km \
+                 band would have had to alert on it to be safe. If this ever fails, 500 \
+                 was adequate and this batch's headline is wrong"
             );
             assert!(
-                m <= PLACEMENT_BAND_KM,
+                e <= 0.0,
                 "the shipping band must alert on a plan that flies the rock back into \
-                 Earth; the {label} one scores {m:.1} km of margin against a \
-                 {PLACEMENT_BAND_KM:.0} km band"
+                 Earth; the {label} one scores {e:.1} km of exposure"
             );
         }
+
+        // **What the repair bought, on the frontend's own path.** Against the circle
+        // the map used to draw, the same door runs a ladder in the deflection lead —
+        // that is the whole reason the band was 800 km. Placed on the change across
+        // the encounter it does not: the three shots land within a few hundred
+        // kilometres of each other instead of spanning the ladder.
+        //
+        // Asserted as a **contrast** rather than as two tolerances, because either
+        // half alone would pass on a run where the measurement had gone flat.
+        let ladder = (long.2 - shortest.2).abs();
+        let repaired = (long.5 - shortest.5).abs();
+        println!(
+            "  3:4 across 4383 d -> 200 d: old placement {:+.1} -> {:+.1} km (spread \
+             {ladder:.1}), on the change {:+.1} -> {:+.1} km (spread {repaired:.1})",
+            long.2, shortest.2, long.5, shortest.5
+        );
+        assert!(
+            ladder > 600.0,
+            "the old placement must still show the ladder this repair exists to remove; \
+             it spans {ladder:.1} km across the extreme leads (the probe measured 767)"
+        );
+        assert!(
+            repaired < 0.4 * ladder,
+            "placing the circle on the change must collapse the ladder, not merely move \
+             it: {repaired:.1} km against {ladder:.1} km"
+        );
     }
 
     /// Kernel-gated. The planner's keyhole readout — *a miss can be worse than a
@@ -6082,13 +6230,13 @@ mod tests {
         }
         let mut mc = MissionCore::load().expect("load kernels");
         assert!(
-            mc.keyhole_readout(7, PLACEMENT_BAND_KM).is_none(),
+            mc.keyhole_readout(7, PLACEMENT_BAND_A_KM).is_none(),
             "no scenario, no readout — never a zeroed one"
         );
         mc.build_scenario(&ImpactorConfig::default())
             .expect("scenario builds");
         assert!(
-            mc.keyhole_readout(7, PLACEMENT_BAND_KM).is_none(),
+            mc.keyhole_readout(7, PLACEMENT_BAND_A_KM).is_none(),
             "no plan, no readout: the nominal is an impact, not a miss to place"
         );
 
@@ -6097,7 +6245,7 @@ mod tests {
         mc.set_plan(lead, -0.216_550)
             .expect("the flown plan solves");
         let r = mc
-            .keyhole_readout(7, PLACEMENT_BAND_KM)
+            .keyhole_readout(7, PLACEMENT_BAND_A_KM)
             .expect("a readout for a plan with a b-point");
         println!(
             "flown 3:4 plan: b {:.0} km at (xi {:.0}, zeta {:.0}); nearest {}:{} \
@@ -6140,20 +6288,65 @@ mod tests {
                 .expect("encounter")
                 .b_vector,
         );
-        let circles_look = f_look.resonant_circles(2..=7, 24, 60.0 * f_look.capture_radius);
+        // Two censuses, because two different questions are being asked of them.
+        //
+        // `circles_plain` is the circle the map drew before 2026-09-08, and the
+        // 1.64-half-widths calibration below belongs to it: that number was measured
+        // against *that* locus, and moving it because the shipping placement moved
+        // would be re-labelling a measurement rather than repeating it.
+        //
+        // `circles_look` is what the readout actually used — placed on the change
+        // across the encounter, from the same arriving orbit the readout reports —
+        // and every self-consistency check on the readout's own rows is taken there.
+        // Mixing the two is what made this test fail the day the repair landed, and
+        // the failure was correct.
+        let circles_plain = f_look.resonant_circles(2..=7, 24, 60.0 * f_look.capture_radius);
+        let a_in_m = r.incoming_a_au.expect("the arriving orbit was read") * CORE_AU_M;
+        assert!(
+            r.placed_on_the_change,
+            "a plan with a flown arc must have its circles placed on the change"
+        );
+        let circles_look =
+            f_look.resonant_circles_on_change(2..=7, 24, 60.0 * f_look.capture_radius, a_in_m);
+        assert_eq!(
+            circles_plain.len(),
+            circles_look.len(),
+            "the repair moves circles, it does not add or drop resonances"
+        );
         let three_four = f_look
-            .keyhole_proximities(&circles_look, p_look)
+            .keyhole_proximities(&circles_plain, p_look)
             .into_iter()
             .find(|k| k.circle.resonance.h == 3 && k.circle.resonance.k == 4)
-            .expect("the 3:4 circle is in the readout's own census");
+            .expect("the 3:4 circle is in the census");
         let tf_d_km = three_four.signed_distance / M_PER_KM;
         let tf_w_km = three_four.keyhole.width / M_PER_KM;
+        let tf_moved_km = f_look
+            .resonant_circle_on_change(THREE_FOUR, a_in_m)
+            .expect("the 3:4 circle survives the baseline shift")
+            .signed_distance(p_look)
+            / M_PER_KM;
         println!(
-            "  3:4 by name: d {:.1} km, width {:.1} km, {:.3} widths, margin {:.1} km",
+            "  3:4 by name: d {:.1} km on the old placement, {:.1} km on the change; \
+             width {:.1} km, {:.3} widths, margin {:.1} km; arriving orbit {:.9} AU",
             tf_d_km,
+            tf_moved_km,
             tf_w_km,
             three_four.widths_away(),
-            three_four.margin() / M_PER_KM
+            three_four.margin() / M_PER_KM,
+            r.incoming_a_au.unwrap_or(f64::NAN)
+        );
+        // The repair's own size at this lead, where the probe measured the door
+        // centre moving from +19.3 km to +402.0 km (one osculating sample at
+        // CA − 30 d) or +311.9 km (a 32-sample mean over a full revolution). The
+        // binding samples at `SETTLE_HILL_RADII` instead of at a day count, so it
+        // lands at neither — it is a third point of the same wobbling osculating
+        // element, and the ±136 km-equivalent bar folded into the band is exactly
+        // the size of that spread. Pinned as a range for that reason.
+        assert!(
+            (250.0..470.0).contains(&tf_moved_km),
+            "the change-placed 3:4 sits {tf_moved_km:.1} km from this flown plan; the probe \
+             measured the door centre at +311.9 km (revolution mean) and +402.0 km (one \
+             sample), and the shipping convention is a third sample of the same element"
         );
         assert!(
             (1.2..2.2).contains(&three_four.widths_away()),
@@ -6210,7 +6403,7 @@ mod tests {
         // and +245.5 km from its own frame's, so the map's choice is empirically
         // the better one and rebuilding per plan would make the reported number
         // worse. What it is not is free — and that size is one closed-form
-        // reason `KEYHOLE_PLACEMENT_KM` is 500 and not 25.
+        // reason the placement band is hundreds of kilometres and not 25.
         //
         // Every number below belongs to **this plan at the campaign's 12 yr
         // lead**. The probe re-measured all three frames at 900, 450 and 150 day
@@ -6279,7 +6472,7 @@ mod tests {
             "the ~1.9 h arrival slip of the deflected pass moves the placed 3:4 point by only \
              {timing_only:+.1} km against a {tf_w_km:.1} km door. +211 km was measured. If \
              this has genuinely collapsed then the frame is nearly free after all and \
-             KEYHOLE_PLACEMENT_KM should be re-argued, not left at 500"
+             KEYHOLE_PLACEMENT_A_KM should be re-argued, not left where it is"
         );
         assert!(
             placed[2].abs() > 5.0 * d_nom.abs(),
@@ -6344,14 +6537,16 @@ mod tests {
                 r.nearest.distance_km.abs()
             );
         }
+        let band_a_m = PLACEMENT_BAND_A_KM * M_PER_KM;
         for k in f_look.keyhole_proximities(&circles_look, p_look) {
             assert!(
-                r.at_risk.margin_km <= k.margin() / M_PER_KM + 1e-6,
-                "{}:{} sits {:.1} km outside its door, beating the reported {:.1} km",
+                r.at_risk.exposure_km <= k.exposure(band_a_m) / M_PER_KM + 1e-6,
+                "{}:{} sits {:.1} km outside everything the map could be wrong about, \
+                 beating the reported {:.1} km",
                 k.circle.resonance.h,
                 k.circle.resonance.k,
-                k.margin() / M_PER_KM,
-                r.at_risk.margin_km
+                k.exposure(band_a_m) / M_PER_KM,
+                r.at_risk.exposure_km
             );
         }
         // Whether the two rankings actually part company on a plan the frontend can
@@ -6378,7 +6573,7 @@ mod tests {
         // a *different* place on the map, so the readout is reading the plan and
         // not a constant.
         mc.set_plan(mc.period_seconds(), -0.2).expect("plan solves");
-        let d = mc.keyhole_readout(7, PLACEMENT_BAND_KM).expect("readout");
+        let d = mc.keyhole_readout(7, PLACEMENT_BAND_A_KM).expect("readout");
         println!(
             "default plan: b {:.0} km; nearest {}:{} d {:.1} km; at_risk {}:{} d {:.1} km \
              (margin {:.1} km, {:.2} widths)",
@@ -6396,12 +6591,54 @@ mod tests {
             (d.plan_point_km.1 - r.plan_point_km.1).abs() > 1.0,
             "two different plans must not land on the same b-point"
         );
+
+        // **The pair that shows what the per-circle band buys, and it is not the
+        // comparison that used to stand here.**
+        //
+        // Until 2026-09-08 this asserted that the flown-keyhole Δv is nearer a door
+        // in kilometres than the default plan is to any. That was true while the
+        // circle was drawn through the door this exact shot flies — 20.4 km — and
+        // the repair falsified it: placing the circle on the change moves it out by
+        // the residual constant nobody has enough flights to subtract, so this shot
+        // now reads 341 km of margin while the default plan reads 184 km from a
+        // 3:5. Both numbers are right and the old assertion was measuring the wrong
+        // thing: a plan is not dangerous because it is *near a locus*, it is
+        // dangerous because it is near a door **the map cannot rule out**.
+        //
+        // In that quantity the two are not close. The 3:4 is a shallow circle, so
+        // its band is hundreds of kilometres and 341 km of margin does not clear it;
+        // the 3:5 the default plan sits by is steep — a sub-kilometre door — so its
+        // band is tens of kilometres and 184 km of margin clears it comfortably.
+        // Under the retired constant band both would have alerted, and one of them
+        // is a plan with no resonant return behind it at all.
         assert!(
-            d.at_risk.margin_km > r.at_risk.margin_km,
-            "the flown-keyhole Δv must be nearer a door ({:.1} km outside it) than the \
-             default plan is to any ({:.1} km)",
+            r.at_risk.exposure_km < 0.0,
+            "the flown keyhole Δv returns this rock to Earth three years later and must \
+             not read clear of its door: {:.1} km of margin against a {:.1} km band",
             r.at_risk.margin_km,
-            d.at_risk.margin_km
+            r.at_risk.placement_band_km
+        );
+        assert!(
+            d.at_risk.exposure_km > 0.0,
+            "the default plan has no flown return behind it and sits {:.1} km from a \
+             {}:{} door whose band is {:.1} km — it must read clear. The retired constant \
+             band would have alerted on it",
+            d.at_risk.margin_km,
+            d.at_risk.h,
+            d.at_risk.k,
+            d.at_risk.placement_band_km
+        );
+        assert!(
+            d.at_risk.placement_band_km < 0.5 * r.at_risk.placement_band_km,
+            "the two plans sit by circles of very different gradient, so their bands must \
+             differ: {:.1} km on the {}:{} against {:.1} km on the {}:{}. If these ever \
+             converge the band has stopped being per-circle and the unit change is undone",
+            d.at_risk.placement_band_km,
+            d.at_risk.h,
+            d.at_risk.k,
+            r.at_risk.placement_band_km,
+            r.at_risk.h,
+            r.at_risk.k
         );
     }
 

@@ -39,6 +39,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **The shape number promoted out of its probe**: the per-axis linearity residual moved from two private copies into `LinearityReport::shape_residual`, with pure-math tests that know the right answer, and the blind scalar's under-reading factored | **done 2026-09-08**; behaviour identical (shipping minor 0.0007, top stop 0.5610, scalar 0.0043) and the 130x gap turns out **not** to be the 206:1 aspect ratio - it is 143 drawn half-widths of shell reach x 0.90 of the residual lying across the needle, because `shell_scale` is 0.693 of the 3sigma half-length, not equal to it. The move also flipped an eigenvector sign nothing tested - the drawn angle read **-90.26 against a published 89.736** with every ratio unchanged - now pinned in the module and folded into a half-turn at the print | `core/src/uncertainty.rs`, `core/tests/tier3_drawn_shape.rs`, `core/examples/probe_tier3_{drawn_shape,uncertainty}.rs` |
 | **Which half of the keyhole map is wrong**: the semi-major axis the flyby *actually* produces, read on four flown 3:4 doors as a mean over one post-encounter revolution, against both things a resonant circle assumes | **done 2026-09-08**; the resonance **condition** is sound — a flown door leaves the rock **14 to 49 km-equivalent** from `a_res` at every lead — **−14 to −16 km at three of the four leads and −49 km at 200 d**, a spread inside the measurement's own ±41 km bar — while the closed form's **prediction** of `a'` is wrong by −33, −227, −665 and −839 km, which *is* the 19 → 786 km ladder. Both available repairs are dead: the `r ≈ R⊕` substitution explains **0.4 %** at the 300 d door (where the rock is 53 km from Earth's distance and the error is at full size), and rebuilding the frame from the flight's own encounter is worse at three leads of four | `core/examples/probe_keyhole_placement.rs`, `core/tests/keyhole_prediction_bias.rs`, `core/src/keyhole.rs` |
 | **Where in the closed form the ladder lives**: the four ingredients the map takes from the nominal rock swapped one at a time, then the same construction asked on the leg *before* the encounter | **done 2026-09-08**; none of the four ingredients orders by lead and their sum is not the bias either (additive to 11 %, so no cancellation), while splitting the prediction into a **baseline** (which orbit the rock arrives on) and a **turn** (what the flyby does to it) separates them cleanly: across the two extreme doors the two absolute errors are **750 and 805 km apart** and the error in the *change* is **55 km apart**, inside the ±136 km bar. So the flyby is predicted right to a constant and the whole 19 → 786 km ladder is the baseline. Placing the circle on the change instead would turn that ladder into a **103 km spread about a constant** — measured, deliberately not shipped | `core/examples/probe_keyhole_placement.rs`, `core/tests/keyhole_prediction_bias.rs`, `core/src/keyhole.rs` |
+| **The repair shipped, and the band changed units**: the resonant circle placed on the **change** the flyby makes rather than on the closed form's absolute `a'`, with the arriving orbit read off the flown arc; and a second resonance flown to settle what the leftover error is a constant *in* | **done 2026-09-08**; the 3:4's four doors go from a **767 km ladder** in the deflection lead to an **offset** (+352 to +372 km on the shipping convention, 20.7 km apart at the two extremes), so the worst case the band must cover halves. And the 2:3, flown at two leads on a gradient **ten times** steeper, says the error is a constant of **semi-major axis**, not of b-plane distance: 12× apart in kilometres (the gradient ratio) and overlapping in `a'`, with the measurement's own error bar reading ±3 535 and ±3 540 km of `a'` on the two. So `KEYHOLE_PLACEMENT_KM = 800` becomes `KEYHOLE_PLACEMENT_A_KM = 15 000` km of `a'` — **575 km on the 3:4, 57 km on the 2:3** — and the alert is cut per circle on `exposure = margin − band` | `core/src/{keyhole,keyhole_target}.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/{sim,planner}.gd`, `core/tests/keyhole_prediction_bias.rs` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -148,7 +149,19 @@ Read this table first, then the session that owns the layer you are touching.
    change — which is exactly why substituting it outgoing explained 0.4 %.
    Drawing the circle on the change would collapse the ladder to a 103 km spread;
    that repair is measured and **not shipped**, and is the next batch. See *The
-   ladder is in the baseline, not in the turn*.
+   ladder is in the baseline, not in the turn*. **It shipped 2026-09-08, and the
+   gate it had to pass first moved something the item never asked about.** The
+   cheap gate — a second resonance, flown on a *crossing* Δv because the
+   baseline/turn split does not need a door — passed: on a 2:3 whose gradient is
+   ten times the 3:4's, the flyby is still predicted right to a constant. But
+   reading the two resonances against each other says that constant is a constant
+   of **semi-major axis**, not of b-plane kilometres: 12× apart in km (exactly the
+   gradient ratio) and overlapping in `a'`. So the band's *shape* was wrong, not
+   just its size — a fixed number of kilometres is 30× too generous at a steep
+   circle and unboundedly too tight at a near-tangency one. The circle is now
+   placed on the change (`OpikFrame::resonant_circle_on_change`, fed by the
+   arriving orbit read off the flown arc), and the band is 15 000 km of `a'`
+   converted per circle. See *The circle placed on the change*.
 5. ~~**dop853 → IAS15 crossover.**~~ **RETIRED 2026-09-06 — measured, and no second
    integrator is warranted.** Three corrections to that line. (a) The premise was
    wrong: it leaned on the 15.1 km residual vs JPL, which is *unmodelled forces*
@@ -223,7 +236,23 @@ Read this table first, then the session that owns the layer you are touching.
    ellipse's 205:1 aspect ratio: `shell_scale` is 0.693 of the 3sigma half-length,
    so the factor is 143 half-widths of shell reach times the 0.90 of the residual
    that lies across the needle. See *The scalar's blindness*.
-9. Phase 3 — noting that its first bullet (plausible launch vehicles + payload
+9. **The constant the repair leaves behind.** Placing the circle on the change
+   turns the placement ladder into an offset, and that offset is *visible*: all six
+   flights sit on the same side of their circles, 8 184 to 11 024 km of `a'` out.
+   Subtract it and the worst repaired door would be inside ~130 km instead of
+   ~370. It is deliberately not subtracted — six flights over two resonances give a
+   number whose own spread is 1.35×, and trading a known error for a badly known
+   one is not a repair. What would settle it: a third resonance, or the same two at
+   more leads. The 5:7, 7:10 and 6:5 have doors flown at the 12 yr lead but never at
+   a dialable one, and their gradients (97, 138, 2 425 m/m) span exactly the axis
+   that turned out to matter. Two smaller loose ends travel with it: `doors_in_band`
+   was measured against the retired 800 km band, and the new band is **not**
+   uniformly narrower - 57 km on a steep circle, 575 km on a shallow one, and
+   *wider* than the retired 800 anywhere below ~19 m/m - so the crowded register
+   has to be re-measured, not reasoned through; and the residual constant
+   might itself be encounter-local (the solar tide across the flyby, the finite time
+   the turn takes), which is the one place those two suspects are still live.
+10. Phase 3 — noting that its first bullet (plausible launch vehicles + payload
    mass budgets) is already built, in `core/src/launch_vehicle.rs` and the `[M]`
    readout. What is actually left there is orbital assembly, standing defence
    systems, and multi-mission campaigns.
@@ -5251,3 +5280,230 @@ literal and bake the indentation into it.
 - **One resonance, four leads.** Everything above is the 3:4. The cheapest check
   that the split is a property of the construction rather than of this circle is a
   second resonance flown at two leads.
+
+### The circle placed on the change, and the unit the error is a constant in - 2026-09-08 session (the repair shipped, and a second resonance that moved the band's units)
+
+The previous section ended with a repair *measured and deliberately not shipped*:
+place a resonant circle where the closed form's **change** across the encounter is
+right, rather than where its absolute `a'` is, and a 767 km ladder in the
+deflection lead becomes a 103 km spread about a constant. It listed three things a
+shipping version needed - which baseline convention, what the residual constant
+is, and whether the arriving orbit crosses the binding - and one check: *"the
+cheapest check that the split is a property of the construction rather than of
+this circle is a second resonance flown at two leads."*
+
+That check was run first, and it did two jobs instead of one.
+
+#### The gate, and why it did not need a door
+
+A door costs ~45 flights and a return propagation. The baseline/turn split does
+not need one: it reads two revolution means at whatever b-plane point the flight
+lands on, and the recorded door centre enters only the "what the repair would buy"
+column. So the second resonance was flown on a **crossing** Δv - a point *on* the
+circle, found by `xi_sweep` in 50 forward flights and 313 s - and
+`probe_keyhole_placement outgoing` grew a `fly=<lead>:<dv>` argument so it can be
+pointed at flights that have no door behind them. A row flown that way says so
+rather than printing a `d₀` of zero as if it were a door.
+
+The 2:3 Minus was chosen because its gradient is **ten times** the 3:4's on the
+same encounter (263.8 against 26.1 m/m), which is the axis the 3:4's four leads
+cannot vary: across those four `|∇a'|` moves 1.75 %.
+
+| | `∇a'·n̂` (m/m) | error in the change, b-plane km | the same, km of `a'` |
+|---|---|---|---|
+| 3:4, four leads | 26.10 … 26.36 | +242.3 … +381.1 (spread 138.8) | +6 274 … +10 045 (spread 3 771) |
+| 2:3, two leads | 254.74 … 263.75 | +25.5 … +28.1 (**spread 2.6**) | +6 485 … +7 409 (spread 924) |
+
+**The split generalises**: on a circle ten times steeper, at leads 4383 d and
+200 d, the flyby is still predicted right to a constant. That was the gate, and it
+passed.
+
+#### The finding the gate was not looking for: the constant is in `a'`, not in km
+
+Read the two right-hand columns against each other. In b-plane kilometres the
+"constant" moves **12×** between the two resonances - which is the gradient ratio,
+26.1 → 263.8, and therefore not a coincidence. In kilometres of semi-major axis
+the two ranges **overlap**. The closed form misplaces a circle by a constant
+amount of `a'`; the *distance* that comes to is whatever the local gradient makes
+it.
+
+One more number says the same thing from the other side. The incoming
+measurement's own error bar - the revolution mean re-taken half a revolution
+earlier - is ±136 b-plane km on the 3:4 and ±14 on the 2:3. In `a'` those are
+±3 535 and ±3 540 km. The **same number**, on two resonances an order of magnitude
+apart in gradient, from a convention that knows nothing about either.
+
+This retires an additive-kilometre band as the right *shape*, not just the right
+size, and it does so in a direction nobody had proposed: the previous session's
+open question was how big the band should be, and the answer is that a band in
+kilometres is 30× too generous at a steep circle and unboundedly too tight at a
+near-tangency one, where `∇a' → 0`.
+
+#### What shipped
+
+**`OpikFrame::resonant_circle_on_change(resonance, a_in_true)`** - the circle at
+the level set `a_res + (a_in_predicted − a_in_true)`, solved exactly rather than
+translated. `ResonantCircle` gained `a_prime_target` (the level set it *is*)
+beside `a_prime` (the `a'` the resonance asks for); they differ only here, and the
+keyhole width is still sized from `a_prime`, because the width is a return-timing
+tolerance and the return happens on the resonant orbit. Passing the frame's own
+`incoming_semi_major_axis()` reproduces `resonant_circle` exactly - asserted, so
+the repair is a strict generalisation and not a second construction to keep in
+step.
+
+**`keyhole_target::incoming_semi_major_axis_flown`** - the arriving orbit read off
+the flown arc: one osculating sample at the last epoch before closest approach at
+which the rock is `SETTLE_HILL_RADII` = 10 Earth Hill radii out, walked back on the
+clock's own cadence. **In Hill radii, not days**, which is what
+`keyhole_prediction_bias.rs` already said the unit had to be; the campaign's
+CA − 30 d is 12.6 to 13 Hill on this rock and would silently be inside Earth's grip
+on a slower flyby. It returns an `IncomingBaseline` carrying the epoch, the
+clearance and a `settled` flag rather than a bare number, and when the arc begins
+closer in than the gate it gives the best available reading instead of refusing -
+refusing would drop the repair exactly where its correction is largest.
+
+**The band's unit.** `Keyhole::placement_band(band_a)` is `band_a / |∇a'|`, and it
+goes non-finite exactly where the keyhole width does - the same near-tangency
+limit, already filtered out of `keyhole_proximities`, and now asserted to be
+finite-or-not *together* so a caller can never see one without the other.
+`KeyholeProximity::exposure(band_a)` is `margin − placement_band`, and it is both
+the alert cut and the ranking key: `most_exposed_keyhole` minimises exactly what
+`doors_within_band` counts. That is the third change of ranking key in this file
+(widths → margin → exposure) and each one was made for the same reason - the
+previous key had stopped matching the cut.
+
+**The frontend.** `KEYHOLE_PLACEMENT_KM = 800` (b-plane km) becomes
+`KEYHOLE_PLACEMENT_A_KM = 15 000` (km of `a'`). Every readout row carries the
+`placement_band_km` its own gradient earns it and the `exposure_km` that follows,
+so `keyhole_alert()` is `exposure_km <= 0` and the caveat line quotes *this*
+circle's band rather than a constant. On the 3:4 the new constant is **575 km**;
+on the 2:3 it is **57 km**. The readout also reports `placed_on_the_change` and
+`incoming_a_au`, because the two placements differ by hundreds of kilometres and a
+reader must be able to tell which one they are looking at.
+
+The arriving orbit is read **once per plan**, in `set_plan`, off the arc that was
+just flown - ~30 interpolations of a clock already in hand - so `keyhole_readout`
+stays the closed-form microseconds its doc promises. Nothing orbital crossed into
+GDScript.
+
+#### Where 15 000 comes from, and what it does not include
+
+Worst repaired door of the six flown, converted into the unit the constant is in:
+**11 024 km of `a'`** (the 200 d 3:4 at the campaign's CA − 30 d sample), plus the
+incoming measurement's own bar, **3 535 km of `a'`**. 14 559, rounded up. A
+measured maximum over **two resonances and six flights**, not a bound.
+
+The shipping code samples where the rock clears 10 Hill radii, which on this rock
+is CA − 24 d rather than CA − 30 d - a different point of the same wobbling
+osculating element. The two extreme 3:4 doors read **+351.7 and +372.4 km** there
+against +402.0 and +418.2 at CA − 30 d, i.e. 9 180 and 9 819 km of `a'`. Both under
+the worst above, and the gap between conventions is exactly what the bar is for.
+
+**The constant is not subtracted.** All six flights sit on the same side of their
+circles, 8 184 to 11 024 km of `a'` out, so a further correction is plainly visible
+in the data - subtracting it would put the worst repaired door inside ~130 km. Six
+flights over two resonances cannot set a number whose own spread is 1.35×, and
+trading a known error for a badly known one is not a repair. That is the next
+thing to measure.
+
+#### The two things that had to be checked rather than assumed
+
+**The exact circle against the linearised shift.** Every published table in this
+campaign computed the repair as a translation of the circle along its own normal,
+because that is all a table of door offsets needs. What ships solves for a
+different circle - a level set of a shifted `a'` has its own centre *and its own
+radius*. They cannot agree exactly, and the residual is not a fixed fraction of
+the shift either: it is set by the shift against the circle's own size, 22 m on a
+12 km shift, 1.3 km on a 393 km one and 30 km once the shift reaches 1 433 km.
+Over the range the repair actually produces - out to 500 km, against repaired doors
+at 226 to 418 km - the two agree to **under 5 km**, against a ±136 km bar. So the
+tables describe the circle the code draws. `keyhole_prediction_bias.rs` closes the
+loop end to end: the shipping observable and the shipping circle, on the same two
+flown doors, land **20.7 km apart** against a 766.8 km ladder.
+
+**A verdict string that was asserting more than it had measured.** The probe's
+two-leg line printed "NOT the same - the turn owns the residual" whenever the two
+legs' errors differed by more than 25 %. On the 3:4 they differ by hundreds of
+kilometres against a ±136 km bar and the call means something. On the 2:3 both legs
+are 15 to 30 km against ±14, and the rule was still printing a verdict. It now has
+a third branch - INDISTINGUISHABLE, when the gap is under twice the bar - and says
+the gap and the bar on every row.
+
+#### Checks
+
+`ASTEROID_REQUIRE_KERNELS=1 cargo test --workspace --release`: **346 passed, 0 failed, 2 ignored** across every target — `asteroid_core --lib` **272/272** (267 before this batch, +5 new), the `asteroid_gdext` suite **38 passed / 1 ignored**, and every integration test green — run
+once, clean, after the last edit and with nothing else holding the `target/` lock.
+The first attempt at this number was thrown away rather than quoted: it had four
+`cargo clippy` invocations, two `touch`es and one edit to
+`probe_keyhole_placement.rs` land underneath it while it ran, and `cargo test`
+builds examples, so whatever it would have printed described a tree that no longer
+existed.
+
+The two suites that carry this batch: `core --lib keyhole` **34/34** (five of them
+new - the change-placed circle reduces to the plain one when the baseline is the
+predicted one, it refuses a nonsense baseline, it agrees with the linearised normal
+shift over the range the repair produces, the band is `band_a / |grad a'|`, and the
+ranking key is character-for-character the alert cut), and
+`--test keyhole_prediction_bias` **1/1**, which now flies the shipping path end to
+end - `incoming_semi_major_axis_flown` feeding `resonant_circle_on_change` - and
+lands the two extreme 3:4 doors **20.7 km apart** against the 766.8 km ladder the
+old placement leaves, under a 280 km limit written into the test.
+
+One assertion had to be *retired* rather than fixed, and it is worth saying which.
+`the_keyhole_readout_finds_the_three_four_door_the_probe_flew` asserted that the
+plan which flew a keyhole reads a smaller margin than the default plan. That was
+true only because the old circle was drawn through that one shot's door: it encoded
+the bug. With the circle on the change the flown plan reads 341 km of margin on its
+3:4 and the default plan reads 184 km from a *different* resonance, so the
+comparison is between two unrelated circles and means nothing. It is replaced by
+three that survive the repair - the flown plan's exposure is negative (it alerts),
+the default plan's is positive (it is clear, where the retired 800 km constant band
+would have shouted), and the two rows' bands differ by more than 2x because they are
+different circles. The historical 1.64-half-width calibration is kept by censusing
+the *plain* circles alongside the repaired ones in that one test, so an old number
+and a new one are each read off the construction they were measured on.
+
+Frontend: `godot/tests/test_orrery.gd` **96 PASS, 0 failures** (run directly with
+`godot --headless --script res://tests/test_orrery.gd` - it `extends SceneTree`, so
+`run_harness.ps1` waits for a `Node` that never arrives and hangs the full 900 s).
+Two of its checks failed first and were right to: every synthetic keyhole row in the
+suite lacked `placement_band_km`, and the panel correctly refused to print a
+placement claim it had no band for. Two new rows were added rather than only fixing
+the old ones - 98 km of margin on a steep circle whose band is 57 km now reads CLEAR
+where the retired constant would have alerted, and the caveat line is asserted to
+quote the row's own band. `_shot.gd` exits 0 and shows it live: *"doors inside the
+placement band (31 km on the 5:8 row, from 15000 km of a'): 1"*, *"circle placement:
+on the change across the encounter (arriving orbit 0.853996079 AU), exposure
+-24.4 km"*. `godot/scripts/planner.gd` is in the diff for one word - the comment
+that points a reader at the constant now names `KEYHOLE_PLACEMENT_A_KM` - and no
+drawing behaviour moved with it.
+
+`cargo fmt --check` clean, with every format string in the new code on one line per
+the trap this file recorded on 2026-09-07. `cargo clippy --all-targets` on the
+workspace: the `neg_cmp_op_on_partial_ord` count goes **10 to 13**, and the scope is
+`--all-targets`, which is the distinction the previous session had to stop and pin
+down. The three additions are the house NaN-rejecting guard `if !(x > 0.0)`:
+`placement_band`'s own `band_a`, `mu_sun` in the new observable, and a near-tangency
+guard inside `keyhole.rs`'s **test** module. `doors_within_band`'s `!(band_a >= 0.0)`
+is *not* one of them - that parameter was renamed by this batch, not introduced, and
+attributing it here would have mis-stated what changed. Per file:
+`core/src/keyhole.rs` 3 to 5, `core/src/keyhole_target.rs` 1 to 2; `sbdb.rs` 4,
+`deflection.rs` 1 and `probe_keyhole_floor.rs` 1 are untouched, and the last is still
+the whole 9-versus-10 gap between the lib alone and `--all-targets`. Two
+`redundant_closure` lints the probe's first draft raised are gone. CI does not pass
+`-D warnings`.
+
+#### What this leaves
+
+- **The constant.** 8 184 to 11 024 km of `a'` across two resonances, all one sign.
+  A third resonance, or the same two at more leads, would say whether it is one
+  number. Only then is it subtractable, and subtracting it is what would take the
+  band from 15 000 to something like 4 000.
+- **`doors_in_band` was measured against the old 800 km band.** The replacement is
+  not uniformly narrower: 57 km on the steep 2:3, 575 km on the shallow 3:4, and
+  wider than the retired 800 anywhere the gradient falls below ~19 m/m - so the
+  crowded register's "fires at every dialable lead" result could go either way
+  and has to be re-measured, not reasoned through.
+- **Two resonances is two.** The 5:7, 7:10 and 6:5 have been flown to doors at the
+  12 yr lead but never at a dialable one, and their gradients (97, 138, 2 425 m/m)
+  span the axis this session found matters.

@@ -75,10 +75,11 @@ pub use keyhole::{
     Resonance, ResonantCircle, AU_M, JULIAN_YEAR_S,
 };
 pub use keyhole_target::{
-    aim_at_resonance, chained_sample, fly_keyhole_shot, refine_keyhole_return,
-    return_sampling_plan, return_sensitivity, solve_keyhole_return, ChainedSample, FlownReturn,
-    KeyholeAim, KeyholeAiming, KeyholeRefineTol, KeyholeShot, KeyholeShotOptions, KeyholeSolution,
-    KeyholeTargetError, ReturnSamplingPlan, ReturnSensitivity, RETURN_GATE_PER_YEAR_M,
+    aim_at_resonance, chained_sample, fly_keyhole_shot, incoming_semi_major_axis_flown,
+    refine_keyhole_return, return_sampling_plan, return_sensitivity, solve_keyhole_return,
+    ChainedSample, FlownReturn, IncomingBaseline, KeyholeAim, KeyholeAiming, KeyholeRefineTol,
+    KeyholeShot, KeyholeShotOptions, KeyholeSolution, KeyholeTargetError, ReturnSamplingPlan,
+    ReturnSensitivity, EARTH_HILL_RADIUS_M, RETURN_GATE_PER_YEAR_M, SETTLE_HILL_RADII,
 };
 pub use lambert::{lambert_universal, LambertError, LambertSolution};
 pub use launch_vehicle::{LaunchVehicle, LAUNCH_VEHICLES};

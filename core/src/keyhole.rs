@@ -123,16 +123,43 @@
 //! absolutes, and inside the ±136 km bar of the measurement. In the flight's own
 //! frame it is flatter still: −372, −365, −374 at three of the four leads.
 //!
-//! The shippable consequence, measured but **not yet shipped**: place the circle
-//! where `a' − a_in` equals `a_res − a_in_true`, taking `a_in_true` from the flight
-//! the planner has already propagated, and the door offsets go from
-//! `+19 / +211 / +648 / +786` — a 767 km ladder — to `+312 / +294 / +226 / +329`, a
-//! spread of 103 km about a constant. A single osculating sample at CA − 30 d,
-//! which costs nothing because the planner already holds that state, is exactly as
-//! flat (spread 102 km, at a +380 km offset instead). Pinned by
-//! `core/tests/keyhole_prediction_bias.rs`. It is one resonance and four leads, and
-//! the residual spread sits at the measurement's own noise floor, which is why the
-//! frontend's `KEYHOLE_PLACEMENT_KM` band has not moved.
+//! **The repair, and it ships.** Place the circle where `a' − a_in` equals
+//! `a_res − a_in_true`, taking `a_in_true` from the flight the planner has already
+//! propagated, and the door offsets go from `+19 / +211 / +648 / +786` — a 767 km
+//! ladder — to `+312 / +294 / +226 / +329`, a spread of 103 km about a constant. A
+//! single osculating sample instead of a 32-sample revolution mean is exactly as
+//! flat (spread 102 km, at a +380 km offset instead) and costs nothing, because the
+//! planner already holds that state; that is what
+//! [`OpikFrame::resonant_circle_on_change`] takes, fed by
+//! [`incoming_semi_major_axis_flown`](crate::keyhole_target::incoming_semi_major_axis_flown).
+//! Pinned by `core/tests/keyhole_prediction_bias.rs`.
+//!
+//! # The unit the placement error is a constant in
+//!
+//! Everything above is the 3:4, whose `|∇a'|` moves 1.75 % across the four leads —
+//! so "a constant number of b-plane kilometres" and "a constant amount of `a'`" are
+//! the same statement there, and the cheaper one was assumed. A **2:3 flown at two
+//! leads** separates them, because its gradient is ten times steeper on the same
+//! encounter (263.8 against 26.1 m/m):
+//!
+//! ```text
+//!            error in the change    in b-plane km    in km of a'
+//!   3:4 × 4                          +242 … +381    +6 274 … +10 045
+//!   2:3 × 2                          + 25 … + 28    +6 485 … + 7 409
+//! ```
+//!
+//! Twelve times apart in kilometres — the gradient ratio — and overlapping in `a'`.
+//! So the closed form misplaces a circle by a constant amount of **semi-major
+//! axis**, and the b-plane distance that comes to is whatever the local geometry
+//! makes it. [`Keyhole::placement_band`] is that conversion, and it is why the
+//! frontend's band moved from 800 b-plane km to 15 000 km of `a'` — which is
+//! 575 km on the 3:4 and 57 km on the 2:3.
+//!
+//! **The constant itself is not subtracted.** All six flights sit on the same side,
+//! 8 184 to 11 024 km of `a'` out on the shipping single-sample convention, so a
+//! further correction is visible in the data. Six flights over two resonances
+//! cannot set it — the spread is 1.35× — and trading a known error for a badly
+//! known one is not a repair. That is the next thing to measure.
 //!
 //! # The keyhole width, as a definition rather than a claim
 //!
@@ -318,9 +345,28 @@ pub enum CircleBranch {
 pub struct ResonantCircle {
     /// Which resonance.
     pub resonance: Resonance,
-    /// The resonant semi-major axis, metres — the level set this circle is.
+    /// The resonant semi-major axis, metres — the `a'` the *resonance* asks for.
     pub a_prime: f64,
-    /// The outgoing `cos θ'` that produces it.
+    /// The `a'` level set this circle actually **is**, metres.
+    ///
+    /// Equal to [`a_prime`](Self::a_prime) for [`OpikFrame::resonant_circle`], and
+    /// that is the only case there was until 2026-09-08. It differs for
+    /// [`OpikFrame::resonant_circle_on_change`], which draws the locus where the
+    /// closed form's *change* across the encounter is right rather than its
+    /// absolute `a'` — the two are the same claim only if the construction knows
+    /// which orbit the rock arrives on, and it does not (module doc).
+    ///
+    /// Carried rather than recomputed because every scalar below — `cos_theta_out`,
+    /// the centre, the radius — belongs to this number, and a reader who
+    /// re-derives `a'` from `cos_theta_out` must land on the same value or the
+    /// struct is lying to them. The keyhole *width* is sized from `a_prime`
+    /// instead: the width is a return-timing tolerance, and the return happens on
+    /// the resonant orbit, not on the level set the map drew to reach it. (They
+    /// differ by ~1e-4, so this is a statement about which number means what, not
+    /// a numerical correction.)
+    pub a_prime_target: f64,
+    /// The outgoing `cos θ'` that produces
+    /// [`a_prime_target`](Self::a_prime_target).
     pub cos_theta_out: f64,
     /// Centre `ζ_c`, metres (`ξ_c = 0` always).
     pub center_zeta: f64,
@@ -475,6 +521,40 @@ pub struct Keyhole {
     pub width: f64,
 }
 
+impl Keyhole {
+    /// How far from this circle the map's own placement error can reach, metres
+    /// of b-plane, given a band `band_a` expressed in **metres of `a'`**.
+    ///
+    /// `band_a / |∇a'|`, and the unit is the whole point. Until 2026-09-08 the
+    /// frontend carried this band as a fixed number of b-plane kilometres
+    /// (`KEYHOLE_PLACEMENT_KM`, latterly 800), because every door that had ever
+    /// been flown was on the 3:4 and its gradient moves 1.75 % across the leads —
+    /// so a constant in `a'` and a constant in kilometres are the same statement
+    /// there and the cheaper one was chosen. A 2:3 flown at two leads separates
+    /// them: across a **ten times** different gradient the error is +25.5 and
+    /// +28.1 b-plane km against the 3:4's +242 to +381 — a 12× move, the gradient
+    /// ratio — while in `a'` it is 6 485 and 7 409 km against 6 274 to 10 045, which
+    /// overlaps. The error is a constant of the *construction*, and the b-plane
+    /// distance it corresponds to is whatever the local gradient makes it.
+    ///
+    /// So a band in kilometres is 30× too generous at a steep circle and, at a
+    /// near-tangency one, not generous enough by any factor at all: as `∇a' → 0`
+    /// this diverges, and it diverges together with [`width`](Self::width), which
+    /// is the same limit and is already documented as the linearisation's artifact.
+    /// Both come back non-finite, and
+    /// [`keyhole_proximities`](OpikFrame::keyhole_proximities) filters such circles
+    /// out before a caller can rank on either.
+    ///
+    /// Negative or non-finite `band_a` gives `0.0`: a caller that has no band is
+    /// asking for the door alone, not for an infinite one.
+    pub fn placement_band(&self, band_a: f64) -> f64 {
+        if !(band_a > 0.0) {
+            return 0.0;
+        }
+        band_a / self.gradient.norm()
+    }
+}
+
 /// How close a given b-plane point came to one resonant return's keyhole — the
 /// answer to *"where does this plan leave the rock, in keyhole terms?"*.
 ///
@@ -549,6 +629,24 @@ impl KeyholeProximity {
     /// [`keyhole_proximities`](OpikFrame::keyhole_proximities).
     pub fn margin(&self) -> f64 {
         self.signed_distance.abs() - self.half_width()
+    }
+
+    /// How far outside **everything the map could be wrong about** the queried
+    /// point lies, metres: [`margin`](Self::margin) less this circle's own
+    /// placement band, with `band_a` in metres of `a'` (see
+    /// [`Keyhole::placement_band`]). Negative means the door is within reach of the
+    /// map's error and the plan cannot be called clear of it.
+    ///
+    /// **This is the ranking key and the alert cut, and they are the same
+    /// expression on purpose.** The 2026-09-07 session replaced a width *ratio*
+    /// with [`margin`](Self::margin) for exactly this reason — the row shown and
+    /// the row the alert fires on have to be the same row — and the band's move
+    /// from kilometres to `a'` moves the key with it. Ranking by `margin` while
+    /// cutting on a per-circle band would name a shallow-gradient circle 300 km
+    /// away ahead of a steep one 40 km away, when the second is the one whose band
+    /// is 40 km wide.
+    pub fn exposure(&self, band_a: f64) -> f64 {
+        self.margin() - self.keyhole.placement_band(band_a)
     }
 }
 
@@ -744,8 +842,15 @@ impl OpikFrame {
     /// incoming orbit (`cos θ' = cos θ`), whose level set is the ξ-axis line
     /// rather than a circle.
     pub fn resonant_circle(&self, resonance: Resonance) -> Option<ResonantCircle> {
-        let a_prime = resonance.semi_major_axis_m();
-        let cos_out = self.cos_theta_out_for_semi_major_axis(a_prime)?;
+        self.circle_at_level_set(resonance, resonance.semi_major_axis_m())
+    }
+
+    /// The circle of constant `a' = target`, labelled with `resonance`. The one
+    /// place a `ResonantCircle` is built, so the plain and the change-placed
+    /// constructors cannot drift apart in the geometry; they differ only in which
+    /// level set they ask for and in what `a_prime` is then said to mean.
+    fn circle_at_level_set(&self, resonance: Resonance, target: f64) -> Option<ResonantCircle> {
+        let cos_out = self.cos_theta_out_for_semi_major_axis(target)?;
         let denom = cos_out - self.cos_theta;
         if denom.abs() < 1.0e-12 {
             return None;
@@ -754,11 +859,90 @@ impl OpikFrame {
         let sin_out = (1.0 - cos_out * cos_out).max(0.0).sqrt();
         Some(ResonantCircle {
             resonance,
-            a_prime,
+            a_prime: target,
+            a_prime_target: target,
             cos_theta_out: cos_out,
             center_zeta: c * self.sin_theta / denom,
             radius: c * sin_out / denom.abs(),
         })
+    }
+
+    /// The same circle placed on the **change** the flyby makes to the orbit
+    /// instead of on the absolute `a'` — the 2026-09-08 repair, and the one
+    /// correction measured so far that makes the map's placement error *smaller*.
+    ///
+    /// [`resonant_circle`](Self::resonant_circle) draws the locus where this
+    /// frame's absolute prediction `a'` equals `a_res`. That prediction carries a
+    /// ladder: on four flown 3:4 doors it is wrong by −33, −227, −665 and −839
+    /// b-plane km-equivalent as the deflection lead shortens from 12 yr to 200 d.
+    /// The *change* across the encounter is not — it is out by a constant, +326,
+    /// +310, +242, +381 km-equivalent on the same four, and +28, +26 on two 2:3
+    /// crossings at a gradient ten times different. So the honest locus is the one
+    /// where the change is right:
+    ///
+    /// ```text
+    ///   a'(ξ, ζ) − a_in_predicted  =  a_res − a_in_true
+    /// ```
+    ///
+    /// which is the ordinary circle of the shifted target
+    /// `a_res + (a_in_predicted − a_in_true)`. `a_in_predicted` is this frame's own
+    /// [`incoming_semi_major_axis`](Self::incoming_semi_major_axis) — the same
+    /// arithmetic, so the two errors are like for like and the shift is exactly
+    /// the part that cancels.
+    ///
+    /// `a_incoming_true` is the heliocentric semi-major axis the **deflected** rock
+    /// is on as it arrives, metres, read off the flown trajectory rather than
+    /// predicted — see
+    /// [`incoming_semi_major_axis_flown`](crate::keyhole_target::incoming_semi_major_axis_flown),
+    /// which is the observable this was calibrated with. Passing this frame's own
+    /// `incoming_semi_major_axis()` returns exactly
+    /// [`resonant_circle`](Self::resonant_circle), which is the sense in which the
+    /// repair is a strict generalisation.
+    ///
+    /// **What it does not fix.** The change is predicted out by a constant of
+    /// roughly 8 200 to 9 700 km *of `a'`* (the range across two resonances and six
+    /// flights), and that constant is **not** subtracted here: six flights cannot
+    /// set it. What the repair buys is that the residual is a constant in `a'`
+    /// rather than a ladder in the lead — see [`Keyhole::placement_band`], which is
+    /// how a caller is meant to allow for it.
+    ///
+    /// `None` on the same terms as [`resonant_circle`](Self::resonant_circle), plus
+    /// a non-finite or non-positive `a_incoming_true`.
+    pub fn resonant_circle_on_change(
+        &self,
+        resonance: Resonance,
+        a_incoming_true: f64,
+    ) -> Option<ResonantCircle> {
+        if !(a_incoming_true.is_finite() && a_incoming_true > 0.0) {
+            return None;
+        }
+        let a_res = resonance.semi_major_axis_m();
+        let shift = self.incoming_semi_major_axis() - a_incoming_true;
+        let mut circle = self.circle_at_level_set(resonance, a_res + shift)?;
+        circle.a_prime = a_res;
+        Some(circle)
+    }
+
+    /// [`resonant_circles`](Self::resonant_circles), with every circle placed on
+    /// the change ([`resonant_circle_on_change`](Self::resonant_circle_on_change)).
+    ///
+    /// The census is taken on the *resonances*, so it names exactly the same set as
+    /// the unrepaired call at the same arguments; only where each circle is drawn
+    /// moves. A caller that draws one and reads the other would put a plan on the
+    /// wrong side of a door, which is why this exists as a pair rather than as a
+    /// flag on the loop.
+    pub fn resonant_circles_on_change(
+        &self,
+        years: std::ops::RangeInclusive<u32>,
+        max_k: u32,
+        b_max: f64,
+        a_incoming_true: f64,
+    ) -> Vec<ResonantCircle> {
+        Resonance::census(years, max_k)
+            .into_iter()
+            .filter_map(|r| self.resonant_circle_on_change(r, a_incoming_true))
+            .filter(|c| c.b_range().0 <= b_max)
+            .collect()
     }
 
     /// Every resonance in `years` with `k ≤ max_k` whose circle exists and comes
@@ -906,6 +1090,31 @@ impl OpikFrame {
             })
     }
 
+    /// The circle of `circles` the point is nearest **once the map's own placement
+    /// error is allowed for** — the minimum of [`KeyholeProximity::exposure`],
+    /// with `band_a` in metres of `a'`.
+    ///
+    /// This is the row to show and the row to cut the alert on, and it supersedes
+    /// [`smallest_margin_keyhole`](Self::smallest_margin_keyhole) for that job.
+    /// The two agree whenever every candidate circle has a similar gradient, which
+    /// is every case the repo had flown before 2026-09-08 and is why the
+    /// distinction had not come up; they part company exactly where the band does
+    /// its work, between a wide shallow circle and a narrow steep one.
+    pub fn most_exposed_keyhole(
+        &self,
+        circles: &[ResonantCircle],
+        p: Vector2<f64>,
+        band_a: f64,
+    ) -> Option<KeyholeProximity> {
+        self.keyhole_proximities(circles, p)
+            .into_iter()
+            .min_by(|x, y| {
+                x.exposure(band_a)
+                    .partial_cmp(&y.exposure(band_a))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }
+
     /// How many of `circles` have a **door** within `band` metres of `p` — the
     /// count of [`KeyholeProximity::margin`] at or under `band`.
     ///
@@ -925,21 +1134,28 @@ impl OpikFrame {
     /// about that one; it is silently answering a question whose answer is not
     /// unique, and this is how it finds out.
     ///
-    /// `band` is the caller's, not the core's: it is a statement about how much
+    /// `band_a` is the caller's, not the core's: it is a statement about how much
     /// the *map* can be trusted, which is a presentation decision. Non-finite or
     /// negative bands count nothing.
+    ///
+    /// **The unit changed on 2026-09-08**: `band_a` is metres of `a'`, and each
+    /// circle converts it to its own b-plane reach through its own gradient (see
+    /// [`Keyhole::placement_band`]). The kilometre figures in the paragraph above
+    /// are the 3:4's, and stand as written because that is the circle they were
+    /// measured on; on a circle ten times steeper the same band is a tenth as wide,
+    /// which is the point of the change.
     pub fn doors_within_band(
         &self,
         circles: &[ResonantCircle],
         p: Vector2<f64>,
-        band: f64,
+        band_a: f64,
     ) -> usize {
-        if !(band >= 0.0) {
+        if !(band_a >= 0.0) {
             return 0;
         }
         self.keyhole_proximities(circles, p)
             .into_iter()
-            .filter(|k| k.margin() <= band)
+            .filter(|k| k.exposure(band_a) <= 0.0)
             .count()
     }
 
@@ -1022,10 +1238,14 @@ mod tests {
             circles.len()
         );
         let p = Vector2::new(0.3 * f.capture_radius, -2.0 * f.capture_radius);
+        // The band is in metres of `a'` (2026-09-08), so the quantity to sort is
+        // not the margin but **the band at which each door comes onto the edge** —
+        // `margin × |∇a'|`, each circle converting through its own gradient. Doing
+        // it any other way would test the old units through the new call.
         let mut margins: Vec<f64> = f
             .keyhole_proximities(&circles, p)
             .iter()
-            .map(|k| k.margin())
+            .map(|k| k.margin() * k.keyhole.gradient.norm())
             .collect();
         margins.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert!(margins.len() >= 3, "need at least three doors to rank");
@@ -1049,13 +1269,208 @@ mod tests {
         assert!(
             n >= 3,
             "a band past the third-smallest margin must count at least three doors; \
-             counted {n} with margins {:.1?} km",
+             counted {n} with bands {:.1?} km of a'",
             margins.iter().take(5).map(|m| m / 1e3).collect::<Vec<_>>()
         );
 
         // A nonsense band is not a wide band.
         assert_eq!(f.doors_within_band(&circles, p, -1.0), 0);
         assert_eq!(f.doors_within_band(&circles, p, f64::NAN), 0);
+    }
+
+    /// Passing the frame's own predicted incoming orbit back in must reproduce the
+    /// plain circle **exactly**. That is what makes the repair a strict
+    /// generalisation rather than a second construction to keep in step: if the two
+    /// ever disagree here, the shifted-target algebra is wrong.
+    #[test]
+    fn the_change_placed_circle_is_the_plain_one_when_the_baseline_is_the_predicted_one() {
+        let mut seed = 0x1dea_0908_u64;
+        for _ in 0..40 {
+            let (f, _) = random_frame(&mut seed);
+            for r in Resonance::census(2..=9, 12) {
+                let (Some(plain), Some(same)) = (
+                    f.resonant_circle(r),
+                    f.resonant_circle_on_change(r, f.incoming_semi_major_axis()),
+                ) else {
+                    continue;
+                };
+                assert_eq!(plain, same, "{r} circle moved with a zero baseline shift");
+            }
+        }
+    }
+
+    /// A bad baseline is refused rather than propagated: the repair takes a
+    /// *measured* number, and a measurement that failed must not silently draw a
+    /// circle somewhere.
+    #[test]
+    fn the_change_placed_circle_refuses_a_nonsense_baseline() {
+        let mut seed = 0x0908_1dea_u64;
+        let (f, _) = random_frame(&mut seed);
+        let r = Resonance { h: 3, k: 4 };
+        for bad in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+            assert!(
+                f.resonant_circle_on_change(r, bad).is_none(),
+                "a baseline of {bad} produced a circle"
+            );
+        }
+    }
+
+    /// **The exact circle against the linearised shift.** The measurement campaign
+    /// only ever computed the repair as a translation of the drawn circle along its
+    /// own normal, because that is all a table of door offsets needs. What ships
+    /// solves for a *different circle* — the level set of a shifted `a'`, with its
+    /// own centre and its own radius. If the two disagreed, either the published
+    /// tables or the shipping code would be wrong, and this is the only place that
+    /// can say which.
+    ///
+    /// The shift asked for is 10 000 km of `a'`, the size the campaign measured
+    /// (8 200 to 9 700 km across six flights), and the claim is an absolute one over
+    /// the b-plane distances that shift actually produces — out to 500 km, against
+    /// repaired doors sitting 226 to 418 km from their circles: **under 5 km**,
+    /// where the measurement that set the correction carries a ±136 km bar. So the
+    /// published tables, computed as a pure normal shift, describe the circle this
+    /// code draws.
+    ///
+    /// They cannot agree exactly, and the bound is stated over a range rather than
+    /// everywhere because of *why*: a level set of a different `a'` has a different
+    /// radius, so the exact circle is a translation **plus** a change of curvature.
+    /// The residual is second order but not in the shift alone — it is set by the
+    /// shift against the circle's own size, so it is 22 m on a 12 km shift, 1.3 km
+    /// on a 393 km one and 30 km once the shift reaches 1 433 km, three times
+    /// further than anything the repair has been measured at. Reading the
+    /// correction out there would need that term; nothing does, and a caller who
+    /// starts to would find this test the place that says so.
+    #[test]
+    fn the_exact_change_placed_circle_matches_the_linearised_normal_shift() {
+        let mut seed = 0xc17c_1e08_u64;
+        let shift_a = 1.0e7; // metres of a'
+        let mut checked = 0;
+        let mut worst: f64 = 0.0;
+        for _ in 0..60 {
+            let (f, _) = random_frame(&mut seed);
+            for r in Resonance::census(2..=9, 12) {
+                let Some(plain) = f.resonant_circle(r) else {
+                    continue;
+                };
+                // A baseline *smaller* than predicted shifts the target up.
+                let Some(moved) =
+                    f.resonant_circle_on_change(r, f.incoming_semi_major_axis() - shift_a)
+                else {
+                    continue;
+                };
+                // Ask at points on the plain circle, where the normal is the radial
+                // direction and ∇a' lies along it.
+                for angle in [0.4, 2.1, 4.7] {
+                    let at = plain.point(angle);
+                    let n_hat = (at - Vector2::new(0.0, plain.center_zeta)).normalize();
+                    let grad_n = f.gradient_semi_major_axis(at).dot(&n_hat);
+                    if !(grad_n.abs() > 1.0e-6) {
+                        continue;
+                    }
+                    // The level set moves out by shift/∇, leaving the point that far
+                    // inside the new circle.
+                    let predicted = -shift_a / grad_n;
+                    let exact = moved.signed_distance(at);
+                    // Second order in the shift, so the comparison is made over
+                    // the range the repair produces and not beyond it — see the doc.
+                    if predicted.abs() > 500.0e3 {
+                        continue;
+                    }
+                    let err = (exact - predicted).abs();
+                    checked += 1;
+                    worst = worst.max(err);
+                    assert!(
+                        err < 5.0e3,
+                        "{r} at angle {angle}: exact {:.3} km vs linearised {:.3} km \
+                         ({:.2} % of the shift)",
+                        exact / 1e3,
+                        predicted / 1e3,
+                        100.0 * err / predicted.abs()
+                    );
+                }
+            }
+        }
+        assert!(
+            checked > 100,
+            "only {checked} comparisons ran; the filters ate the test"
+        );
+        assert!(
+            worst < 5.0e3,
+            "worst disagreement {:.3} km over {checked} comparisons",
+            worst / 1e3
+        );
+    }
+
+    /// The band divides by the gradient, and it goes non-finite exactly where the
+    /// keyhole width does — the near-tangency artifact both share. A caller must
+    /// never see one finite and the other not, because the alert is cut on their
+    /// difference.
+    #[test]
+    fn the_placement_band_is_the_band_in_a_over_the_gradient() {
+        let mut seed = 0xba7d_0908_u64;
+        let (f, _) = random_frame(&mut seed);
+        let circles = f.resonant_circles(2..=12, 24, 60.0 * f.capture_radius);
+        assert!(!circles.is_empty());
+        let band_a = 1.5e7;
+        for c in &circles {
+            let at = c.point(1.0);
+            let k = f.keyhole_at(c, at);
+            let expected = band_a / k.gradient.norm();
+            assert!(
+                (k.placement_band(band_a) - expected).abs() <= 1e-9 * expected.abs().max(1.0),
+                "band {} vs {expected}",
+                k.placement_band(band_a)
+            );
+            assert_eq!(
+                k.placement_band(band_a).is_finite(),
+                k.width.is_finite(),
+                "the band and the width must be finite together"
+            );
+            // No band is not an infinite band.
+            assert_eq!(k.placement_band(0.0), 0.0);
+            assert_eq!(k.placement_band(-1.0), 0.0);
+            assert_eq!(k.placement_band(f64::NAN), 0.0);
+        }
+    }
+
+    /// `exposure` is `margin` less that circle's own band, and
+    /// `most_exposed_keyhole` minimises exactly the quantity `doors_within_band`
+    /// cuts on. A ranking that does not match its own alert is how the width-ratio
+    /// bug of 2026-09-07 happened.
+    #[test]
+    fn the_ranking_key_and_the_alert_cut_are_the_same_expression() {
+        let mut seed = 0xa1e7_0908_u64;
+        let (f, _) = random_frame(&mut seed);
+        let circles = f.resonant_circles(2..=20, 24, 60.0 * f.capture_radius);
+        assert!(circles.len() > 3);
+        let p = Vector2::new(0.3 * f.capture_radius, -2.0 * f.capture_radius);
+        let band_a = 1.5e7;
+        let mut exposures: Vec<f64> = f
+            .keyhole_proximities(&circles, p)
+            .iter()
+            .map(|k| {
+                assert!(
+                    (k.exposure(band_a) - (k.margin() - k.keyhole.placement_band(band_a))).abs()
+                        < 1e-9,
+                    "exposure is not margin less band"
+                );
+                k.exposure(band_a)
+            })
+            .collect();
+        exposures.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let best = f
+            .most_exposed_keyhole(&circles, p, band_a)
+            .expect("a ranked circle");
+        assert!(
+            (best.exposure(band_a) - exposures[0]).abs() < 1e-9,
+            "the ranked circle is not the minimum-exposure one"
+        );
+        let n_negative = exposures.iter().filter(|e| **e <= 0.0).count();
+        assert_eq!(
+            f.doors_within_band(&circles, p, band_a),
+            n_negative,
+            "the count and the ranking disagree about how many doors are in reach"
+        );
     }
 
     /// A deterministic pseudo-random stream (LCG) — enough to spread geometries

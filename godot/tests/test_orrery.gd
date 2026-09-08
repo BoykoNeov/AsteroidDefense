@@ -567,6 +567,7 @@ func _init() -> void:
 	# Same circle both ways: the ordinary case, and the one that ships.
 	var agree_row := {
 		"h": 3, "k": 4, "distance_km": 40.0, "width_km": 25.0, "margin_km": 27.5,
+		"placement_band_km": 575.0, "exposure_km": -547.5,
 	}
 	sim.plan_keyhole = {
 		"b_km": 14639.0, "mapped_b_max_km": 678660.0, "beyond_mapped_region": false,
@@ -583,6 +584,7 @@ func _init() -> void:
 		"nearest": agree_row,
 		"at_risk": {
 			"h": 5, "k": 8, "distance_km": 300.0, "width_km": 560.0, "margin_km": 20.0,
+			"placement_band_km": 575.0, "exposure_km": -555.0,
 		},
 	}
 	_check(sim.keyhole_note() == "20 KM FROM THE WIDER 5:8 DOOR",
@@ -597,6 +599,7 @@ func _init() -> void:
 		"nearest": agree_row,
 		"at_risk": {
 			"h": 5, "k": 8, "distance_km": 300.0, "width_km": 700.0, "margin_km": -50.0,
+			"placement_band_km": 575.0, "exposure_km": -625.0,
 		},
 	}
 	_check(sim.keyhole_note() == "INSIDE THE 5:8 DOOR - WIDER, FURTHER OUT",
@@ -605,19 +608,23 @@ func _init() -> void:
 
 	# --- the band that contains more than one door -------------------------
 	#
-	# The placement band is 800 km because the closed form misplaces a circle by
-	# up to 786 km at a lead this planner can dial (`KEYHOLE_PLACEMENT_KM`). Over
-	# stretches of the map the drawn circles are closer together than that, so the
-	# band can span several doors and single out none of them. The panel has to
-	# say so instead of presenting one as the answer.
+	# The placement band is per-circle since 2026-09-08: the constant is in
+	# kilometres of semi-major axis and each row carries the b-plane band its own
+	# gradient earns it (`placement_band_km`) plus `exposure_km`, its margin less
+	# that band. The rows below carry a 575 km band, which is what
+	# `KEYHOLE_PLACEMENT_A_KM` comes to on the 3:4 - the shallowest gradient in the
+	# flown set, so the widest band any real row gets.
 	#
-	# This register is no longer hypothetical: `probe_keyhole_placement crowding`
-	# found a dialable 900 d plan (prograde 0.1102 m/s, b = 17 069 km, a clean
-	# miss) with two doors inside the band. It is still executed here on built rows
-	# because a unit check should not need a 3-minute flight to reach its branch,
-	# and because the three-door case above that plan is still only geometry.
+	# Over stretches of the map the drawn circles are closer together than that, so
+	# the band can span several doors and single out none of them. The panel has to
+	# say so instead of presenting one as the answer. This register is not
+	# hypothetical: `probe_keyhole_placement crowding` found a dialable 900 d plan
+	# (prograde 0.1102 m/s, b = 17 069 km, a clean miss) with two doors inside the
+	# band. It is still executed here on built rows because a unit check should not
+	# need a 3-minute flight to reach its branch.
 	var crowded_row := {
 		"h": 7, "k": 8, "distance_km": 300.0, "width_km": 25.0, "margin_km": 287.5,
+		"placement_band_km": 575.0, "exposure_km": -287.5,
 	}
 	sim.plan_keyhole = {
 		"b_km": 14639.0, "mapped_b_max_km": 678660.0, "beyond_mapped_region": false,
@@ -641,19 +648,37 @@ func _init() -> void:
 	sim.plan_keyhole = {
 		"b_km": 14639.0, "mapped_b_max_km": 678660.0, "beyond_mapped_region": false,
 		"nearest": {"h": 7, "k": 8, "distance_km": 900.0, "width_km": 25.0,
-			"margin_km": 887.5},
+			"margin_km": 887.5, "placement_band_km": 575.0, "exposure_km": 312.5},
 		"at_risk": {"h": 7, "k": 8, "distance_km": 900.0, "width_km": 25.0,
-			"margin_km": 887.5},
+			"margin_km": 887.5, "placement_band_km": 575.0, "exposure_km": 312.5},
 		"doors_in_band": 0,
 	}
 	_check(sim.keyhole_label().begins_with("CLEAR") and not sim.keyhole_alert(),
-		"887 km of margin is outside the 800 km band and still reads CLEAR (%s)"
-		% sim.keyhole_label())
+		"887 km of margin is outside this circle's own 575 km band and still reads "
+		+ "CLEAR (%s)" % sim.keyhole_label())
+	# A row whose band is narrow because its circle is steep: the SAME 887 km of
+	# margin, on a 2:3-like gradient, still reads clear - but the branch that
+	# matters is the reverse one, where a modest margin is inside a wide band. Both
+	# are exercised so the alert is demonstrably reading the row and not a constant.
+	sim.plan_keyhole = {
+		"b_km": 14639.0, "mapped_b_max_km": 678660.0, "beyond_mapped_region": false,
+		"nearest": {"h": 2, "k": 3, "distance_km": 100.0, "width_km": 3.4,
+			"margin_km": 98.3, "placement_band_km": 57.0, "exposure_km": 41.3},
+		"at_risk": {"h": 2, "k": 3, "distance_km": 100.0, "width_km": 3.4,
+			"margin_km": 98.3, "placement_band_km": 57.0, "exposure_km": 41.3},
+		"doors_in_band": 0,
+	}
+	_check(sim.keyhole_label().begins_with("CLEAR") and not sim.keyhole_alert(),
+		"98 km of margin on a steep circle whose band is 57 km reads CLEAR, where the "
+		+ "old constant band would have shouted (%s)" % sim.keyhole_label())
+	_check(sim.keyhole_note().find("57") >= 0,
+		"the caveat quotes THIS circle's band, not a constant (%s)" % sim.keyhole_note())
 	# The constant itself, pinned. The gdext binding test mirrors it by hand as
-	# `PLACEMENT_BAND_KM`; if the two drift, this is the side that ships.
-	_check(is_equal_approx(sim.KEYHOLE_PLACEMENT_KM, 800.0),
-		"the placement band is the 800 km the flown doors measured (%s)"
-		% sim.KEYHOLE_PLACEMENT_KM)
+	# `PLACEMENT_BAND_A_KM`; if the two drift, this is the side that ships.
+	_check(is_equal_approx(sim.KEYHOLE_PLACEMENT_A_KM, 15000.0),
+		"the placement band is 15 000 km of a' - the worst repaired door of the six "
+		+ "flown, plus the incoming measurement's own bar (%s)"
+		% sim.KEYHOLE_PLACEMENT_A_KM)
 	sim.plan_keyhole = saved_keyhole
 
 	sim.free()

@@ -92,19 +92,32 @@ const RETURN_YEARS: std::ops::RangeInclusive<u32> = 2..=20;
 const MAX_REVOLUTIONS: u32 = 24;
 const B_MAX_CAPTURE_RADII: f64 = 60.0;
 
-/// The frontend's shipping placement band, km — `sim.gd`'s `KEYHOLE_PLACEMENT_KM`.
+/// The frontend's shipping placement band **as this probe's logs quote it**, km of
+/// b-plane on the 3:4 circle.
 ///
 /// Mirrored here **only so the log can say what it is being compared against**;
-/// nothing in this probe's physics reads it. It has moved twice (100 → 500 → 800)
-/// and this line was left saying 100 through both, which is exactly the kind of
-/// stale number a log is worst at: it is not asserted anywhere, so nothing fails
-/// when it rots, and a reader takes it for the current value.
-const SHIPPING_BAND_KM: f64 = 800.0;
+/// nothing in this probe's physics reads it. It has moved three times
+/// (100 → 500 → 800 → this) and the line was left saying 100 through the first
+/// two, which is exactly the kind of stale number a log is worst at: nothing
+/// asserts it, so nothing fails when it rots and a reader takes it for current.
+///
+/// **The shipping constant is no longer a b-plane distance at all.** It is
+/// `sim.gd`'s `KEYHOLE_PLACEMENT_A_KM`, 15 000 km of *semi-major axis*, which each
+/// circle converts through its own gradient — because the map's placement error is
+/// a constant in `a'` and the distance it comes to is whatever the local geometry
+/// makes it. 575 km is what that is on the 3:4, the circle every row in this
+/// probe's tables is measured on; on the 2:3 the same constant is 57 km.
+const SHIPPING_BAND_KM: f64 = 575.0;
 
-/// The largest door-centre offset any flown door has shown, km — the 200 d 3:4
-/// door, which is what set [`SHIPPING_BAND_KM`]. Also stale for two sessions at
-/// 26.8, the five-door maximum, after the lead sweep found 210.6, 467.9, 648.2
-/// and 786.0 km at dialable leads.
+/// The largest door-centre offset any flown door has shown **against the circle
+/// as it was drawn before 2026-09-08**, km — the 200 d 3:4 door. Stale for two
+/// sessions at 26.8, the five-door maximum, after the lead sweep found 210.6,
+/// 467.9, 648.2 and 786.0 km at dialable leads.
+///
+/// Kept at the old placement deliberately: it is the size of the ladder the
+/// change-placement repair removes, and every table in this probe that quotes it
+/// is measured against the same old locus. On the repaired placement the same four
+/// doors sit +402, +385, +316 and +418 km out — an offset, not a ladder.
 const LARGEST_PLACEMENT_ERROR_KM: f64 = 786.0;
 
 /// The Δv span the ladder covers **at the campaign's own 12 yr lead**, m/s. The
@@ -240,6 +253,46 @@ fn take_dv_aim(args: &[String]) -> (Option<f64>, Vec<String>) {
         }
     }
     (dv, rest)
+}
+
+/// Pull `fly=<lead>:<dv>[,<lead>:<dv>…]` out of the argument list: an explicit
+/// list of flights for `outgoing` to measure, in place of the recorded 3:4 door
+/// centres in [`FLOWN_34_BY_LEAD`].
+///
+/// **This is what lets the baseline/turn split be asked on a second resonance,
+/// and it is affordable because the split does not need a door.** A door costs
+/// ~45 flights to bisect; the split reads two revolution means at whatever
+/// b-plane point the flight lands on, and the recorded door centre enters only
+/// the repair column. So a crossing Δv from `xi_sweep` — a point *on* the circle,
+/// one bisection's worth of flights — carries everything the split asks for, and
+/// a row flown that way says it has no door rather than printing a `d₀` of zero
+/// as if it were one.
+fn take_flights(args: &[String]) -> (Option<Vec<(f64, f64)>>, Vec<String>) {
+    let mut flights: Option<Vec<(f64, f64)>> = None;
+    let mut rest = Vec::new();
+    for a in args {
+        let Some(spec) = a.strip_prefix("fly=") else {
+            rest.push(a.clone());
+            continue;
+        };
+        let parsed: Vec<(f64, f64)> = spec
+            .split(',')
+            .filter_map(|pair| {
+                let (l, d) = pair.split_once(':')?;
+                let lead = l.trim().parse::<f64>().ok()?;
+                let dv = d.trim().parse::<f64>().ok()?;
+                (lead > 0.0 && dv.is_finite() && dv > 0.0).then_some((lead, dv))
+            })
+            .collect();
+        // All or nothing: a silently dropped pair is a flight that never ran and
+        // a table that is quietly one row short.
+        if parsed.is_empty() || parsed.len() != spec.split(',').count() {
+            eprintln!("cannot parse {a:?} — expected fly=<lead days>:<dv m/s>[,…]");
+            std::process::exit(2);
+        }
+        flights = Some(parsed);
+    }
+    (flights, rest)
 }
 
 /// Pull a `rungs=<n>` token out of the argument list. Raising [`SWEEP_DV_HI`]
@@ -1124,7 +1177,7 @@ fn stage_door(args: &[String]) {
 //     ~12 minutes per door.
 //   * ξ spread of order the door widths themselves (0.08–27 km) — the patch is
 //     effectively one point per circle as far as this question goes, which
-//     *confirms* the five-point basis of `KEYHOLE_PLACEMENT_KM` rather than
+//     *confirms* the five-point basis of the placement band rather than
 //     extending it, and the expensive campaign should not be run.
 //   * the circle unreachable at some lead — a reachability finding in its own
 //     right, since it says which resonances the panel can warn about when.
@@ -1866,7 +1919,7 @@ fn stage_frame(args: &[String]) {
 // Stage 7 — can the "several doors in the band" register fire on a real flight?
 // ---------------------------------------------------------------------------
 //
-// `KEYHOLE_PLACEMENT_KM` grew to 500 km and the panel gained a third register:
+// The placement band grew to 500 km and the panel gained a third register:
 // when more than one door falls inside the band it declines to name a
 // resonance. That register ships with a unit test behind it and **has never
 // been observed on real physics**. The one plan flown to a return reports
@@ -2365,9 +2418,16 @@ type IngredientRow = (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64);
 
 /// One row of the two-leg split: `(lead days, ξ of the flown point, the incoming error
 /// in the nominal frame and in the flight's own, the outgoing error in each, the true
-/// change across the encounter and the change predicted by each frame, and the
-/// incoming mean's own error bar)`. Kilometres throughout.
-type LegRow = (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64);
+/// change across the encounter and the change predicted by each frame, the
+/// incoming mean's own error bar, and that row's `∇a'·n̂`)`. Kilometres
+/// throughout, except the gradient.
+///
+/// The gradient is carried because **a constant in b-plane kilometres and a constant
+/// in metres of `a'` are the same statement only while `∇a'` is fixed.** Across the
+/// 3:4's four leads it moves 1.75 %, so the two readings cannot be told apart there;
+/// a second resonance sits at a gradient ten times different, which is exactly the
+/// cell that separates them.
+type LegRow = (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64);
 
 /// One row of the repair: `(lead days, the door's distance from the circle as the map
 /// draws it today, the same distance if the circle were placed on the revolution-mean
@@ -2376,6 +2436,7 @@ type RepairRow = (f64, f64, f64, f64, f64);
 
 fn stage_outgoing(args: &[String]) {
     let (_, args) = take_lead(args);
+    let (explicit, args) = take_flights(&args);
     let h: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
     let k: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4);
     let branch = match args.get(3).map(|s| s.to_lowercase()) {
@@ -2391,6 +2452,18 @@ fn stage_outgoing(args: &[String]) {
         vec![4383.0, 200.0]
     } else {
         wanted
+    };
+    // Either the recorded 3:4 doors — where `d₀` is a measured door centre and the
+    // repair column can be read — or an explicit `fly=` list, which is how a second
+    // resonance gets asked: a crossing Δv has no door behind it and contributes the
+    // baseline/turn split only.
+    let flights: Vec<(f64, f64, Option<f64>, bool)> = match &explicit {
+        Some(pairs) => pairs.iter().map(|&(l, dv)| (l, dv, None, true)).collect(),
+        None => FLOWN_34_BY_LEAD
+            .iter()
+            .filter(|(l, _, _, _)| leads.iter().any(|w| (w - l).abs() < 0.5))
+            .copied()
+            .collect(),
     };
 
     let s = setup(None);
@@ -2430,15 +2503,13 @@ fn stage_outgoing(args: &[String]) {
     let mut inbound: Vec<LegRow> = Vec::new();
     let mut repair: Vec<RepairRow> = Vec::new();
 
-    for &(lead_days, dv, door_centre, same_flight) in FLOWN_34_BY_LEAD {
-        if !leads.iter().any(|w| (w - lead_days).abs() < 0.5) {
-            continue;
-        }
-        let Some(recorded) = door_centre else {
-            log(&format!(
-                "lead {lead_days:8.1} d: no door recorded — skipped"
-            ));
-            continue;
+    for &(lead_days, dv, door_centre, same_flight) in &flights {
+        let recorded = door_centre;
+        // What `d₀` is checked against. A `fly=` row has no door behind it, and
+        // says so rather than comparing against a zero that looks like agreement.
+        let vs_recorded = match recorded {
+            Some(r) => format!("{:+.3} km", r / 1e3),
+            None => "no recorded door — a crossing flight".to_string(),
         };
         if !same_flight {
             log(&format!(
@@ -2567,12 +2638,11 @@ fn stage_outgoing(args: &[String]) {
             ca.epoch.as_hifitime()
         ));
         log(&format!(
-            "  flown point ξ {:+.1} km ζ {:+.1} km, b {:.1} km; d₀ {:+.3} km against the recorded {:+.3} km",
+            "  flown point ξ {:+.1} km ζ {:+.1} km, b {:.1} km; d₀ {:+.3} km against the recorded {vs_recorded}",
             p.x / 1e3,
             p.y / 1e3,
             enc.impact_parameter / 1e3,
-            d0 / 1e3,
-            recorded / 1e3
+            d0 / 1e3
         ));
         log(&format!(
             "  ∇a'·n̂ {grad_n:.4} m/m; identity (a'_closed − a_res)/∇a'·n̂ {identity_km:+.3} km against d₀ {:+.3} km",
@@ -2595,9 +2665,8 @@ fn stage_outgoing(args: &[String]) {
             (a_mid - a_closed) / grad_n / 1e3
         ));
         log(&format!(
-            "  a'_closed {:.9} AU; the mean's own error bar (window shifted half a revolution) {spread_km:.1} km against a recorded error of {:.1} km",
-            a_closed / AU_M,
-            recorded / 1e3
+            "  a'_closed {:.9} AU; the mean's own error bar (window shifted half a revolution) {spread_km:.1} km against a recorded error of {vs_recorded}",
+            a_closed / AU_M
         ));
         log(&format!(
             "  same mean opened at CA+{SETTLE_LATE_DAYS:.0} d instead: (a_true − a_res)/∇a'·n̂ {:+.1} km (moved {:+.1} km) — if this walks toward the other leads' −15 km the row was still settling",
@@ -2814,8 +2883,23 @@ fn stage_outgoing(args: &[String]) {
         let a_in_at_rock = 1.0 / (2.0 / r_ca.norm() - v2_in_own / mu_sun);
         let radial_km = (a_in_at_rock - a_in_own) / grad_n / 1e3;
         log(&format!("  of that own-frame baseline error, the r ~ R_earth substitution accounts for {radial_km:+.1} km (rock {:+.1} km from Earth's distance), leaving {:+.1} km against a bar of {in_spread_km:.0} km", (r_ca.norm() - f_own.r_earth.norm()) / 1e3, in_err_own - radial_km));
-        let baseline = (in_err_own - out_err_own).abs() <= 0.25 * out_err_own.abs().max(1.0);
-        log(&format!("  -> in the flight's own frame the incoming error is {in_err_own:+.1} km against an outgoing {out_err_own:+.1} km: {}", if baseline { "THE SAME — a baseline offset the turn carries through, so the circle belongs on the change in a" } else { "NOT the same — the baseline is not what is wrong, and the turn owns the residual" }));
+        // Three verdicts, not two, and the third is the one this line was missing.
+        // The comparison is between two measured quantities, so it can only be made
+        // where the difference is large against the measurement's own bar. On the
+        // 3:4 the two legs differ by hundreds of kilometres against a ±136 km bar
+        // and the call means something; on a ten-times-steeper circle both legs are
+        // tens of kilometres against ±14 and the same rule was still printing
+        // "NOT the same", asserting a distinction the numbers cannot carry.
+        let gap = (in_err_own - out_err_own).abs();
+        let baseline = gap <= 0.25 * out_err_own.abs().max(1.0);
+        let verdict_2x2 = if gap <= 2.0 * in_spread_km {
+            "INDISTINGUISHABLE — the two legs differ by less than twice the incoming bar, so this flight cannot say which"
+        } else if baseline {
+            "THE SAME — a baseline offset the turn carries through, so the circle belongs on the change in a"
+        } else {
+            "NOT the same — the baseline is not what is wrong, and the turn owns the residual"
+        };
+        log(&format!("  -> in the flight's own frame the incoming error is {in_err_own:+.1} km against an outgoing {out_err_own:+.1} km (gap {gap:.1} km, bar {in_spread_km:.1} km): {verdict_2x2}"));
         inbound.push((
             lead_days,
             p.x / 1e3,
@@ -2827,6 +2911,7 @@ fn stage_outgoing(args: &[String]) {
             d_pred_nom,
             d_pred_own,
             in_spread_km,
+            grad_n,
         ));
         // What the map would draw if the circle were placed on the **change** in
         // `a` instead of on the absolute `a'`: the locus where the closed form's
@@ -2843,8 +2928,16 @@ fn stage_outgoing(args: &[String]) {
         let d0_km = d0 / 1e3;
         let d0_mean = d0_km + (a_in_mid - a_in_nom) / grad_n / 1e3;
         let d0_one = d0_km + (a_in_one - a_in_nom) / grad_n / 1e3;
-        log(&format!("  if the circle were drawn on the CHANGE in a: door at {d0_mean:+.1} km (revolution mean) or {d0_one:+.1} km (one sample at CA-{SETTLE_DAYS:.0} d), against {d0_km:+.1} km as it ships"));
-        repair.push((lead_days, d0_km, d0_mean, d0_one, in_spread_km));
+        // Only where a door was actually flown. At a crossing dv the flight sits
+        // *on* the circle by construction, so d_0 is ~0 and the two repaired
+        // columns are the shift itself — a true number about the wrong
+        // quantity, and it would enter the summary as if it were a door offset.
+        if recorded.is_some() {
+            log(&format!("  if the circle were drawn on the CHANGE in a: door at {d0_mean:+.1} km (revolution mean) or {d0_one:+.1} km (one sample at CA-{SETTLE_DAYS:.0} d), against {d0_km:+.1} km on the old placement"));
+            repair.push((lead_days, d0_km, d0_mean, d0_one, in_spread_km));
+        } else {
+            log(&format!("  no door on this row, so no repair column: the flight is on the circle (d0 {d0_km:+.3} km) and the baseline shift is {:+.1} km (revolution mean) / {:+.1} km (one sample)", d0_mean - d0_km, d0_one - d0_km));
+        }
         // Which heliocentric distance *would* have been right? The outgoing speed
         // does not depend on `r` at all — `cos θ'` is a b-plane quantity — so `a'`
         // depends on it only through vis-viva, and the `r` that reproduces the
@@ -2861,14 +2954,21 @@ fn stage_outgoing(args: &[String]) {
             (r_star - s.frame.r_earth.norm()) / (r_ca.norm() - s.frame.r_earth.norm()),
             (r_ca.norm() - s.frame.r_earth.norm()) / 1e3
         ));
-        let verdict = if spread_km >= recorded.abs() / 3e3 {
-            "INCONCLUSIVE at this lead — the sampling spread is not small against the error being explained"
-        } else if ((a_mid - a_res) / grad_n).abs() < 0.25 * recorded.abs() {
-            "the CONDITION holds and the PREDICTION is biased — the flyby does not leave the rock where the closed form says"
-        } else if ((a_mid - a_closed) / grad_n).abs() < 0.25 * recorded.abs() {
-            "the PREDICTION holds and the CONDITION is wrong — a return does not need a = a_res"
-        } else {
-            "NEITHER: both differences are large, which the decision rule does not cover"
+        // The decision rule is written against the *door* error, so a row with no
+        // door does not get a verdict — it contributes the baseline/turn split
+        // and nothing else.
+        let verdict = match recorded {
+            None => "no recorded door — this row contributes the baseline/turn split only",
+            Some(r) if spread_km >= r.abs() / 3e3 => {
+                "INCONCLUSIVE at this lead — the sampling spread is not small against the error being explained"
+            }
+            Some(r) if ((a_mid - a_res) / grad_n).abs() < 0.25 * r.abs() => {
+                "the CONDITION holds and the PREDICTION is biased — the flyby does not leave the rock where the closed form says"
+            }
+            Some(r) if ((a_mid - a_closed) / grad_n).abs() < 0.25 * r.abs() => {
+                "the PREDICTION holds and the CONDITION is wrong — a return does not need a = a_res"
+            }
+            Some(_) => "NEITHER: both differences are large, which the decision rule does not cover",
         };
         log(&format!("  verdict (revolution mean): {verdict}"));
     }
@@ -2894,24 +2994,40 @@ fn stage_outgoing(args: &[String]) {
         log("The same construction asked on both legs of the same flight. Columns are km-equivalent at that row's nominal ∇a'·n̂. `err` is measured minus predicted, so a negative number means the construction says the orbit is bigger than it is.\n");
         log("| lead | ξ of the flown point | a_in err, nominal frame | a_in err, own frame | a_out err, nominal frame | a_out err, own frame | error bar on a_in |");
         log("|---|---|---|---|---|---|---|");
-        for (lead, xi, en, eo, on_, oo, _, _, _, bar) in &inbound {
+        for (lead, xi, en, eo, on_, oo, _, _, _, bar, _) in &inbound {
             log(&format!("| {lead:.0} d | {xi:+.0} km | {en:+.1} | **{eo:+.1}** | {on_:+.1} | **{oo:+.1}** | ±{bar:.1} |"));
         }
         log("\nAnd the same rows as a change across the encounter, which is what a resonant circle actually needs to get right:\n");
-        log("| lead | true Δa | predicted Δa, nominal frame | out by | predicted Δa, own frame | out by |");
-        log("|---|---|---|---|---|---|");
-        for (lead, _, _, _, _, _, dt, dn, dw, _) in &inbound {
+        log("| lead | ∇a'·n̂ (m/m) | true Δa | predicted Δa, nominal frame | out by | out by, in km of a' | predicted Δa, own frame | out by |");
+        log("|---|---|---|---|---|---|---|---|");
+        for (lead, _, _, _, _, _, dt, dn, dw, _, g) in &inbound {
             log(&format!(
-                "| {lead:.0} d | {dt:+.1} km | {dn:+.1} km | {:+.1} | {dw:+.1} km | {:+.1} |",
+                "| {lead:.0} d | {g:.4} | {dt:+.1} km | {dn:+.1} km | {:+.1} | {:+.1} | {dw:+.1} km | {:+.1} |",
                 dn - dt,
+                (dn - dt) * g,
                 dw - dt
             ));
         }
+        // The two units the constant could be flat in. Within one resonance they
+        // cannot be told apart — the gradient barely moves across the leads
+        // — so the last figure is what a second resonance is flown to read.
+        let out_by = |r: &LegRow| r.7 - r.6;
+        let span = |f: &dyn Fn(&LegRow) -> f64| {
+            let lo = inbound.iter().map(f).fold(f64::INFINITY, f64::min);
+            let hi = inbound.iter().map(f).fold(f64::NEG_INFINITY, f64::max);
+            (lo, hi, hi - lo)
+        };
+        let (b_lo, b_hi, b_sp) = span(&out_by);
+        let (a_lo, a_hi, a_sp) = span(&|r: &LegRow| out_by(r) * r.10);
+        log(&format!(
+            "
+the turn is predicted out by {b_lo:+.1} to {b_hi:+.1} b-plane km (spread {b_sp:.1}), which is {a_lo:+.1} to {a_hi:+.1} km of a' (spread {a_sp:.1})."
+        ));
     }
     if !repair.is_empty() {
-        log("\n=== WHAT THE REPAIR WOULD BUY: THE CIRCLE DRAWN ON THE CHANGE IN a ===\n");
-        log("`as shipped` is the door's distance from the circle the map draws today. The other two place the same circle at the locus where the closed form's a' − a_in equals a_res − a_in_true, using the flight's own incoming orbit as the baseline.\n");
-        log("| lead | as shipped | on the change (revolution mean) | on the change (one sample) | error bar on the baseline |");
+        log("\n=== WHAT THE REPAIR BOUGHT: THE CIRCLE DRAWN ON THE CHANGE IN a ===\n");
+        log("`old placement` is the door's distance from the circle the map drew before 2026-09-08. The other two place the same circle where the closed form's a' − a_in equals a_res − a_in_true, using the flight's own incoming orbit as the baseline — which is what OpikFrame::resonant_circle_on_change now does, from a single osculating sample.\n");
+        log("| lead | old placement | on the change (revolution mean) | on the change (one sample, what ships) | error bar on the baseline |");
         log("|---|---|---|---|---|");
         for (lead, d0k, dm, do1, bar) in &repair {
             log(&format!(
@@ -2927,7 +3043,7 @@ fn stage_outgoing(args: &[String]) {
         let (m_lo, m_hi, m_sp) = span(|r| r.2);
         let (o_lo, o_hi, o_sp) = span(|r| r.3);
         log(&format!(
-            "\nas shipped: {s_lo:+.1} to {s_hi:+.1} km, a ladder {s_sp:.1} km wide."
+            "\nold placement: {s_lo:+.1} to {s_hi:+.1} km, a ladder {s_sp:.1} km wide."
         ));
         log(&format!(
             "on the revolution-mean change: {m_lo:+.1} to {m_hi:+.1} km, spread {m_sp:.1} km."

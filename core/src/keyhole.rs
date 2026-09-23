@@ -166,7 +166,7 @@
 //!
 //! **The offset is not subtracted — and, with a 16× spread, cannot be.** The
 //! first six flights (two resonances) sat 8 184 to 11 024 km of `a'` out, which
-//! looked like one number to subtract; the nineteen say there is no such number.
+//! looked like one number to subtract; the twenty-one say there is no such number.
 //!
 //! # The keyhole width, as a definition rather than a claim
 //!
@@ -908,7 +908,7 @@ impl OpikFrame {
     ///
     /// **What it does not fix.** The change is still predicted out, always on the
     /// same side (the post-flyby orbit predicted too large), by 2 831 to 46 806 km
-    /// *of `a'`* across nineteen flights on eight resonances (2026-09-23) — worst on
+    /// *of `a'`* across twenty-one flights on eight resonances (2026-09-23) — worst on
     /// the close orbit-raising circles at short leads. That residual is **not**
     /// subtracted here, because it is not one number. What the repair buys is that
     /// it is no longer a ladder in the lead — see [`Keyhole::placement_band`], which

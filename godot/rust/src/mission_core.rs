@@ -293,7 +293,7 @@ pub struct KeyholePlanRow {
     /// corresponds to is whatever the local gradient makes it — at the shipping
     /// 51 000 km of `a'`, ~1 950 km on the 3:4 and ~193 km on the 2:3, a
     /// ten-times-steeper circle on the same encounter. (2026-09-23: the error is
-    /// not *one* number in `a'` either — 2 831 to 46 806 km over nineteen flights —
+    /// not *one* number in `a'` either — 2 831 to 46 806 km over twenty-one flights —
     /// so the band is its measured maximum, not a constant being corrected for.)
     pub placement_band_km: f64,
     /// `margin_km − placement_band_km`: kilometres from being inside this door

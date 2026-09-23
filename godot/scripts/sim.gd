@@ -82,10 +82,10 @@ const KEYHOLE_MAX_YEARS := 7
 ## `incoming_semi_major_axis_flown`). The same four doors then sit +402, +385,
 ## +316 and +418 km from their circles: an offset instead of a ladder.
 ##
-## **Where 51 000 comes from (2026-09-23; it was 15 000).** Worst of **nineteen
+## **Where 51 000 comes from (2026-09-23; it was 15 000).** Worst of **twenty-one
 ## flights over eight resonances**, in the unit this constant is in and on the
 ## CA - 30 d sample: 46 806 km of a' (the 6:5 Plus at 200 d). Plus the incoming
-## measurement's own error bar, ~3 540 km of a' on every one of the nineteen - the
+## measurement's own error bar, ~3 540 km of a' on every one of the twenty-one - the
 ## same number on all eight resonances, which is still the check that the unit is
 ## right. 50 346, rounded up. A measured maximum, not a bound.
 ##
@@ -125,12 +125,12 @@ const KEYHOLE_MAX_YEARS := 7
 ## km of a'. Both under the worst above, and the gap between the conventions is
 ## exactly what the error bar in the paragraph above is for. Pinned by
 ## `core/tests/keyhole_prediction_bias.rs`, which flies both. (The CA - 30 d sample
-## reads ~2 400 km of a' above the revolution mean on EVERY row of the nineteen -
+## reads ~2 400 km of a' above the revolution mean on EVERY row of the twenty-one -
 ## the same arriving orbit - so the table above is the probe's revolution-mean
 ## "out by" plus that row's own printed snapshot offset.)
 ##
 ## **The offset is NOT subtracted - and now cannot be.** Same sign on all
-## nineteen, but 2 831 to 46 806 km of a' is a 16x spread; there is no one number
+## twenty-one, but 2 831 to 46 806 km of a' is a 16x spread; there is no one number
 ## to take away.
 ##
 ## **The domain floor is 200 d, and it is a floor on the QUESTION.** Measured

@@ -678,7 +678,7 @@ func _init() -> void:
 	# The constant itself, pinned. The gdext binding test mirrors it by hand as
 	# `PLACEMENT_BAND_A_KM`; if the two drift, this is the side that ships.
 	_check(is_equal_approx(sim.KEYHOLE_PLACEMENT_A_KM, 51000.0),
-		"the placement band is 51 000 km of a' - the worst of nineteen flights over "
+		"the placement band is 51 000 km of a' - the worst of twenty-one flights over "
 		+ "eight resonances (the 6:5 at 200 d), plus the incoming measurement's own "
 		+ "bar (%s)"
 		% sim.KEYHOLE_PLACEMENT_A_KM)

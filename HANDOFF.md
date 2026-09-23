@@ -40,7 +40,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **Which half of the keyhole map is wrong**: the semi-major axis the flyby *actually* produces, read on four flown 3:4 doors as a mean over one post-encounter revolution, against both things a resonant circle assumes | **done 2026-09-08**; the resonance **condition** is sound — a flown door leaves the rock **14 to 49 km-equivalent** from `a_res` at every lead — **−14 to −16 km at three of the four leads and −49 km at 200 d**, a spread inside the measurement's own ±41 km bar — while the closed form's **prediction** of `a'` is wrong by −33, −227, −665 and −839 km, which *is* the 19 → 786 km ladder. Both available repairs are dead: the `r ≈ R⊕` substitution explains **0.4 %** at the 300 d door (where the rock is 53 km from Earth's distance and the error is at full size), and rebuilding the frame from the flight's own encounter is worse at three leads of four | `core/examples/probe_keyhole_placement.rs`, `core/tests/keyhole_prediction_bias.rs`, `core/src/keyhole.rs` |
 | **Where in the closed form the ladder lives**: the four ingredients the map takes from the nominal rock swapped one at a time, then the same construction asked on the leg *before* the encounter | **done 2026-09-08**; none of the four ingredients orders by lead and their sum is not the bias either (additive to 11 %, so no cancellation), while splitting the prediction into a **baseline** (which orbit the rock arrives on) and a **turn** (what the flyby does to it) separates them cleanly: across the two extreme doors the two absolute errors are **750 and 805 km apart** and the error in the *change* is **55 km apart**, inside the ±136 km bar. So the flyby is predicted right to a constant and the whole 19 → 786 km ladder is the baseline. Placing the circle on the change instead would turn that ladder into a **103 km spread about a constant** — measured, deliberately not shipped | `core/examples/probe_keyhole_placement.rs`, `core/tests/keyhole_prediction_bias.rs`, `core/src/keyhole.rs` |
 | **The repair shipped, and the band changed units**: the resonant circle placed on the **change** the flyby makes rather than on the closed form's absolute `a'`, with the arriving orbit read off the flown arc; and a second resonance flown to settle what the leftover error is a constant *in* | **done 2026-09-08**; the 3:4's four doors go from a **767 km ladder** in the deflection lead to an **offset** (+352 to +372 km on the shipping convention, 20.7 km apart at the two extremes), so the worst case the band must cover halves. And the 2:3, flown at two leads on a gradient **ten times** steeper, says the error is a constant of **semi-major axis**, not of b-plane distance: 12× apart in kilometres (the gradient ratio) and overlapping in `a'`, with the measurement's own error bar reading ±3 535 and ±3 540 km of `a'` on the two. So `KEYHOLE_PLACEMENT_KM = 800` becomes `KEYHOLE_PLACEMENT_A_KM = 15 000` km of `a'` — **575 km on the 3:4, 57 km on the 2:3** — and the alert is cut per circle on `exposure = margin − band` | `core/src/{keyhole,keyhole_target}.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/{sim,planner}.gd`, `core/tests/keyhole_prediction_bias.rs` |
-| **The leftover constant, flown on six more resonances**: the error in the change across the flyby measured on 5:7, 7:10, 6:5, 7:8, 5:8 and 7:6 at dialable leads, a separating pair chosen from a census, and the crowded register re-run on the circles as shipped | **done 2026-09-23**; **not one number** - same sign on all nineteen flights (the map always predicts the post-flyby orbit too large) but 2 831 to 46 806 km of `a'`, with the close orbit-raising 6:5 and 7:6 2-5× the rest at 200 d. So `KEYHOLE_PLACEMENT_A_KM` **15 000 → 51 000** (the 3:4's zone ~575 → ~1 950 km), and the several-doors register is **not reachable** on this rock (needs ~660 000 km of `a'`) - its earlier firing was the retired km band | `core/examples/probe_keyhole_placement.rs`, `godot/scripts/sim.gd`, `godot/rust/src/mission_core.rs`, `godot/tests/test_orrery.gd` |
+| **The leftover constant, flown on six more resonances**: the error in the change across the flyby measured on 5:7, 7:10, 6:5, 7:8, 5:8 and 7:6 at dialable leads, a separating pair chosen from a census, and the crowded register re-run on the circles as shipped | **done 2026-09-23**; **not one number** - same sign on all twenty-one flights (the map always predicts the post-flyby orbit too large) but 2 831 to 46 806 km of `a'`, with the close orbit-raising 6:5 and 7:6 2-5× the rest at 200 d. So `KEYHOLE_PLACEMENT_A_KM` **15 000 → 51 000** (the 3:4's zone ~575 → ~1 950 km), and the several-doors register is **not reachable** on this rock (needs ~660 000 km of `a'`) - its earlier firing was the retired km band | `core/examples/probe_keyhole_placement.rs`, `godot/scripts/sim.gd`, `godot/rust/src/mission_core.rs`, `godot/tests/test_orrery.gd` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -238,7 +238,7 @@ Read this table first, then the session that owns the layer you are touching.
    so the factor is 143 half-widths of shell reach times the 0.90 of the residual
    that lies across the needle. See *The scalar's blindness*.
 9. ~~**The constant the repair leaves behind.**~~ **DONE 2026-09-23 - it is not
-   one number, and the band went UP, 15 000 -> 51 000 km of `a'`.** Thirteen more
+   one number, and the band went UP, 15 000 -> 51 000 km of `a'`.** Fifteen more
    flights over six resonances (all on crossing Δvs), rule written first: every
    row is the same sign (the map always predicts the post-flyby orbit too large)
    but they span 2 831 to 46 806 km of `a'`, and the close orbit-raising pair (6:5,
@@ -5543,7 +5543,7 @@ below.
 #### What was flown
 
 All on **crossing** Δvs from `xi_sweep` (no door needed, per the previous
-section), `outgoing h k branch fly=<lead>:<dv>,...` for the split. 13 new flights:
+section), `outgoing h k branch fly=<lead>:<dv>,...` for the split. 15 new flights:
 5:7, 7:10, 6:5 at 4383 / 900 / 200 d; 7:8 Plus, 5:8 Minus, 7:6 Plus at 4383 / 200 d.
 Every crossing was found (no NOT REACHED). Every row's incoming error bar reads
 **3 420 to 3 640 km of `a'`** - the same number on all eight resonances, which is
@@ -5571,7 +5571,7 @@ that picked the separating pair `census.log`.
 
 #### What it says
 
-- **Same sign on all nineteen** in `a'`. The minus signs the probe prints in
+- **Same sign on all twenty-one** in `a'`. The minus signs the probe prints in
   b-plane km on the Plus rows are the circle facing the other way (∇a'·n̂ < 0),
   not a different error: in words, **the map predicts the post-flyby orbit too
   large, whether the flyby grows or shrinks it** - which is why this is not an
@@ -5597,7 +5597,11 @@ that picked the separating pair `census.log`.
 rounded up, the same recipe as before). At 15 000 the 6:5's band was **6.2 b-plane
 km against measured errors of 6.6, 6.9 and 15.5** - the alert said CLEAR on plans
 it could not vouch for. The user chose the blanket raise over a close-raising-only
-exception (which would rest on two circles) and over documenting only. The price:
+exception (which would rest on two circles) and over documenting only. **The option
+was offered as 48 000**, from the revolution-mean numbers; converting to the
+single-snapshot convention the band was always calibrated in adds ~2 400 to every
+row, and 48 000 would not have covered the worst flight plus its own bar by the
+same recipe (46 806 + 3 425), so 51 000 shipped and the user was told. The price:
 the 3:4's warning zone goes **~575 → ~1 950 km**, the 2:3's 57 → 193, the 6:5's 6.2
 → 21. Five more close orbit-raising circles in the census (5:4, 4:3, 7:5, 3:2, 5:3
 Plus, b 11 000 - 20 600 km) have **never been flown**, and the growth toward them is

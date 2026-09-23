@@ -184,4 +184,139 @@ the new install path (|B|=14 639 km, cap=11 311 km). (b) The gdext suite needs
 **`-- --test-threads=4`**: 37 tests × a 646 MB kernel exhausts commit and dies with `memory allocation
 of 32726016 bytes failed`, which is not a test result. (c) `_ready()` blocks **~11 s in
 `mission.load_from` on a COLD file cache, on the main thread** — bigger than the whole comet win, outside
-the worker, ~0 warm so it only bites on the first launch after a boot. Now HANDOFF next-item 7.
+the worker, ~0 warm so it only bites on the first launch after a boot. **CLOSED 2026-09-07 (item 7).**
+
+**2026-09-07 — the kernel read went threaded, and the item's premise was wrong.** `load_from` reads
+**de440s.bsp, 32 MB**, NOT "the 646 MB DE440" — the 646 MB file is sb441 and is only `is_file()`'d here.
+Nothing had ever split `_ready`; it is split now and printed every run (`Sim.ready_phase_ms`): warm,
+`load_from` is 26.6 of 29 ms and nothing else does I/O (font 1.4, resolve 0.6 — both ruled out, not
+assumed). **The seconds are the disk, not the code:** `M:` is a spinning HDD, and `de440s.bsp` reads
+4.9–12.9 MB/s unbuffered while the same platter streams a 200 MB file at 35.4 MB/s — it is fragmented.
+ANISE is `std::fs::read` (heap, not mmap), so it is a real 32 MB read, 2.4–6.4 s off the device. NOT
+antivirus (Defender caches its verdict; both reads were slow). **Lever that is yours, not the code's:
+re-copy `de440s.bsp` to defragment it.** Fix: `Mission::begin_load`/`poll_load` (9th channel, the
+earliest), `_ready` **29 → 2 ms**; no cold before/after claimed, because a cold cache cannot be made on
+demand. `poll_load` false = *finished*, not *succeeded* — `is_loaded()` is the success test.
+
+**(d) THE TRAP THIS CREATED — read before any frontend work.** `bodies_online` is **no longer settled at
+scene load**. Anything that builds from the field in `_ready` must instead build on the new
+`Sim.field_online` signal (`solar_system.gd` planet nodes, `main.gd` camera focus ring both had to
+move). Getting it wrong is NOT a blank screen: `_process` throws `Invalid access to key 'MERCURY'` every
+frame, **and a GDScript error skips the rest of the function**, so every line below it dies — the belt
+froze at the origin (= the Sun) and the comet's span gate silently stopped applying. **Both headless
+suites stayed green through all of it** (85 + 53 checks); only `_shot.gd`'s printed `node_visible` flag
+and the picture caught it, and the errors went to **stderr**, which the windowed run's filter was not
+reading. Confirmed as mine, not a flake, by `git stash`-ing the GDScript and re-running against the same
+DLL. `_shot.gd` now counts planet nodes vs `Sim.planets` and prints FAIL.
+
+**(e) A placeholder that made two tests meaningless.** `test_orrery.gd`'s clock checks run right after
+`_ready`, and `EPOCH0_TDB`'s default (883569600.0) is *exactly* what the core returns, `T_IMPACT`'s
+(4383.0) is inside its own 2-day tolerance — so with a threaded load both would pass whether the loader
+landed or not. The pump to completion + `bodies_online` gate is what keeps them real. Same shape: the
+build-worker bound now reads `ready_phase_ms["adopt_field"]` (the landing frame), because `load_ms`
+contains the disk read and says nothing about whether the build blocked.
+
+**Trap (d) has a THIRD consumer people miss:** `_build_events()` also runs in `_ready` and also reads the
+placeholders (`bodies_online`, `T_MIN`, `T_MAX`) — it opened the log with "NO EPHEMERIS KERNEL" over a
+kernel still being read. Rebuilt from `_poll_load` now. When auditing this, check *every* function
+`_ready` calls, not just the obviously field-dependent one. **And run the CI gates before pushing:**
+`cargo fmt --all -- --check` (CI's exact form; `--manifest-path` alone errors "Failed to find targets")
+caught a blank line that would have turned `main` red, and `cargo build` does NOT compile `#[cfg(test)]`
+code — `cargo clippy --workspace --all-targets --release` is what CI runs and what type-checks tests.
+
+**A flaky bound that is NOT yours:** `test_gdext.gd`'s `begin_build_scenario() < 1000 ms` (a bare
+`thread::spawn`) measured 755 / 2015 / 3551 ms in one hour on this machine. Verified environmental by
+stashing the test and re-running the *unmodified* one against the same DLL — it failed harder. Left at
+1000 ms deliberately (a blocking build would be 10–30 s, so there is 10x headroom). Check the machine
+before believing it.
+
+**Boot POST has a third state now:** `DE440S.BSP READING ...` retyped to `LOADED` in place (same four
+line slots so nothing shifts; `_chars` is an array-wide budget). Emit `field_online` **after**
+`_begin_build()` or the POST prints "DEFLECTION SOLVER ... OFFLINE - NO EPHEMERIS" under a loaded
+kernel. Warm the READING state lasts ~2 ms, so it was photographed by temporarily holding the landing
+25 s — there is no other way to see it.
+
+## 2026-09-07 (later) - labels placed instead of dropped, and ONE frame-ms number that lied twice
+
+Plan tasks 3/4/5/6 of `docs/plans/2026-09-05-visuals-performance-followups.md`, all closed.
+
+**The placement rule, now used in two files** (`tag_layer.gd`, `encounter.gd`): collect -> place by
+priority -> paint. The **glyph never moves** (it is the measured position); only text slides, to the
+first clear offset. **A blinked-off label MUST still reserve its rectangle** - "PREDICTED IMPACT"
+blinks, and a pass that only sees what is painted re-solves every neighbour twice a second: correct in
+any screenshot, jittering in motion, invisible to the shot harness. `belt_1_real_asteroids` is the
+case (2028-01-01 is 12 yr before impact, so Earth is back in nearly the same place and the *invisible*
+caption is what moves "EARTH"). Two collisions the plan did not name: **the two b-point captions
+collide with each other** zoomed out (`enc_4` printed them on the same pixels - unreadable, not
+crowded), and keyhole names struck through the deflected diamond, so the **marks** are reserved too.
+
+**THE MEASUREMENT LESSON - read before quoting any frame time here.** A single `frame ms avg` on this
+box produced **two confident, opposite, wrong conclusions in one session**. (1) One run at 6.94/7.26 ms
+-> "the b-plane is no longer the expensive view, Task 6 has nothing to win". Four runs say ~10.1 vs
+~6.9 for the 3D views; the plan's 9.1/9.2 baseline was right. (2) Next runs at 10.2-10.7 -> "Task 4
+cost 3.3 ms/frame"; a width memo was written to fix a regression that did not exist (it measured no
+better and did not ship). Both errors were one run vs one run, and the 6.94 was the outlier.
+**Procedure:** two runs each side and report all four (overlapping sets = no result); check the
+**micro gauges** (`lookup(EARTH) raw` sat at 11.8-12.8 us across every run, which is what made a 1.0 ms
+delta readable); and **A/B by file swap** - `git show <commit>:<path> > <path>`, run twice, restore -
+which is what proved Task 4 innocent, the same technique that pinned the `bodies_online` regression.
+**And `_perf.gd` runs in a 64x64 window**, so anything gated on "is this label on the plot" is measured
+in a regime nothing like 1600x900 - a caption cost can be invisible in the harness and real in the game.
+
+**Tracks as polylines: 10.1 -> 9.1 ms (-10%), not the -2 ms predicted.** NOT one polyline per track -
+that and the off-frame reject do not compose (a single line must include the off-frame points to stay
+connected). Runs of consecutive on-frame points sharing a colour, broken when the run leaves the grown
+rect or `s` changes sign. Cache keyed (zoom, size), cleared in `_fetch`. Two invariants, both written
+at `_track_runs` because neither is visible at the cache: `center`/`ppl` are pure functions of `size`
+and `_half_ld`; and the invalidation is right **by draw order, not construction** - `plan_changed`
+clears `_built`, not `_runs`, and only `_fetch` running at the top of `_draw` saves it.
+
+**`[I]` cycles persistence `[0.14, 0.35, 0.0]` s - NOT `[G]`, which the plan asked for and which is
+already `tier2_term_gr`.** Godot reports no duplicate binding; the second one just wins, so check
+project.godot's keycodes before adding an action. `0.0` is a real rung handled as a case (the decay
+formula divides by zero there). The belt dims with warp via a `dim` uniform on `starfield.gdshader`,
+set only when the warp step changes. **The belt claim rests on the printed `belt_dim_set_for_warp=9`
+(dim floors at 0.15), NOT on the two trail pictures** - the clock runs through the key presses, so they
+are seconds apart and are a fair before/after for persistence only.
+
+
+**2026-09-07 - `-Headless` is for `_perf.gd`, NOT for `_shot.gd`.** Running
+`run_harness.ps1 -Harness _shot.gd -Headless` hangs forever after the boot line
+and gets killed at the timeout with an empty stderr, which looks exactly like a
+parse error and is not one: `_shot()` awaits `RenderingServer.frame_post_draw`,
+and under the dummy rendering driver that signal never fires. The harness
+docstring already says screenshots need a window. Run `_shot.gd`,
+`_pork_shot.gd`, `_threat_shot.gd`, `_tier2_shot.gd` and `_tractor_shot.gd`
+**windowed** (~15 min for `_shot.gd` end to end, and it needs
+`-TimeoutSec 1500`); keep `-Headless` for `_perf.gd`.
+
+Two shutdown messages are normal noise after the last SHOT line and are not a
+failure: `Attempted to set an invalid (previously freed?) object instance into a
+'TypedArray'` (x2) and `Capture not registered: 'gdaimcp'` (the editor MCP
+plugin, which does not connect).
+
+
+**2026-09-07 - a `--script` run registers NO autoloads, and that is a testing
+lever, not just a trap.** `godot --headless --path godot --script res://tests/X.gd`
+does not create the `Sim` singleton, so any script naming `Sim` fails to
+*compile* in isolation - the error is `Identifier not found: Sim` at load, before
+a single line runs. `encounter.gd` names `Sim` constantly, so it cannot be
+exercised this way at all. The lever: pure view geometry moved into
+`W:\Claude_projects\AsteroidDefense\godot\scripts\plot_geometry.gd`, which names
+nothing, and `godot\tests\test_geometry.gd` measures it with **no kernels, no
+scenario build and no window, in about a second**. That is the first test here
+that costs nothing to run. Loaded by `preload`, not `class_name`, so a game run
+needs no editor rescan.
+
+It caught a defect no screenshot could: `draw_arc(cc, r, 0, TAU, 256, ...)`
+tessellates in *angle*, so the widest resonant circle (795 431 px across at the
+zoom-in stop) was drawn **59.9 px** from where the circle actually is, on a
+720 px view - and it still looked like a plausible line. Clipping the arc to the
+viewport and tessellating to a 0.3 px screen budget gives 0.113 px with **3
+points instead of 256**. See [[keyhole-reach]].
+
+**Watch the pipe when running Godot or cargo from a tool call.** Piping to
+`tail`/`grep` buffers everything until the process exits, so a run that has
+finished its work but hangs on shutdown looks like a run that printed nothing.
+Redirect to a file under `W:\temp\claude` and read that instead. (A Godot run
+that does hang: kill only the PID you captured - `Stop-Process -Id <pid>`.)

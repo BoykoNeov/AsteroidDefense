@@ -611,17 +611,19 @@ func _init() -> void:
 	# The placement band is per-circle since 2026-09-08: the constant is in
 	# kilometres of semi-major axis and each row carries the b-plane band its own
 	# gradient earns it (`placement_band_km`) plus `exposure_km`, its margin less
-	# that band. The rows below carry a 575 km band, which is what
-	# `KEYHOLE_PLACEMENT_A_KM` comes to on the 3:4 - the shallowest gradient in the
-	# flown set, so the widest band any real row gets.
+	# that band. The rows below carry a 575 km band - what the band came to on the
+	# 3:4 before 2026-09-23 (it is ~1 950 km at the shipping 51 000 km of a'). The
+	# value is immaterial here: these rows are built, and each is self-consistent
+	# (exposure = margin - band), because what is checked is the formatting rule.
 	#
-	# Over stretches of the map the drawn circles are closer together than that, so
-	# the band can span several doors and single out none of them. The panel has to
-	# say so instead of presenting one as the answer. This register is not
-	# hypothetical: `probe_keyhole_placement crowding` found a dialable 900 d plan
-	# (prograde 0.1102 m/s, b = 17 069 km, a clean miss) with two doors inside the
-	# band. It is still executed here on built rows because a unit check should not
-	# need a 3-minute flight to reach its branch.
+	# Where circles are closer together than the band, it can span several doors
+	# and single out none of them, and the panel has to say so instead of
+	# presenting one as the answer. **On this rock that register is currently
+	# unreachable**: `probe_keyhole_placement crowding`, re-run 2026-09-23 on the
+	# circles as shipped, needs ~660 000 km of a' to put a second door in reach at
+	# 900, 300 or 200 d (its earlier 900 d hit was the retired 800 km band, in the
+	# wrong unit). The branch is still executed here on built rows, because another
+	# rock or a wider band can reach it and a unit check should not need a flight.
 	var crowded_row := {
 		"h": 7, "k": 8, "distance_km": 300.0, "width_km": 25.0, "margin_km": 287.5,
 		"placement_band_km": 575.0, "exposure_km": -287.5,
@@ -675,9 +677,10 @@ func _init() -> void:
 		"the caveat quotes THIS circle's band, not a constant (%s)" % sim.keyhole_note())
 	# The constant itself, pinned. The gdext binding test mirrors it by hand as
 	# `PLACEMENT_BAND_A_KM`; if the two drift, this is the side that ships.
-	_check(is_equal_approx(sim.KEYHOLE_PLACEMENT_A_KM, 15000.0),
-		"the placement band is 15 000 km of a' - the worst repaired door of the six "
-		+ "flown, plus the incoming measurement's own bar (%s)"
+	_check(is_equal_approx(sim.KEYHOLE_PLACEMENT_A_KM, 51000.0),
+		"the placement band is 51 000 km of a' - the worst of nineteen flights over "
+		+ "eight resonances (the 6:5 at 200 d), plus the incoming measurement's own "
+		+ "bar (%s)"
 		% sim.KEYHOLE_PLACEMENT_A_KM)
 	sim.plan_keyhole = saved_keyhole
 

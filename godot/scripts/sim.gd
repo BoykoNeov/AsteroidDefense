@@ -52,8 +52,8 @@ const KEYHOLE_MAX_YEARS := 7
 ## How far the closed form can misplace a resonant circle, in **kilometres of
 ## semi-major axis** - not kilometres of b-plane. Each circle turns it into a
 ## distance on screen through its own gradient, so the band the planner cuts on is
-## per-resonance: ~575 km on the 3:4 and ~57 km on the 2:3, which is ten times
-## steeper on the same encounter. The core does that conversion
+## per-resonance: ~1 950 km on the 3:4, ~193 km on the 2:3 (ten times steeper on
+## the same encounter) and ~21 km on the 6:5. The core does that conversion
 ## (`Keyhole::placement_band`) and each readout row carries the
 ## `placement_band_km` it got, plus `exposure_km`, which is that row's margin less
 ## its own band. The alert is `exposure_km <= 0`.
@@ -82,12 +82,40 @@ const KEYHOLE_MAX_YEARS := 7
 ## `incoming_semi_major_axis_flown`). The same four doors then sit +402, +385,
 ## +316 and +418 km from their circles: an offset instead of a ladder.
 ##
-## **Where 15 000 comes from.** Worst repaired door of the six flown, in the unit
-## this constant is in: 11 024 km of a' (the 200 d 3:4, sampled at CA - 30 d).
-## Plus the incoming measurement's own error bar, which is ~3 535 km of a' on every
-## one of the six - the same number on both resonances, which is itself a check
-## that the unit is right. 14 559, rounded up. It is a measured maximum over **two
-## resonances and six flights**, not a bound.
+## **Where 51 000 comes from (2026-09-23; it was 15 000).** Worst of **nineteen
+## flights over eight resonances**, in the unit this constant is in and on the
+## CA - 30 d sample: 46 806 km of a' (the 6:5 Plus at 200 d). Plus the incoming
+## measurement's own error bar, ~3 540 km of a' on every one of the nineteen - the
+## same number on all eight resonances, which is still the check that the unit is
+## right. 50 346, rounded up. A measured maximum, not a bound.
+##
+## **Why it moved: the error is NOT one number in a'.** The 15 000 rested on two
+## resonances that happened to agree. Flown on crossing Δvs (no door needed), the
+## error in the change across the flyby, CA - 30 d convention, reads:
+##
+##     circle      flyby    b (km)    km of a'
+##     3:4 Minus   lowers   153 000   8 184 .. 11 024   (four doors, not crossings)
+##     5:7 Minus   lowers    74 000   7 983 ..  9 334
+##     7:10 Minus  lowers    60 000   8 026 ..  8 926
+##     2:3 Minus   lowers    40 000   8 879 ..  9 836
+##     5:8 Minus   lowers    24 600  10 816 .. 14 185
+##     7:8 Plus    RAISES    84 000   2 831 ..  7 106
+##     7:6 Plus    RAISES    24 200  12 768 .. 40 507
+##     6:5 Plus    RAISES    22 600  18 360 .. 46 806
+##
+## Every row the same sign: the map predicts the post-flyby orbit too LARGE
+## whether the flyby grows or shrinks it, so this is not an error proportional to
+## the turn. But the close orbit-raising pair (6:5, 7:6) are 2 to 5x the rest,
+## worst at the 200 d lead - and neither closeness alone (the 5:8 is as close and
+## normal) nor raising alone (the 7:8 raises and is the SMALLEST) produces it.
+## Two circles do not make a law, so the band is raised for every circle rather
+## than for a class: at 15 000 the 6:5's band was 6.2 b-plane km against measured
+## errors of 6.6, 6.9 and 15.5, i.e. the alert said CLEAR on a plan it could not
+## vouch for. The price is a wider warning zone on the shallow circles (the 3:4's
+## ~575 -> ~1 950 km). Five more close orbit-raising circles (5:4, 4:3, 7:5, 3:2,
+## 5:3 Plus) have never been flown, and the growth toward them is exactly where
+## this maximum could be exceeded. Measured by `probe_keyhole_placement outgoing
+## h k branch fly=<lead>:<dv>` on `xi_sweep` crossings, rule written first.
 ##
 ## The sample the shipping code takes is not the one those numbers came from: it
 ## reads where the rock first clears 10 Earth Hill radii, which on this rock is
@@ -96,13 +124,14 @@ const KEYHOLE_MAX_YEARS := 7
 ## +372.4 km there against +402.0 and +418.2 km at CA - 30 d, i.e. 9 180 and 9 819
 ## km of a'. Both under the worst above, and the gap between the conventions is
 ## exactly what the error bar in the paragraph above is for. Pinned by
-## `core/tests/keyhole_prediction_bias.rs`, which flies both.
+## `core/tests/keyhole_prediction_bias.rs`, which flies both. (The CA - 30 d sample
+## reads ~2 400 km of a' above the revolution mean on EVERY row of the nineteen -
+## the same arriving orbit - so the table above is the probe's revolution-mean
+## "out by" plus that row's own printed snapshot offset.)
 ##
-## **The constant offset is NOT subtracted.** All six repaired doors sit on the
-## same side of their circles, 8 184 to 11 024 km of a' out, so a further
-## correction is visible in the data. Six flights cannot set it - the spread is
-## 1.35x - and subtracting a number that badly known would trade a known error for
-## an unknown one. That is the next thing to measure, not to ship.
+## **The offset is NOT subtracted - and now cannot be.** Same sign on all
+## nineteen, but 2 831 to 46 806 km of a' is a 16x spread; there is no one number
+## to take away.
 ##
 ## **The domain floor is 200 d, and it is a floor on the QUESTION.** Measured
 ## 2026-09-07 on the 3:4, 2:3 and 5:7 swept and flown at 150, 125, 100, 75 and 50 d:
@@ -148,14 +177,15 @@ const KEYHOLE_MAX_YEARS := 7
 ## *plan's own point* to a door. `probe_keyhole_placement crowding` asks the
 ## register's own question: it flies the whole dialable dv range at a lead, keeps
 ## only the points where the deflected pass actually **misses**, and counts doors
-## in the band at each. On that measurement the several-doors register fires on
-## real physics, at every lead the planner allows. The readout carries
-## `doors_in_band`; `_shot.gd` prints the count. That count was taken against the
-## old flat 800 km band, and the replacement is not uniformly narrower - it is
-## 57 km on a steep circle, 575 km on a shallow one, and *wider* than 800 anywhere
-## the gradient falls below ~19 m/m - so the count could go either way. It is a
-## register to re-measure after this change, not a number to reason through it.
-const KEYHOLE_PLACEMENT_A_KM := 15000.0
+## in the band at each. Against the retired flat 800 km band the several-doors
+## register fired at every lead. **Re-measured 2026-09-23 on the circles as
+## shipped** (placed on the change, band in a', each rung's own arriving orbit):
+## it is **NOT REACHABLE** at 900, 300 or 200 d - putting a second door in reach
+## anywhere on the dialable curve needs ~660 000 km of a' at all three, 13x this
+## band. The close circles crowd in b-plane km, but they are the steep ones, so in
+## a' they are far apart; the 800 km band only fired because it was the wrong unit.
+## The readout still carries `doors_in_band`; `_shot.gd` prints the count.
+const KEYHOLE_PLACEMENT_A_KM := 51000.0
 
 ## Whether the threat and planner are live: true once the core's scenario has
 ## finished building and installed (see `_poll_build`). Consumers check this
@@ -2457,7 +2487,7 @@ func keyhole_note() -> String:
 		return "%s KM FROM THE WIDER %s DOOR" % [
 			group_num(int(m)), keyhole_name(risk)]
 	# The band is per-circle, so the caveat quotes THIS circle's own rather than a
-	# constant: the same `KEYHOLE_PLACEMENT_A_KM` is ~575 km on the 3:4 and ~57 km
+	# constant: the same `KEYHOLE_PLACEMENT_A_KM` is ~1 950 km on the 3:4 and ~193 km
 	# on the ten-times-steeper 2:3. Reading the row is also the only way the panel
 	# can be sure it is quoting the band the alert was actually cut on.
 	var band := float(risk.get("placement_band_km", 0.0)) if not risk.is_empty() else 0.0

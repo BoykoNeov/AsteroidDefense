@@ -1,8 +1,11 @@
 ---
 name: keyhole-probability
-description: "Tier-3 at the resonant return (2026-09-06): the chained two-encounter Jacobian, the 778x flyby gain checked against the closed form, and the finding that at a keyhole P is set by how well the orbit is KNOWN, not how well the impulse is aimed - for as long as the uncertainty is larger than the door."
-metadata:
+description: "Tier-3 at the resonant return (2026-09-06) — the chained two-encounter Jacobian, the 778x flyby gain, and the finding that at a keyhole the probability is set by how well the orbit is KNOWN, not how well the impulse is aimed."
+metadata: 
+  node_type: memory
   type: project
+  originSessionId: e11b79c1-27f7-4739-88ec-7044ecae023d
+  modified: 2026-09-06T05:52:29.656Z
 ---
 
 **Roadmap item 2 ("P(impact) rising near a keyhole") is DONE 2026-09-06 — and it

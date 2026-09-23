@@ -2728,7 +2728,8 @@ impl Mission {
     /// pass the old number to the new meaning. Each circle converts it through its
     /// own gradient, because the closed form's placement error is a constant in
     /// `a'` and the distance that corresponds to is whatever the local geometry
-    /// makes it: 575 km on the 3:4, 57 km on the ten-times-steeper 2:3. The band
+    /// makes it: at the shipping 51 000 km of `a'`, ~1 950 km on the 3:4, ~193 km
+    /// on the ten-times-steeper 2:3 and ~21 km on the 6:5. The band
     /// each row got is in its `placement_band_km`, and `exposure_km` is
     /// `margin_km` less that.
     ///

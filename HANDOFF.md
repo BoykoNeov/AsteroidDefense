@@ -8,7 +8,7 @@ This document is the starting context for continuing development in Claude Code.
 
 ---
 
-## Where things stand — 2026-09-08
+## Where things stand — 2026-09-23
 
 A dashboard, because §10's task list has been complete since the MVP and the
 truth has lived in the dated session sections at the end of this file since.
@@ -40,6 +40,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **Which half of the keyhole map is wrong**: the semi-major axis the flyby *actually* produces, read on four flown 3:4 doors as a mean over one post-encounter revolution, against both things a resonant circle assumes | **done 2026-09-08**; the resonance **condition** is sound — a flown door leaves the rock **14 to 49 km-equivalent** from `a_res` at every lead — **−14 to −16 km at three of the four leads and −49 km at 200 d**, a spread inside the measurement's own ±41 km bar — while the closed form's **prediction** of `a'` is wrong by −33, −227, −665 and −839 km, which *is* the 19 → 786 km ladder. Both available repairs are dead: the `r ≈ R⊕` substitution explains **0.4 %** at the 300 d door (where the rock is 53 km from Earth's distance and the error is at full size), and rebuilding the frame from the flight's own encounter is worse at three leads of four | `core/examples/probe_keyhole_placement.rs`, `core/tests/keyhole_prediction_bias.rs`, `core/src/keyhole.rs` |
 | **Where in the closed form the ladder lives**: the four ingredients the map takes from the nominal rock swapped one at a time, then the same construction asked on the leg *before* the encounter | **done 2026-09-08**; none of the four ingredients orders by lead and their sum is not the bias either (additive to 11 %, so no cancellation), while splitting the prediction into a **baseline** (which orbit the rock arrives on) and a **turn** (what the flyby does to it) separates them cleanly: across the two extreme doors the two absolute errors are **750 and 805 km apart** and the error in the *change* is **55 km apart**, inside the ±136 km bar. So the flyby is predicted right to a constant and the whole 19 → 786 km ladder is the baseline. Placing the circle on the change instead would turn that ladder into a **103 km spread about a constant** — measured, deliberately not shipped | `core/examples/probe_keyhole_placement.rs`, `core/tests/keyhole_prediction_bias.rs`, `core/src/keyhole.rs` |
 | **The repair shipped, and the band changed units**: the resonant circle placed on the **change** the flyby makes rather than on the closed form's absolute `a'`, with the arriving orbit read off the flown arc; and a second resonance flown to settle what the leftover error is a constant *in* | **done 2026-09-08**; the 3:4's four doors go from a **767 km ladder** in the deflection lead to an **offset** (+352 to +372 km on the shipping convention, 20.7 km apart at the two extremes), so the worst case the band must cover halves. And the 2:3, flown at two leads on a gradient **ten times** steeper, says the error is a constant of **semi-major axis**, not of b-plane distance: 12× apart in kilometres (the gradient ratio) and overlapping in `a'`, with the measurement's own error bar reading ±3 535 and ±3 540 km of `a'` on the two. So `KEYHOLE_PLACEMENT_KM = 800` becomes `KEYHOLE_PLACEMENT_A_KM = 15 000` km of `a'` — **575 km on the 3:4, 57 km on the 2:3** — and the alert is cut per circle on `exposure = margin − band` | `core/src/{keyhole,keyhole_target}.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/{sim,planner}.gd`, `core/tests/keyhole_prediction_bias.rs` |
+| **The leftover constant, flown on six more resonances**: the error in the change across the flyby measured on 5:7, 7:10, 6:5, 7:8, 5:8 and 7:6 at dialable leads, a separating pair chosen from a census, and the crowded register re-run on the circles as shipped | **done 2026-09-23**; **not one number** - same sign on all nineteen flights (the map always predicts the post-flyby orbit too large) but 2 831 to 46 806 km of `a'`, with the close orbit-raising 6:5 and 7:6 2-5× the rest at 200 d. So `KEYHOLE_PLACEMENT_A_KM` **15 000 → 51 000** (the 3:4's zone ~575 → ~1 950 km), and the several-doors register is **not reachable** on this rock (needs ~660 000 km of `a'`) - its earlier firing was the retired km band | `core/examples/probe_keyhole_placement.rs`, `godot/scripts/sim.gd`, `godot/rust/src/mission_core.rs`, `godot/tests/test_orrery.gd` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -236,7 +237,19 @@ Read this table first, then the session that owns the layer you are touching.
    ellipse's 205:1 aspect ratio: `shell_scale` is 0.693 of the 3sigma half-length,
    so the factor is 143 half-widths of shell reach times the 0.90 of the residual
    that lies across the needle. See *The scalar's blindness*.
-9. **The constant the repair leaves behind.** Placing the circle on the change
+9. ~~**The constant the repair leaves behind.**~~ **DONE 2026-09-23 - it is not
+   one number, and the band went UP, 15 000 -> 51 000 km of `a'`.** Thirteen more
+   flights over six resonances (all on crossing Δvs), rule written first: every
+   row is the same sign (the map always predicts the post-flyby orbit too large)
+   but they span 2 831 to 46 806 km of `a'`, and the close orbit-raising pair (6:5,
+   7:6) are 2 to 5× the rest at the 200 d lead - which at 15 000 meant the alert
+   said CLEAR on a 6:5 plan it could not vouch for. A pre-registered separating
+   pair showed neither closeness alone (5:8) nor raising alone (7:8) does it.
+   Nothing is subtractable. And the crowded register, re-measured on the circles
+   as shipped after fixing a probe stage that had been passing b-plane km as `a'`,
+   is **not reachable** at 900 / 300 / 200 d (a second door needs ~660 000 km of
+   `a'`). See *The constant is not one number*. The original item follows.
+   Placing the circle on the change
    turns the placement ladder into an offset, and that offset is *visible*: all six
    flights sit on the same side of their circles, 8 184 to 11 024 km of `a'` out.
    Subtract it and the worst repaired door would be inside ~130 km instead of
@@ -5507,3 +5520,128 @@ the whole 9-versus-10 gap between the lib alone and `--all-targets`. Two
 - **Two resonances is two.** The 5:7, 7:10 and 6:5 have been flown to doors at the
   12 yr lead but never at a dialable one, and their gradients (97, 138, 2 425 m/m)
   span the axis this session found matters.
+
+### The constant is not one number - 2026-09-23 session (roadmap item 9: six more resonances flown, the band raised, the crowded register re-measured)
+
+The previous section left one question: all six flights after the repair sat on
+the same side of their circles, 8 184 to 11 024 km of `a'` out, and *"a third
+resonance, or the same two at more leads, would say whether it is one number."*
+It is not. And the answer moved the shipping band the wrong way for anyone hoping
+to subtract it.
+
+#### The rule, written before any flight
+
+`W:\temp\claude\keyhole_constant\decision_rule.md` (outside the repo): the observable
+is the error in the **change** of `a` across the encounter, converted with each
+row's own gradient. ONE NUMBER only if every new row is the same sign and inside
+~6 000..11 000 ± 3 540 km of `a'`; the 6:5 (the only then-flown circle whose flyby
+*raises* `a`) coming out opposite-signed would mean the error scales with the turn;
+the 6:5 alone cannot isolate gradient because it also changes branch and direction.
+An addendum, also written before its flights, pre-registered the separating pair
+below.
+
+#### What was flown
+
+All on **crossing** Δvs from `xi_sweep` (no door needed, per the previous
+section), `outgoing h k branch fly=<lead>:<dv>,...` for the split. 13 new flights:
+5:7, 7:10, 6:5 at 4383 / 900 / 200 d; 7:8 Plus, 5:8 Minus, 7:6 Plus at 4383 / 200 d.
+Every crossing was found (no NOT REACHED). Every row's incoming error bar reads
+**3 420 to 3 640 km of `a'`** - the same number on all eight resonances, which is
+still the check that `a'` is the unit the *measurement* lives in.
+
+Error in the change, CA - 30 d sample (the convention the band was calibrated in;
+the probe prints the revolution mean, and the single sample reads **+2 200 to
++2 570 km of `a'` above it on every row** because every flight arrives on the same
+orbit - so each figure below is the printed "out by, in km of a'" plus that row's
+own printed snapshot offset):
+
+| circle | flyby | b (km) | ∇a'·n̂ (m/m) | km of `a'` |
+|---|---|---|---|---|
+| 3:4 Minus | lowers | 153 000 | 26 | 8 184 … 11 024 (four *doors*, 2026-09-08) |
+| 5:7 Minus | lowers | 74 000 | 97 | 7 983 / 8 449 / 9 334 |
+| 7:10 Minus | lowers | 60 000 | 138 | 8 026 / 8 511 / 8 926 |
+| 2:3 Minus | lowers | 40 000 | 255 … 264 | 8 879 / 9 836 |
+| 5:8 Minus | lowers | 24 600 | 437 … 486 | 10 816 / 14 185 |
+| 7:8 Plus | **raises** | 84 000 | −120 … −127 | **2 831** / 7 106 |
+| 7:6 Plus | **raises** | 24 200 | −2 069 … −2 403 | 12 768 / **40 507** |
+| 6:5 Plus | **raises** | 22 600 | −2 427 … −2 854 | 18 360 / 19 021 / **46 806** |
+
+Logs: `W:\temp\claude\keyhole_constant\out_*.log`, sweeps `sweep_*.log`, the census
+that picked the separating pair `census.log`.
+
+#### What it says
+
+- **Same sign on all nineteen** in `a'`. The minus signs the probe prints in
+  b-plane km on the Plus rows are the circle facing the other way (∇a'·n̂ < 0),
+  not a different error: in words, **the map predicts the post-flyby orbit too
+  large, whether the flyby grows or shrinks it** - which is why this is not an
+  error proportional to the turn (that would flip sign with the direction of Δa).
+- **Not one number.** 2 831 to 46 806 km of `a'`, 16×. The five orbit-lowering
+  circles cluster (8 000 - 14 000); the close orbit-raising pair (6:5, 7:6) are
+  2 to 5× that, worst at the 200 d lead, and the 7:6 reproduces the 6:5 - it is
+  not a one-off.
+- **Neither closeness nor raising alone produces it.** That was the pre-registered
+  separating experiment: the 5:8 is as close as the 6:5 (24 600 km) and lowers `a`
+  - it reads normal; the 7:8 raises `a` and is far - it is the *smallest* on the
+  table. Pre-registered outcome "both normal", whose prescribed next step was the
+  6:5's near-twin, 7:6 Plus - which came out large. So it takes both, or something
+  those two share that neither separator has (they are also the steepest flown,
+  ~2 400 m/m), and two circles do not make a law.
+- **The 200 d rows on the close raising pair land far round their circles** (ξ
+  10 460 and 10 775 km against a nominal 6 690) with the gradient 17 % steeper
+  there. Recorded, not concluded from.
+
+#### What shipped
+
+**`KEYHOLE_PLACEMENT_A_KM` 15 000 → 51 000** (worst 46 806 + the ~3 540 bar,
+rounded up, the same recipe as before). At 15 000 the 6:5's band was **6.2 b-plane
+km against measured errors of 6.6, 6.9 and 15.5** - the alert said CLEAR on plans
+it could not vouch for. The user chose the blanket raise over a close-raising-only
+exception (which would rest on two circles) and over documenting only. The price:
+the 3:4's warning zone goes **~575 → ~1 950 km**, the 2:3's 57 → 193, the 6:5's 6.2
+→ 21. Five more close orbit-raising circles in the census (5:4, 4:3, 7:5, 3:2, 5:3
+Plus, b 11 000 - 20 600 km) have **never been flown**, and the growth toward them is
+exactly where 51 000 could be exceeded. It is a measured maximum, not a bound.
+
+#### The crowded register, re-measured - and the stage that had been lying
+
+`stage_crowding` still took `band=<km>` (b-plane, default 500) and passed
+`band_km × 1e3` to `doors_within_band`, which has taken **metres of `a'`** since
+2026-09-08 - so it had been asking about 500 km of `a'` (~19 km on the 3:4) with
+nothing to say so. It also censused the *plain* circles, not the ones the frontend
+draws. Fixed: each rung is flown with `deflected_trajectory`, its arriving `a` read
+off its own arc with `incoming_semi_major_axis_flown` (exactly as `set_plan` does),
+the census is `resonant_circles_on_change` at that `a`, the closed-form scan
+interpolates the arriving `a` alongside the point, and `band=` is **refused** with a
+message rather than reinterpreted. `band_a=<km of a'>`, default the shipping value.
+The "how close" figure is now the band that *would* put a second door in reach
+(second-smallest `margin × |∇a'|`), in km of `a'`.
+
+Result: **NOT REACHABLE at 900, 300 and 200 d.** A second door needs **~660 000 km
+of `a'`** at all three (659 779 / 659 867 / 659 112), 13× the new band and 44× the
+old. The close circles do crowd in b-plane km (~2 000 km apart around b 15 - 28
+thousand), but those are the steep ones, so in `a'` they are far apart: the 800 km
+band's "fires at every dialable lead" was the wrong unit, not physics. Logs:
+`W:\temp\claude\keyhole_crowding\crowd_{900,300,200}_15000.log`.
+
+#### Two probe fixes on the way
+
+- **`outgoing` built a fixed 500 d post-encounter arc**, enough for every orbit that
+  shrinks at the flyby and not for the 6:5's 438 d one (the half-revolution-shifted
+  mean closes at ~690 d). It panicked `OutOfRange` rather than printing a wrong
+  number. Now sized from the predicted period; the 5:7 re-run reproduces
+  +6 056.4 / +5 594.8 / +6 938.4 exactly, and the 6:5's settling check moves
+  0.2 - 0.5 b-plane km.
+- **`census`** - a new stage: every circle in the readout's census, both crossings at
+  the nominal ξ, with branch, `b`, `∇a'·n̂` and whether the flyby raises or lowers
+  `a`. No flights. It is how the separating pair was picked.
+
+#### What this leaves
+
+- **The mechanism.** Something specific to close, orbit-raising, steep circles at
+  short leads roughly quadruples the error. Encounter-local suspects (solar tide
+  across the flyby, finite turn time) are more live than before, since the
+  big rows are the deepest flybys. A Plus circle between the 7:8 and 7:6 in `b`
+  (6:7 Plus at 104 000, or the 5:4 / 4:3 Plus at 18 - 21 thousand) would say
+  whether it grows smoothly with depth.
+- **The five unflown close raising circles** are where 51 000 is least supported.

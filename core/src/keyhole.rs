@@ -152,14 +152,21 @@
 //! So the closed form misplaces a circle by a constant amount of **semi-major
 //! axis**, and the b-plane distance that comes to is whatever the local geometry
 //! makes it. [`Keyhole::placement_band`] is that conversion, and it is why the
-//! frontend's band moved from 800 b-plane km to 15 000 km of `a'` — which is
+//! frontend's band moved from 800 b-plane km to 15 000 km of `a'` — which was
 //! 575 km on the 3:4 and 57 km on the 2:3.
 //!
-//! **The constant itself is not subtracted.** All six flights sit on the same side,
-//! 8 184 to 11 024 km of `a'` out on the shipping single-sample convention, so a
-//! further correction is visible in the data. Six flights over two resonances
-//! cannot set it — the spread is 1.35× — and trading a known error for a badly
-//! known one is not a repair. That is the next thing to measure.
+//! **But it is not one number in `a'` either (2026-09-23).** Six more resonances
+//! flown at dialable leads read 2 831 to 46 806 km of `a'`, all the same sign (the
+//! map always predicts the post-flyby orbit too large). The orbit-lowering circles
+//! cluster at 8 000 – 14 000; the close orbit-raising 6:5 and 7:6 reach 40 000 –
+//! 47 000 at a 200 d lead, and neither closeness alone (5:8) nor raising alone
+//! (7:8) reproduces that. The frontend band is now 51 000 km of `a'` — the
+//! measured maximum plus the ~3 540 km bar every row shares — which is ~1 950 km
+//! on the 3:4.
+//!
+//! **The offset is not subtracted — and, with a 16× spread, cannot be.** The
+//! first six flights (two resonances) sat 8 184 to 11 024 km of `a'` out, which
+//! looked like one number to subtract; the nineteen say there is no such number.
 //!
 //! # The keyhole width, as a definition rather than a claim
 //!
@@ -899,12 +906,13 @@ impl OpikFrame {
     /// [`resonant_circle`](Self::resonant_circle), which is the sense in which the
     /// repair is a strict generalisation.
     ///
-    /// **What it does not fix.** The change is predicted out by a constant of
-    /// roughly 8 200 to 9 700 km *of `a'`* (the range across two resonances and six
-    /// flights), and that constant is **not** subtracted here: six flights cannot
-    /// set it. What the repair buys is that the residual is a constant in `a'`
-    /// rather than a ladder in the lead — see [`Keyhole::placement_band`], which is
-    /// how a caller is meant to allow for it.
+    /// **What it does not fix.** The change is still predicted out, always on the
+    /// same side (the post-flyby orbit predicted too large), by 2 831 to 46 806 km
+    /// *of `a'`* across nineteen flights on eight resonances (2026-09-23) — worst on
+    /// the close orbit-raising circles at short leads. That residual is **not**
+    /// subtracted here, because it is not one number. What the repair buys is that
+    /// it is no longer a ladder in the lead — see [`Keyhole::placement_band`], which
+    /// is how a caller is meant to allow for it.
     ///
     /// `None` on the same terms as [`resonant_circle`](Self::resonant_circle), plus
     /// a non-finite or non-positive `a_incoming_true`.
@@ -1144,6 +1152,14 @@ impl OpikFrame {
     /// are the 3:4's, and stand as written because that is the circle they were
     /// measured on; on a circle ten times steeper the same band is a tenth as wide,
     /// which is the point of the change.
+    ///
+    /// **And in that unit the "answer is no" above did not survive (2026-09-23).**
+    /// Re-measured on flown plans with the circles placed on the change,
+    /// `probe_keyhole_placement crowding` finds no dialable miss at 900, 300 or
+    /// 200 d with two doors inside even 51 000 km of `a'`: a second door needs
+    /// ~660 000. Circles that crowd in b-plane km near Earth are the steep ones,
+    /// which are far apart in `a'`. The count stays, because another rock may
+    /// reach it.
     pub fn doors_within_band(
         &self,
         circles: &[ResonantCircle],

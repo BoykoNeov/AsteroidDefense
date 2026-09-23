@@ -100,9 +100,7 @@ inversion `r_p = −c + √(c²+b²)`. **The ξ,ζ frame is now pinned** — `B`
 from Earth's centre toward the incoming asymptote, gravity bends toward `−B̂`,
 with a no-tolerance-games test in `geometry.rs` that walks the inbound branch.
 Headline flown result: **Δv 0.216550 m/s → return to 1 130 km from Earth's
-centre on 2042-12-31T14:33 TDB** on the 3:4 (superseded 2026-09-06 — that was the
-12-iteration stop; the real floor is Δv **0.2165483096 → 1 087 km**, see
-[[keyhole-targeting]], and never round a keyhole Δv); grazing keyhole 0.18 km wide, far
+centre on 2042-12-31T14:33 TDB** on the 3:4; grazing keyhole 0.18 km wide, far
 end 24.92 km. Core suite 211 → 225 tests, and the whole workspace passes with
 `ASTEROID_REQUIRE_KERNELS=1` — see [[kernel-resolver]].
 
@@ -121,8 +119,23 @@ radius.
 **Both loose ends above are now closed:** the `[H]` overlay ran and was seen
 2026-09-05 (see [[godot-visual-layer]]), and the targeting layer that generalises
 the one flown shot is [[keyhole-targeting]] — which also measured how much slack
-the "order-unity" keyhole width carries (~1.6x, conservative). The unbounded
-`ResonantCircle::radius` cull is still open.
+the "order-unity" keyhole width carries (~1.6x, conservative).
+
+**The unbounded `ResonantCircle::radius` is closed too, 2026-09-07 — and the core
+was never at fault.** `resonant_circle` already refuses the degenerate case and a
+9.232e6 km radius (the 15:19, twenty-four lunar distances, ring passing ~3 000 km
+from Earth because it *encloses* the origin) is a true answer. The defect was
+`draw_arc(cc, r, 0, TAU, 256, ...)` in `encounter.gd`, which sizes its
+tessellation in *angle* while the error it commits is in *pixels*: at the
+zoom-in stop that circle is 795 431 px across and the drawn line sat **59.9 px**
+from where the circle is, on a 720 px view. Clipping the arc to the viewport and
+tessellating to a 0.3 px budget gives 0.113 px using **3 points instead of 256** —
+the fix is cheaper than the bug. The old cull also saw only one of the two ways a
+circle can miss the view (it could not see "the whole plot sits inside the ring",
+which is the shape the widest resonances have). Now
+`W:\Claude_projects\AsteroidDefense\godot\scripts\plot_geometry.gd`, tested by
+`godot	ests	est_geometry.gd`. The offline SVG map never had the defect — it
+emits a real `<circle>` inside a clip path.
 
 Still owed: the keyhole-passage probability (the ellipse integrated over the
 locus arc — a 2-D region, not a chord).

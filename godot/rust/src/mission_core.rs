@@ -289,9 +289,12 @@ pub struct KeyholePlanRow {
     /// gradient (`core::keyhole::Keyhole::placement_band`).
     ///
     /// It is per row, not a constant, and that is the 2026-09-08 finding: the
-    /// closed form's placement error is a constant in `a'`, so the *distance* it
-    /// corresponds to is whatever the local gradient makes it — 575 km on the 3:4
-    /// and 57 km on the 2:3, a ten-times-steeper circle on the same encounter.
+    /// closed form's placement error is measured in `a'`, so the *distance* it
+    /// corresponds to is whatever the local gradient makes it — at the shipping
+    /// 51 000 km of `a'`, ~1 950 km on the 3:4 and ~193 km on the 2:3, a
+    /// ten-times-steeper circle on the same encounter. (2026-09-23: the error is
+    /// not *one* number in `a'` either — 2 831 to 46 806 km over nineteen flights —
+    /// so the band is its measured maximum, not a constant being corrected for.)
     pub placement_band_km: f64,
     /// `margin_km − placement_band_km`: kilometres from being inside this door
     /// **once the map's error is allowed for**, negative when the door is within
@@ -5820,7 +5823,7 @@ mod tests {
     /// decision. Kept in step by hand — `test_orrery.gd` is the test that runs
     /// against the real constant, so a drift between the two shows up there as a
     /// changed verdict rather than here as a silent pass.
-    const PLACEMENT_BAND_A_KM: f64 = 15_000.0;
+    const PLACEMENT_BAND_A_KM: f64 = 51_000.0;
 
     /// The 3:4 resonance, by name, for the tests that measure against that circle
     /// specifically rather than against whichever row a ranking returned.

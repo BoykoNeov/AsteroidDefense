@@ -75,10 +75,11 @@
 
 use anise::constants::frames::{EARTH_J2000, SSB_J2000, SUN_J2000};
 use asteroid_core::{
-    aim_at_resonance, along_track_unit, closest_approach, fly_keyhole_shot, refine_keyhole_return,
-    BPlaneEncounter, CircleBranch, EphemerisPerturber, Epoch, ImpactorConfig, KeyholeAim,
-    KeyholeAiming, KeyholeRefineTol, KeyholeShot, KeyholeShotOptions, OpikFrame, RealFieldScenario,
-    Resonance, ResonantCircle, ScanOptions, StateVector, AU_M,
+    aim_at_resonance, along_track_unit, closest_approach, fly_keyhole_shot,
+    incoming_semi_major_axis_flown, refine_keyhole_return, BPlaneEncounter, CircleBranch,
+    EphemerisPerturber, Epoch, ImpactorConfig, KeyholeAim, KeyholeAiming, KeyholeRefineTol,
+    KeyholeShot, KeyholeShotOptions, OpikFrame, RealFieldScenario, Resonance, ResonantCircle,
+    ScanOptions, StateVector, AU_M,
 };
 use nalgebra::{Vector2, Vector3};
 use std::fmt::Write as _;
@@ -102,12 +103,13 @@ const B_MAX_CAPTURE_RADII: f64 = 60.0;
 /// asserts it, so nothing fails when it rots and a reader takes it for current.
 ///
 /// **The shipping constant is no longer a b-plane distance at all.** It is
-/// `sim.gd`'s `KEYHOLE_PLACEMENT_A_KM`, 15 000 km of *semi-major axis*, which each
-/// circle converts through its own gradient — because the map's placement error is
-/// a constant in `a'` and the distance it comes to is whatever the local geometry
-/// makes it. 575 km is what that is on the 3:4, the circle every row in this
-/// probe's tables is measured on; on the 2:3 the same constant is 57 km.
-const SHIPPING_BAND_KM: f64 = 575.0;
+/// `sim.gd`'s `KEYHOLE_PLACEMENT_A_KM`, 51 000 km of *semi-major axis* since
+/// 2026-09-23 (15 000 before), which each circle converts through its own
+/// gradient — because the map's placement error is measured in `a'` and the
+/// distance it comes to is whatever the local geometry makes it. ~1 950 km is what
+/// that is on the 3:4, the circle every row in this probe's tables is measured on;
+/// on the 2:3 the same constant is ~193 km.
+const SHIPPING_BAND_KM: f64 = 1_950.0;
 
 /// The largest door-centre offset any flown door has shown **against the circle
 /// as it was drawn before 2026-09-08**, km — the 200 d 3:4 door. Stale for two
@@ -546,9 +548,10 @@ fn main() {
         "frame" => stage_frame(&args),
         "crowding" => stage_crowding(&args),
         "outgoing" => stage_outgoing(&args),
+        "census" => stage_census(&args),
         other => {
             eprintln!(
-                "unknown stage {other:?}; expected ladder | screen | door | spacing | xi_sweep | frame | crowding | outgoing"
+                "unknown stage {other:?}; expected ladder | screen | door | spacing | xi_sweep | frame | crowding | outgoing | census"
             );
             std::process::exit(2);
         }
@@ -1947,8 +1950,12 @@ fn stage_frame(args: &[String]) {
 //      the evidence.
 //
 // The census is the **readout's**, not this probe's survey census: 2..=7 years,
-// `k ≤ 24`, `b ≤ 60 × capture radius`. A window among circles the frontend does
-// not draw would prove nothing about the frontend's register.
+// `k ≤ 24`, `b ≤ 60 × capture radius`, **placed on the change** with the arriving
+// `a` read off each flight's own arc, and the band in **km of `a'`** converted per
+// circle. A window among circles the frontend does not draw would prove nothing
+// about the frontend's register. (Until 2026-09-23 this stage still built the
+// plain circles and passed a b-plane `band=` in km to a function that had taken
+// metres of `a'` since 2026-09-08 — 500 km of `a'`, ~19 km on the 3:4, silently.)
 //
 // **And the curve is gated on the deflected pass being a miss.** The first run of
 // this stage reported the register firing at three leads — and every one of the
@@ -1981,8 +1988,65 @@ fn stage_frame(args: &[String]) {
 // entitled to assert, and that is what is measured here.
 //
 // ```text
-//   probe_keyhole_placement crowding [lead=<days>] [max_years] [band=<km>]
+//   probe_keyhole_placement crowding [lead=<days>] [max_years] [band_a=<km of a'>]
 // ```
+
+// ---------------------------------------------------------------------------
+// The census as a table — which circle to fly next
+// ---------------------------------------------------------------------------
+
+/// Every circle in the readout's census (2..=`max_years`, `k ≤ 24`,
+/// `b ≤ 60 × capture radius`), both crossings at the nominal ξ: branch, `b`,
+/// `∇a'·n̂` there, and whether the flyby **raises or lowers** `a`. No flights.
+///
+/// Exists because the 6:5 broke the "one number in `a'`" reading on four axes at
+/// once — gradient, branch, direction of the change, and `b` (it is the only
+/// flown circle inside ~2 capture radii) — and the next flight has to be picked
+/// to move one of them alone. This is the table that picks it.
+///
+/// ```text
+///   probe_keyhole_placement census [max_years]
+/// ```
+fn stage_census(args: &[String]) {
+    let max_years: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(7);
+    let s = setup(None);
+    let a_in = s.frame.incoming_semi_major_axis();
+    let circles = s.frame.resonant_circles(
+        2..=max_years.max(2),
+        MAX_REVOLUTIONS,
+        B_MAX_CAPTURE_RADII * s.nominal.capture_radius,
+    );
+    log(&format!(
+        "\n{} circles (2..={} yr, k ≤ {MAX_REVOLUTIONS}, b ≤ {B_MAX_CAPTURE_RADII} capture radii); \
+         incoming a {:.6} AU, capture radius {:.0} km, nominal ξ {:.1} km",
+        circles.len(),
+        max_years.max(2),
+        a_in / AU_M,
+        s.nominal.capture_radius / 1e3,
+        s.xi / 1e3
+    ));
+    log("   h:k  branch   a' (AU)  flyby   b (km)  b/capture  ∇a'·n̂ (m/m)");
+    for c in &circles {
+        for branch in [CircleBranch::Minus, CircleBranch::Plus] {
+            let Ok(aim) = aim_at_resonance(&s.frame, c.resonance, s.xi, branch) else {
+                continue;
+            };
+            let n_hat = (aim.target - Vector2::new(0.0, c.center_zeta)).normalize();
+            let grad_n = s.frame.gradient_semi_major_axis(aim.target).dot(&n_hat);
+            log(&format!(
+                "  {:>2}:{:<2} {:>6}  {:.6}  {:>6}  {:8.0}  {:6.2}  {:10.1}",
+                c.resonance.h,
+                c.resonance.k,
+                format!("{branch:?}"),
+                c.a_prime / AU_M,
+                if c.a_prime > a_in { "raises" } else { "lowers" },
+                aim.impact_parameter_m / 1e3,
+                aim.impact_parameter_m / s.nominal.capture_radius,
+                grad_n
+            ));
+        }
+    }
+}
 
 /// Δv span the coarse curve covers, m/s, and its resolution.
 ///
@@ -2004,6 +2068,9 @@ const CROWD_CONFIRM_SAMPLES: usize = 4;
 /// Free — no flights — so this is set by the narrowest window worth finding
 /// rather than by cost.
 const CROWD_SCAN_POINTS: usize = 40_000;
+/// Default band, km of `a'` — `sim.gd`'s `KEYHOLE_PLACEMENT_A_KM`. Mirrored so a
+/// bare run asks the shipping question; `band_a=` asks any other.
+const CROWD_DEFAULT_BAND_A_KM: f64 = 51_000.0;
 
 /// One flown rung of the plan curve.
 #[derive(Clone, Copy)]
@@ -2011,6 +2078,10 @@ struct CurvePoint {
     dv: f64,
     point: nalgebra::Vector2<f64>,
     b_m: f64,
+    /// The heliocentric `a` this flight **arrived** on, read off its own arc at
+    /// 10 Earth Hill radii — what the frontend places its circles with, so the
+    /// census is this flight's and not the nominal's.
+    a_in: f64,
     /// The deflected pass misses Earth. A crowded point that still impacts is not
     /// an answer to this question — see the stage doc.
     is_miss: bool,
@@ -2019,30 +2090,52 @@ struct CurvePoint {
 fn stage_crowding(args: &[String]) {
     let (lead, args) = take_lead(args);
     let max_years: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(7);
-    let band_km: f64 = args
+    // `band=` was b-plane kilometres and read as metres of `a'` for a fortnight
+    // after `doors_within_band` changed unit — 500 km of `a'`, ~19 km on the 3:4,
+    // with nothing to say so. Refused outright rather than reinterpreted.
+    if args.iter().any(|a| a.starts_with("band=")) {
+        eprintln!(
+            "`band=` (b-plane km) is retired: the band is km of a' now, \
+             `band_a=<km>` (shipping {CROWD_DEFAULT_BAND_A_KM:.0})"
+        );
+        std::process::exit(2);
+    }
+    let band_a_km: f64 = args
         .iter()
-        .filter_map(|a| a.strip_prefix("band=").and_then(|s| s.parse::<f64>().ok()))
+        .filter_map(|a| {
+            a.strip_prefix("band_a=")
+                .and_then(|s| s.parse::<f64>().ok())
+        })
         .next()
-        .unwrap_or(500.0);
-    let band = band_km * 1e3;
+        .unwrap_or(CROWD_DEFAULT_BAND_A_KM);
+    let band_a = band_a_km * 1e3;
 
     let s = setup(Some(lead.unwrap_or(900.0)));
     let ds = s.scenario.deflection().expect("deflection");
-    // The frontend's census, exactly: `MissionCore::keyhole_readout` calls
-    // `resonant_circles(2..=max_years, 24, 60 × capture_radius)`.
-    let circles = s.frame.resonant_circles(
-        2..=max_years.max(2),
-        MAX_REVOLUTIONS,
-        B_MAX_CAPTURE_RADII * s.nominal.capture_radius,
-    );
+    let eph = s.scenario.ephemeris().clone();
+    let mu_sun = eph.sun_gm_m3_s2().expect("sun GM");
+    let earth = EphemerisPerturber::new(eph.clone(), EARTH_J2000);
+    let sun = EphemerisPerturber::new(eph.clone(), SUN_J2000);
+    let impact = s.scenario.impact_epoch();
+    // The frontend's census, exactly: `MissionCore::plan_circles` calls
+    // `resonant_circles_on_change(2..=max_years, 24, 60 × capture_radius, a_in)`
+    // with `a_in` read off the plan's own flown arc. So the census here is a
+    // function of the arriving orbit, and every flown rung carries its own.
+    let b_max = B_MAX_CAPTURE_RADII * s.nominal.capture_radius;
+    let years = 2..=max_years.max(2);
+    let census = |a_in: f64| {
+        s.frame
+            .resonant_circles_on_change(years.clone(), MAX_REVOLUTIONS, b_max, a_in)
+    };
     log(&format!(
-        "\n{} circles in the readout's own census (2..={} yr, k ≤ {}, b ≤ {:.0} km); \
-         band {:.0} km\nlead {:.1} d, Δv {:.2} .. {:.2} m/s in {} rungs per direction",
-        circles.len(),
+        "\n{} circles in the readout's own census (2..={} yr, k ≤ {}, b ≤ {:.0} km), \
+         placed on the change; band {:.0} km of a' (each circle converts it through \
+         its own gradient)\nlead {:.1} d, Δv {:.2} .. {:.2} m/s in {} rungs per direction",
+        census(s.frame.incoming_semi_major_axis()).len(),
         max_years.max(2),
         MAX_REVOLUTIONS,
-        B_MAX_CAPTURE_RADII * s.nominal.capture_radius / 1e3,
-        band_km,
+        b_max / 1e3,
+        band_a_km,
         s.lead_days,
         CROWD_DV_LO,
         CROWD_DV_HI,
@@ -2057,35 +2150,44 @@ fn stage_crowding(args: &[String]) {
     let t0 = Instant::now();
     let mut flights = 0usize;
 
-    // One flight: impulse, flyby, b-plane point. `None` is the scan gate.
+    // One flight: impulse, flyby, b-plane point, and the orbit it arrived on.
+    // `None` is the scan gate, or an arc with no arriving orbit to read.
     let fly = |dv_signed: f64| -> Option<CurvePoint> {
         let dir = prograde * dv_signed.signum();
-        match ds.evaluate(s.deflection_epoch, dir * dv_signed.abs()) {
-            Ok(Some(enc)) => Some(CurvePoint {
-                dv: dv_signed,
-                point: s.frame.project(&enc.b_vector),
-                b_m: enc.impact_parameter,
-                is_miss: !enc.is_hit(),
-            }),
-            _ => None,
-        }
+        let Ok((clock, Some(enc))) =
+            ds.deflected_trajectory(s.deflection_epoch, dir * dv_signed.abs())
+        else {
+            return None;
+        };
+        let a_in =
+            incoming_semi_major_axis_flown(&clock, &earth, &sun, mu_sun, impact)?.semi_major_axis_m;
+        Some(CurvePoint {
+            dv: dv_signed,
+            point: s.frame.project(&enc.b_vector),
+            b_m: enc.impact_parameter,
+            a_in,
+            is_miss: !enc.is_hit(),
+        })
     };
-    let count_at = |p: nalgebra::Vector2<f64>| s.frame.doors_within_band(&circles, p, band);
-    // The **second** smallest margin in the census — the number that decides
-    // whether a band can name one resonance, and the one a negative result has to
-    // quote. `f64::INFINITY` when the census has fewer than two circles.
-    let runner_up = |p: nalgebra::Vector2<f64>| -> f64 {
-        let mut m: Vec<f64> = s
+    // At one point: how many doors the band covers, and the band two doors would
+    // need — the **second** smallest `margin × |∇a'|`, in metres of `a'`, because
+    // that is exactly what `doors_within_band` compares against `band_a`. A
+    // negative result has to quote it. One census build per point, not two.
+    let assess = |p: nalgebra::Vector2<f64>, a_in: f64| -> (usize, f64) {
+        let circles = census(a_in);
+        let count = s.frame.doors_within_band(&circles, p, band_a);
+        let mut need: Vec<f64> = s
             .frame
             .keyhole_proximities(&circles, p)
             .into_iter()
-            .map(|k| k.margin())
+            .map(|k| k.margin().max(0.0) * k.keyhole.gradient.norm())
             .collect();
-        m.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
-        m.get(1).copied().unwrap_or(f64::INFINITY)
+        need.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        (count, need.get(1).copied().unwrap_or(f64::INFINITY))
     };
-    let rows_at = |p: nalgebra::Vector2<f64>| -> Vec<(String, f64, f64, f64)> {
-        let mut v: Vec<(String, f64, f64, f64)> = s
+    let rows_at = |p: nalgebra::Vector2<f64>, a_in: f64| -> Vec<(String, f64, f64, f64, f64)> {
+        let circles = census(a_in);
+        let mut v: Vec<(String, f64, f64, f64, f64)> = s
             .frame
             .keyhole_proximities(&circles, p)
             .into_iter()
@@ -2095,18 +2197,19 @@ fn stage_crowding(args: &[String]) {
                     k.signed_distance,
                     k.keyhole.width,
                     k.margin(),
+                    k.exposure(band_a),
                 )
             })
             .collect();
-        v.sort_by(|a, b| a.3.partial_cmp(&b.3).expect("finite"));
+        v.sort_by(|a, b| a.4.partial_cmp(&b.4).expect("finite"));
         v
     };
 
     let mut best_flown: Option<(CurvePoint, usize)> = None;
     let mut windows: Vec<(f64, f64, f64, usize)> = Vec::new();
     // The nearest this lead's curve ever comes to crowded, over misses only:
-    // `(second-smallest margin, Δv, point)`. A "not reachable" that does not say
-    // by how much is not a measurement.
+    // `(band in metres of a' two doors would need, Δv, point)`. A "not
+    // reachable" that does not say by how much is not a measurement.
     let mut closest = (f64::INFINITY, f64::NAN, nalgebra::Vector2::zeros());
 
     for sign in [-1.0_f64, 1.0] {
@@ -2132,29 +2235,36 @@ fn stage_crowding(args: &[String]) {
             continue;
         }
         let impacting = curve.iter().filter(|p| !p.is_miss).count();
-        let flown_counts: Vec<usize> = curve
+        let flown: Vec<(usize, f64)> = curve
             .iter()
-            .map(|p| if p.is_miss { count_at(p.point) } else { 0 })
+            .map(|p| {
+                if p.is_miss {
+                    assess(p.point, p.a_in)
+                } else {
+                    (0, f64::INFINITY)
+                }
+            })
             .collect();
-        for p in curve.iter().filter(|p| p.is_miss) {
-            let r = runner_up(p.point);
-            if r < closest.0 {
-                closest = (r, p.dv, p.point);
+        for (p, (_, need)) in curve.iter().zip(&flown) {
+            if *need < closest.0 {
+                closest = (*need, p.dv, p.point);
             }
         }
         log(&format!(
             "  {} curve: {} rungs flown ({impacting} still impacting, not counted), \
-             b {:.0} .. {:.0} km, ξ {:.0} .. {:.0} km; doors in band at the rungs \
-             themselves: max {}",
+             b {:.0} .. {:.0} km, ξ {:.0} .. {:.0} km, arriving a {:.6} .. {:.6} AU; \
+             doors in band at the rungs themselves: max {}",
             if sign < 0.0 { "retrograde" } else { "prograde" },
             curve.len(),
             curve.first().expect("nonempty").b_m / 1e3,
             curve.last().expect("nonempty").b_m / 1e3,
             curve.first().expect("nonempty").point.x / 1e3,
             curve.last().expect("nonempty").point.x / 1e3,
-            flown_counts.iter().max().copied().unwrap_or(0)
+            curve.first().expect("nonempty").a_in / AU_M,
+            curve.last().expect("nonempty").a_in / AU_M,
+            flown.iter().map(|f| f.0).max().unwrap_or(0)
         ));
-        for (p, c) in curve.iter().zip(&flown_counts) {
+        for (p, (c, _)) in curve.iter().zip(&flown) {
             if *c >= 2 && best_flown.as_ref().is_none_or(|(_, bc)| c > bc) {
                 best_flown = Some((*p, *c));
             }
@@ -2162,14 +2272,15 @@ fn stage_crowding(args: &[String]) {
 
         // --- 2. the free scan between the rungs ------------------------------
         //
-        // Linear in log Δv between the two bracketing flown rungs. The curve is
+        // Linear in log Δv between the two bracketing flown rungs — the point
+        // *and* the arriving `a`, since the census moves with it. The curve is
         // smooth and the rungs are ~9 % apart, so this is an interpolation of
         // *flown* points and never an extrapolation — but it is still only a
         // pointer to where to fly next, never evidence.
         // `None` where either bracketing rung still impacts: the miss/impact
         // boundary is a real edge of the interpolation's validity, not a place to
         // average across.
-        let at = |dv_abs: f64| -> Option<nalgebra::Vector2<f64>> {
+        let at = |dv_abs: f64| -> Option<(nalgebra::Vector2<f64>, f64)> {
             let i = curve
                 .partition_point(|r| r.dv.abs() < dv_abs)
                 .clamp(1, curve.len() - 1);
@@ -2178,7 +2289,10 @@ fn stage_crowding(args: &[String]) {
                 return None;
             }
             let t = (dv_abs.ln() - lo.dv.abs().ln()) / (hi.dv.abs().ln() - lo.dv.abs().ln());
-            Some(lo.point + t * (hi.point - lo.point))
+            Some((
+                lo.point + t * (hi.point - lo.point),
+                lo.a_in + t * (hi.a_in - lo.a_in),
+            ))
         };
         let lo_dv = curve.first().expect("nonempty").dv.abs();
         let hi_dv = curve.last().expect("nonempty").dv.abs();
@@ -2186,16 +2300,15 @@ fn stage_crowding(args: &[String]) {
         for i in 0..CROWD_SCAN_POINTS {
             let t = i as f64 / (CROWD_SCAN_POINTS - 1) as f64;
             let dv = lo_dv * (hi_dv / lo_dv).powf(t);
-            let Some(p) = at(dv) else {
+            let Some((p, a_in)) = at(dv) else {
                 if let Some(r) = run.take() {
                     windows.push((sign * r.0, sign * r.1, 0.0, r.2));
                 }
                 continue;
             };
-            let c = count_at(p);
-            let r = runner_up(p);
-            if r < closest.0 {
-                closest = (r, sign * dv, p);
+            let (c, need) = assess(p, a_in);
+            if need < closest.0 {
+                closest = (need, sign * dv, p);
             }
             match (&mut run, c >= 2) {
                 (None, true) => run = Some((dv, dv, c)),
@@ -2256,10 +2369,14 @@ fn stage_crowding(args: &[String]) {
                 log(&format!("  candidate Δv {dv:+.6}: left the scan gate"));
                 continue;
             };
-            let c = if p.is_miss { count_at(p.point) } else { 0 };
+            let c = if p.is_miss {
+                assess(p.point, p.a_in).0
+            } else {
+                0
+            };
             log(&format!(
                 "  candidate Δv {dv:+.10} m/s → b {:.1} km, (ξ {:.1}, ζ {:.1}) km, {}, \
-                 doors in the {band_km:.0} km band: {c}",
+                 doors in the {band_a_km:.0} km-of-a' band: {c}",
                 p.b_m / 1e3,
                 p.point.x / 1e3,
                 p.point.y / 1e3,
@@ -2277,7 +2394,8 @@ fn stage_crowding(args: &[String]) {
     }
 
     log(&format!(
-        "\n=== CROWDED REGISTER, LEAD {:.0} d === ({flights} flights in {:.0} s)",
+        "\n=== CROWDED REGISTER, LEAD {:.0} d, BAND {band_a_km:.0} km OF a' === \
+         ({flights} flights in {:.0} s)",
         s.lead_days,
         t0.elapsed().as_secs_f64()
     ));
@@ -2285,45 +2403,49 @@ fn stage_crowding(args: &[String]) {
         Some((dv, p, c)) => {
             log(&format!(
                 "FIRES on a flown plan: lead {:.0} d, Δv {:+.10} m/s → b {:.1} km at \
-                 (ξ {:.1}, ζ {:.1}) km, {c} doors inside the {band_km:.0} km band.\n\
+                 (ξ {:.1}, ζ {:.1}) km, arriving a {:.6} AU, {c} doors inside the \
+                 {band_a_km:.0} km-of-a' band.\n\
                  The panel cannot name one resonance here. This does NOT say {c} impact \
                  keyholes exist at that point — that needs a return flown and both edges \
                  bisected per door, which this stage does not do.\n\
-                 The rows, by margin:",
+                 The rows, by exposure (margin minus that circle's own band):",
                 s.lead_days,
                 dv,
                 p.b_m / 1e3,
                 p.point.x / 1e3,
-                p.point.y / 1e3
+                p.point.y / 1e3,
+                p.a_in / AU_M
             ));
             log(&format!(
                 "    (b {:.1} km against a {:.1} km capture radius, so this really is a \
-                 miss; the runner-up margin's best anywhere on this curve is {:.1} km)",
+                 miss; the smallest band that puts two doors in reach anywhere on this \
+                 curve is {:.0} km of a')",
                 p.b_m / 1e3,
                 s.nominal.capture_radius / 1e3,
                 closest.0 / 1e3
             ));
-            for (name, d, w, m) in rows_at(p.point).iter().take(6) {
+            for (name, d, w, m, e) in rows_at(p.point, p.a_in).iter().take(6) {
                 log(&format!(
-                    "    {name:>6}  d {:+10.1} km  width {:8.3} km  margin {:+10.1} km{}",
+                    "    {name:>6}  d {:+10.1} km  width {:8.3} km  margin {:+10.1} km  \
+                     exposure {:+10.1} km{}",
                     d / 1e3,
                     w / 1e3,
                     m / 1e3,
-                    if *m <= band { "  ← in the band" } else { "" }
+                    e / 1e3,
+                    if *e <= 0.0 { "  ← in the band" } else { "" }
                 ));
             }
         }
         None if windows.is_empty() => log(&format!(
             "NOT REACHABLE at this lead: no point of the dialable curve that is a MISS, \
              flown or interpolated, has two doors inside the band.\n\
-             How close it came: the runner-up door's smallest margin anywhere on the \
-             curve is {:.1} km, at Δv {:+.6} m/s, (ξ {:.1}, ζ {:.1}) km — so a band of \
-             {:.0} km would have been needed here against the {band_km:.0} km asked for.",
+             How close it came: the smallest band that puts a second door in reach \
+             anywhere on the curve is {:.0} km of a', at Δv {:+.6} m/s, \
+             (ξ {:.1}, ζ {:.1}) km — against the {band_a_km:.0} km asked for.",
             closest.0 / 1e3,
             closest.1,
             closest.2.x / 1e3,
             closest.2.y / 1e3,
-            closest.0 / 1e3
         )),
         None => log(
             "UNCONFIRMED: the closed-form scan finds windows on this curve but no flight \
@@ -2583,9 +2705,23 @@ fn stage_outgoing(args: &[String]) {
 
         let t10 = ca.epoch.shifted_by_seconds(10.0 * 86_400.0);
         let seed10 = clock.state_at(t10).expect("state 10 d after CA");
+        // Long enough for the latest window below: the half-revolution-shifted
+        // mean closes at `SETTLE_DAYS + 1.5` periods. A fixed 500 d arc covered
+        // every orbit that shrinks at the flyby and ran out on the 6:5, which
+        // leaves on a 438 d orbit and needs ~690 d.
+        let period_days = std::f64::consts::TAU * (a_closed.powi(3) / mu_sun).sqrt() / 86_400.0;
+        let onward_days = (SETTLE_DAYS + 1.5 * period_days)
+            .max(SETTLE_LATE_DAYS + period_days)
+            .max(SAMPLE_DAYS[SAMPLE_DAYS.len() - 1])
+            + 30.0;
         let onward = s
             .scenario
-            .propagate_free(t10, seed10, 10.0 * 86_400.0, 50)
+            .propagate_free(
+                t10,
+                seed10,
+                10.0 * 86_400.0,
+                (onward_days / 10.0).ceil() as u32,
+            )
             .expect("post-encounter arc");
         let osculating = |t: Epoch| {
             let st = onward.state_at(t).expect("post-encounter state");

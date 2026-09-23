@@ -269,14 +269,14 @@ Read this table first, then the session that owns the layer you are touching.
    mass budgets) is already built, in `core/src/launch_vehicle.rs` and the `[M]`
    readout. What is actually left there is orbital assembly, standing defence
    systems, and multi-mission campaigns. **Multi-mission campaigns: core DONE
-   2026-09-23** — chained impulses, a planner, and a real-field composition that
-   flies its own answer: **6 Falcon Heavy (expendable) launches** on the shipping
-   grid, retrograde — optimistic on mass (no bus or propellant yet), not a floor
-   (a coarser grid said 10). Ranking by Δv alone was wrong (the shift per launch
-   is Δv × lead), and so was ranking one push direction only. See *Several
-   launches against one rock*. Next in order: the campaign on the `[4]` map, then
-   the payload mass budget (turns the floor into an estimate), then orbital
-   assembly.
+   2026-09-23, on the `[4]` map the same day** — chained impulses, a planner, and
+   a real-field composition that flies its own answer. The launch cap is now
+   **launches per year** (it was per grid row, so a finer map allowed more):
+   **7 Falcon Heavy (expendable) launches at 2 or 3 a year, 6 at 4+, unreachable
+   at 1** on the shipping grid, retrograde — optimistic on mass (no bus or
+   propellant yet), not a floor. `[C]` on the map shows it. See *Several launches
+   against one rock* and *The campaign on the map*. Next in order: the payload
+   mass budget, then orbital assembly.
 
 ---
 
@@ -5756,3 +5756,91 @@ exposes it.
   it over a span of time (launches per N days) before the frontend knob.
 - The candidate count (6) is itself a knob that can only make the answer worse by
   being small; not yet swept.
+
+### The campaign on the map, and a launch cap measured in years - 2026-09-23 session (Phase 3: the `[4]` campaign readout)
+
+The last batch left the campaign in the core with one known defect in its only
+knob: the cap was **per launch date**, and a launch date was a grid row, so the
+same number allowed ~5× more launches a year on the 120×120 map (dates 26 d apart)
+than on a 24×24 one (133 d). This batch redefines the cap as **launches per year**
+and puts the campaign on the launch-window map.
+
+**Headline (Falcon Heavy expendable, shipping 120×120 grid): 7 launches at 2 or 3
+a year, 6 at 4 or more; at 1 a year no plan reaches the safe line** (the best gets
+`|B|` 23 914 of 25 955 km). The old "6 at any cap 2..10 per date" is superseded:
+a per-date cap of 3 on 120 rows was ~40 launches a year of allowance.
+
+#### The definition, and why this one
+
+- **Years of fixed length (Julian), counted from the grid's first launch date.**
+  Every window carries a period index; `plan_campaign` caps launches per period,
+  across all windows in it (`core/src/campaign.rs`). A per-period cap is a
+  *partition* constraint, so taking the largest shifts first is still the fewest
+  launches for a fixed push direction - pinned by a second brute-force test with
+  windows sharing years (one year holding two same-direction windows, one holding
+  a pair of opposite ones).
+- **Not a rolling window** ("at most N in any 365 days"), though that is the more
+  physical rule: it is not a partition, and a greedy fill can then take one strong
+  window that blocks two neighbours worth more together (three dates 20 days
+  apart, cap 1 per 30 days, is enough to break it). It would need a real search.
+- **Candidates: each year's best window per push direction, all of them** - up to
+  18 flights on the shipping grid, ~4 min on a worker (233 s measured in the
+  frontend) - not a top few. A low rate needs many years, and a year never flown
+  would read as "unreachable". The rate knob then replans by arithmetic, free.
+- **The model a reader should know:** a year's launches all go through that year's
+  best window (a rate, not a pad count); the last year is partial (the launch
+  axis spans 8.40 yr, so year 9 is 0.4 yr) and still gets the full cap; and two
+  good dates either side of a year boundary can each take the full cap, i.e. up
+  to `2N` launches within weeks.
+
+#### What was measured (`probe_campaign_rate_cap`, ignored; run by hand)
+
+- **The anchor barely matters.** Shifting where year 1 starts by 0 / 3 / 6 / 9
+  months on the shipping grid: **7 / 7 / 6 / 7** launches at 2 a year, 6 at every
+  shift from 4 a year up. The advisor's bar was "more than about one launch means
+  fixed years are the wrong definition"; it moves by one.
+- **The remaining grid dependence is window quality, not capacity.** All three
+  grids now have the same 9 years of allowance. At 2 a year: **7** (120×120),
+  **9** (60×60), **14** (24×24); at 10 a year 6 / 8 / 9. A coarser grid simply
+  finds weaker windows: the best retrograde window moves the rock **4 094 km per
+  launch at 120 rows, 3 160 at 60, 2 218 at 24**. Whether 120 is converged is not
+  known - 60 → 120 still gained 30 % - and that is the "pessimistic on search"
+  half of the count, not a flaw in the cap.
+- **Flown whole** (end-to-end test at 2 a year, and the frontend harness): the
+  7-launch plan misses with perigee **21 497 km**, **2.3e-4** of its reach off the
+  summed prediction; most exposed keyhole the 7:11, 647 km outside its band. With
+  all 18 windows now flown, the ranking proxy's spread per direction widened to
+  8.2 % (prograde) / 22.9 % (retrograde) - it ranks within a year, where it is
+  only asked to pick one cell, so the looser spread is tolerated (test bar 50 %).
+  A later impactor now meets a rock up to 3 121 km off its nominal (5.5 yr out),
+  ~0.064 m/s of re-aim against an 8.7 km/s arrival: still negligible, recorded.
+- **Atlas V 551 (the map's default launcher) cannot do it at 2 a year**: 18
+  launches, every year's best retrograde window at the cap, reach `|B|` 20 180 of
+  25 954 km. The panel prints that as an answer, not an error.
+
+#### The frontend
+
+- `[C]` on the `[4]` map swaps the cell readout for the campaign. `[E]` measures
+  (minutes; the first flight of the plan fires by itself when it lands) and then
+  flies the plan at the dialled rate; `[Z]`/`[X]` step the rate 1..12 a year,
+  free. The map draws the year boundaries (dashed, labelled) and every flown
+  window, with the used ones boxed and their launch count beside them.
+- The count line always carries its rate; the flight line is greyed ("LAST FLIGHT
+  WAS AT 3/YR") when the rate or launcher moves off the plan it flew; the keyhole
+  row reads the same `most_exposed_keyhole` row and band as the planner. `[M]` is
+  inert while the campaign is up; `[L]` makes a held campaign another launcher's
+  rather than showing it as this one's.
+- Binding: `begin_campaign` / `campaign_plan(rate)` / `begin_campaign_flight` /
+  `campaign_flight`, two new worker channels, both dropped with the grid and the
+  scenario. Core split: `measure_campaign_candidates` (the expensive,
+  rate-independent half), `CampaignCandidates::plan`, `fly_campaign_plan`.
+- Harness: `godot/tests/_campaign_shot.gd` (drives the real keys, asserts no year
+  exceeds the rate, screenshots to `W:\temp\claude\AsteroidDefense\shots\campaign_*.png`).
+
+#### What this leaves
+
+- **The payload mass budget** (bus + propellant out of delivered mass) - still the
+  biggest known optimism in every count here.
+- **Grid convergence of window quality**: a 240×240 run would say whether 120 rows
+  still leaves better windows unfound.
+- Orbital assembly against this baseline.

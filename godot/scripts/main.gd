@@ -305,6 +305,22 @@ func _input(event: InputEvent) -> void:
 		Sim.cycle_pork_vehicle()
 	elif pork.visible and event.is_action_pressed("pork_metric"):
 		Sim.cycle_pork_metric()
+	# [C] swaps the readout between the cursor cell and the launch campaign. While
+	# the campaign is up, [E] keeps its meaning across the project - "stop estimating
+	# and go measure it" - so it measures the windows or flies the plan, and [Z]/[X]
+	# step the launch rate (the b-plane view's knob pair, so a knob is the same keys
+	# wherever it lives). [M] is inert there: the panel it would answer is not shown.
+	elif pork.visible and event.is_action_pressed("pork_campaign"):
+		Sim.pork_campaign_open = not Sim.pork_campaign_open
+		Sim.porkchop_changed.emit()
+	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_rate_down"):
+		Sim.adjust_campaign_rate(-1)
+	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_rate_up"):
+		Sim.adjust_campaign_rate(1)
+	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_verify"):
+		Sim.request_campaign_step()
+	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_required_mass"):
+		pass
 	elif pork.visible and event.is_action_pressed("pork_verify"):
 		Sim.request_cell_verify()
 	# [M] is shared with the planner toggle, and resolved the same way the arrows

@@ -25,7 +25,9 @@ extends Control
 ## lines in this view come from the real n-body field, and both are labelled: the
 ## [E] verdict (does this launcher clear the capture disc through this window) and
 ## the [M] requirement (what mass would). They are the question and its follow-up —
-## [E] can say no, only [M] can say by how much.
+## [E] can say no, only [M] can say by how much. [C] swaps in a third reading, the
+## launch campaign (how many launches at a dialled rate per year), whose shifts and
+## flight line are the real field too; its count is arithmetic on those shifts.
 ##
 ## Pure display: it owns no orbital mechanics. The grid columns, the cursor
 ## readout and the verdict all arrive from `Sim`, which marshals them from the
@@ -196,8 +198,13 @@ func _draw() -> void:
 	_draw_cells(plot)
 	_draw_axes(plot, mid, dim, faint)
 	_draw_cursor(plot, bright)
+	if Sim.pork_campaign_open:
+		_draw_campaign_overlay(plot, bright, dim, faint)
 	_draw_legend(plot, mid, dim, faint)
-	_draw_panel(Vector2(w * PANEL_X_FRACTION, h - PANEL_H), bright, mid, dim, faint)
+	if Sim.pork_campaign_open:
+		_draw_campaign_panel(Vector2(w * PANEL_X_FRACTION, h - PANEL_H), bright, mid, dim, faint)
+	else:
+		_draw_panel(Vector2(w * PANEL_X_FRACTION, h - PANEL_H), bright, mid, dim, faint)
 
 
 ## The heatmap proper: x = arrival date, y = launch date (the two axes the core
@@ -382,10 +389,120 @@ func _draw_panel(origin: Vector2, bright: Color, mid: Color, dim: Color, faint: 
 
 
 func _draw_keys(pos: Vector2, dim: Color) -> void:
-	_t(pos, "[ARROWS] SELECT WINDOW  [L] LAUNCHER  [D] METRIC  [E] VERIFY  [M] REQUIRED MASS  [1] BACK",
+	_t(pos, "[ARROWS] WINDOW  [L] LAUNCHER  [D] METRIC  [E] VERIFY  [M] REQUIRED MASS  [C] CAMPAIGN  [1] BACK",
 		dim, _fs - 2)
 	_t(pos + Vector2(0.0, _fs + 4.0),
 		"PATCHED-CONIC PLANNING ESTIMATES - ONLY THE [E] AND [M] LINES ARE THE REAL FIELD",
+		Color(0.30, 0.30, 0.30), _fs - 3)
+
+
+# -------------------------------------------------------------- campaign ---
+#
+# [C] swaps the readout for the launch campaign: how many launches of this rocket,
+# through which windows, at the launch rate dialled on [Z]/[X]. The rate is per
+# YEAR, and the years are drawn on the map, because that is the whole definition —
+# the cap used to be per launch date, i.e. per grid row, and a finer grid quietly
+# allowed more launches a year.
+
+
+## The years, every window flown, and the ones the plan uses with their counts.
+## Drawn only for a campaign measured for the selected launcher: another rocket's
+## windows on this rocket's map would be a picture of a different plan.
+func _draw_campaign_overlay(plot: Rect2, bright: Color, dim: Color, faint: Color) -> void:
+	var c: Dictionary = Sim.pork_campaign
+	if not Sim.pork_campaign_is_current_vehicle() or Sim.pork_rows < 2:
+		return
+	var cw := plot.size.x / float(Sim.pork_cols)
+	var ch := plot.size.y / float(Sim.pork_rows)
+	var t0: float = Sim.pork_launch_tdb[0]
+	var dt: float = Sim.pork_launch_tdb[1] - t0
+	# Year boundaries, where a launch date crosses from one year's allowance into
+	# the next. A date sits at its row's centre, so a boundary between two dates
+	# lands between their rows.
+	for k in range(int(c.period_count) + 1):
+		var tb: float = float(c.period_origin_tdb) + k * float(c.period_s)
+		var y := plot.position.y + ((tb - t0) / dt + 0.5) * ch
+		if y < plot.position.y or y > plot.end.y:
+			continue
+		var x := plot.position.x
+		while x < plot.end.x:
+			draw_line(Vector2(x, y), Vector2(minf(x + 6.0, plot.end.x), y), faint, 1.0)
+			x += 12.0
+		if k < int(c.period_count):
+			_t(Vector2(plot.end.x - 40.0, y + 12.0), "YR %d" % (k + 1), dim, _fs - 4)
+	for w: Dictionary in c.windows:
+		var p := plot.position + Vector2(int(w.arrival_index) * cw, int(w.launch_index) * ch)
+		var r := Rect2(p - Vector2(2, 2), Vector2(cw + 4.0, ch + 4.0))
+		var n := int(w.launches)
+		if n <= 0:
+			draw_rect(r, dim, false, 1.0)
+			continue
+		draw_rect(r.grow(1.0), bright, false, 2.0)
+		_t(Vector2(r.end.x + 4.0, r.position.y + ch + 2.0), "%dX" % n, bright, _fs - 2)
+
+
+func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color, faint: Color) -> void:
+	var lh := _fs + 5.0
+	var x := origin.x
+	var y := origin.y
+	var col2 := x + _font.get_string_size(
+		"LAUNCH CAMPAIGN  FALCON HEAVY (EXPENDABLE)  ", HORIZONTAL_ALIGNMENT_LEFT, -1, _fs).x
+	_t(Vector2(x, y), "LAUNCH CAMPAIGN  %s" % Sim.pork_vehicle_name(), bright)
+	_t(Vector2(col2, y), "RATE  UP TO %d LAUNCH%s A YEAR" % [
+		Sim.pork_campaign_rate, "" if Sim.pork_campaign_rate == 1 else "ES"], bright)
+	y += lh
+
+	var current := Sim.pork_campaign_is_current_vehicle()
+	if Sim.pork_campaign_solving:
+		_t(Vector2(x, y), "FLYING EACH YEAR'S BEST WINDOW IN THE FULL FIELD - A FEW MINUTES ...", mid)
+		y += lh
+	elif not current:
+		var msg := "[E] MEASURE: FLY EACH YEAR'S BEST WINDOW ONCE (A FEW MINUTES)"
+		if not Sim.pork_campaign.is_empty():
+			msg = "[E] MEASURE (LAST CAMPAIGN WAS FOR ANOTHER LAUNCHER)"
+		_t(Vector2(x, y), msg, dim)
+		y += lh
+	else:
+		var planned := str(Sim.pork_campaign.outcome) == "planned"
+		_t(Vector2(x, y), Sim.campaign_count_label(), bright if planned else mid)
+		y += lh
+		_t(Vector2(x, y), Sim.campaign_windows_label(), mid, _fs - 1)
+		y += lh
+		# The flight line. The count above is arithmetic on one flight per window;
+		# this is the plan flown whole, and it is greyed the moment the rate or the
+		# launcher moves off the plan it flew.
+		var fl := "[E] FLY THIS PLAN WHOLE IN THE FULL N-BODY FIELD"
+		var fl_col := dim
+		if Sim.pork_campaign_flying:
+			fl = "FLYING THE WHOLE PLAN IN THE FULL FIELD ..."
+			fl_col = mid
+		elif Sim.pork_campaign_flight_is_current():
+			fl = "FULL-FIELD FLIGHT:  " + Sim.campaign_flight_label()
+			fl_col = bright
+		elif not planned:
+			fl = "NOTHING TO FLY AT THIS RATE - [X] RAISES IT"
+		elif not Sim.pork_campaign_flight().is_empty():
+			fl = "[E] FLY (LAST FLIGHT WAS AT %d/YR)" % int(
+				Sim.pork_campaign_flight().launches_per_year)
+		y += lh * 0.3
+		_t(Vector2(x, y), fl, fl_col)
+		y += lh
+		if Sim.pork_campaign_flight_is_current():
+			var kh := Sim.campaign_keyhole_label()
+			_t(Vector2(x, y), kh, bright if kh.begins_with("**") and Sim.blink(1.4) else mid)
+			y += lh
+
+	y += lh * 0.3
+	_t(Vector2(x, y), "OPTIMISTIC ON MASS: DELIVERED MASS COUNTED AS IMPACTOR, NO BUS OR PROPELLANT", faint,
+		_fs - 3)
+	y += lh - 3.0
+	_t(Vector2(x, y), "ONE WINDOW PER YEAR AND PUSH DIRECTION; A YEAR'S LAUNCHES SHARE IT; YEARS FROM THE FIRST DATE",
+		faint, _fs - 3)
+	y += lh
+	_t(Vector2(x, y), "[Z]/[X] LAUNCHES PER YEAR  [E] MEASURE / FLY  [L] LAUNCHER  [C] WINDOW READOUT  [1] BACK",
+		dim, _fs - 2)
+	_t(Vector2(x, y + _fs + 4.0),
+		"THE COUNT IS ARITHMETIC ON ONE FULL-FIELD FLIGHT PER WINDOW - THE FLIGHT LINE CHECKS IT",
 		Color(0.30, 0.30, 0.30), _fs - 3)
 
 

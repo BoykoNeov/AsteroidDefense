@@ -466,6 +466,22 @@ var pork_verifying := false              # the on-demand full-field verify is ru
 ## and the panel shows both lines at once — one running must not blank the other.
 var pork_mass_solving := false
 
+## The launch campaign on the map ([C] opens its panel). The rate is an
+## *intention* — what the operator dialled — so it survives a rebuild; the rest are
+## results and go with the grid. See the campaign section below.
+##
+## The rate is **launches per year**, years counted from the grid's first launch
+## date — not per launch date, which let a finer grid allow more launches a year.
+const CAMPAIGN_RATE_MIN := 1
+const CAMPAIGN_RATE_MAX := 12
+var pork_campaign_rate := 2
+var pork_campaign_open := false          # the panel shows the campaign, not the cell
+var pork_campaign_solving := false       # every year's best window flying (minutes)
+var pork_campaign_flying := false        # the whole plan flying (seconds)
+## The plan at the dialled rate, as `Mission.campaign_plan` returns it — refreshed
+## on each input it depends on, never per frame.
+var pork_campaign := {}
+
 signal porkchop_changed
 
 ## ---------------------------------------------------------------- tractor ---
@@ -792,6 +808,7 @@ func _process(delta: float) -> void:
 	_poll_porkchop()
 	_poll_cell_verify()
 	_poll_required_mass()
+	_poll_campaign()
 	_poll_tow_probe()
 	_poll_anchor_solve()
 	_poll_tier3()
@@ -1130,6 +1147,9 @@ func _invalidate_derived_views() -> void:
 	pork_building = false
 	pork_verifying = false
 	pork_mass_solving = false
+	pork_campaign_solving = false
+	pork_campaign_flying = false
+	pork_campaign = {}
 	pork_rows = 0
 	pork_cols = 0
 	pork_launch_tdb = PackedFloat64Array()
@@ -1811,6 +1831,8 @@ func _poll_porkchop() -> void:
 	if not pork_online:
 		event_logged.emit(_stamp(t) + "  LAUNCH-WINDOW GRID FAILED - " + str(mission.last_error()))
 		return
+	# A new grid drops the core's campaign (its windows were cells of the old one).
+	pork_campaign = {}
 	_fetch_porkchop()
 	event_logged.emit(_stamp(t) + "  LAUNCH-WINDOW GRID READY - %d OF %d WINDOWS REACHABLE" %
 		[pork_feasible_count(), pork_rows * pork_cols])
@@ -2049,6 +2071,197 @@ func _poll_required_mass() -> void:
 		# come from rather than the payload. `hud.gd` clips as a backstop.
 		event_logged.emit(_stamp(t) + "  NEEDS " + pork_required_mass_label())
 	porkchop_changed.emit()
+
+
+# --------------------------------------------- launch campaign ([C] on [4]) ---
+#
+# [M] says one window needs dozens of launches' worth of the best rocket. The
+# campaign answers the question that leaves: how many launches, through which
+# windows, at a launch rate the operator dials. Same split as the Tier-3 ellipse:
+# the expensive half (every launch year's best window flown once, minutes) is held
+# in the core, and the rate knob replans it by arithmetic for free. Flying the
+# chosen plan whole is a separate, explicit step — its own line, greyed when the
+# rate or the launcher has moved since it flew.
+
+
+## Solve / fly the campaign: [E] while the campaign panel is up.
+##
+## Two steps behind one key, in the order an operator needs them: with nothing
+## held for this launcher it measures the windows; with a measurement held it
+## flies the plan at the dialled rate. The first flight is also fired
+## automatically when a measurement lands, so the first answer arrives checked.
+func request_campaign_step() -> void:
+	if not pork_online or pork_campaign_solving or pork_campaign_flying:
+		return
+	if not pork_campaign_is_current_vehicle():
+		if mission.begin_campaign(pork_vehicle):
+			pork_campaign_solving = true
+			pork_campaign = {}
+			event_logged.emit(_stamp(t) + "  CAMPAIGN: FLYING EACH YEAR'S BEST WINDOW - MINUTES")
+		else:
+			event_logged.emit("CAMPAIGN REFUSED - " + str(mission.last_error()))
+		return
+	_fly_campaign()
+
+
+func _fly_campaign() -> void:
+	if str(pork_campaign.get("outcome", "")) != "planned":
+		event_logged.emit("NO CAMPAIGN REACHES THE TARGET AT %d/YR - NOTHING TO FLY" %
+			pork_campaign_rate)
+		return
+	if pork_campaign_flight_is_current():
+		return
+	if mission.begin_campaign_flight(pork_campaign_rate, KEYHOLE_MAX_YEARS,
+			KEYHOLE_PLACEMENT_A_KM):
+		pork_campaign_flying = true
+		event_logged.emit(_stamp(t) + "  CAMPAIGN: FLYING THE WHOLE PLAN IN THE FULL FIELD")
+	else:
+		event_logged.emit("CAMPAIGN FLIGHT REFUSED - " + str(mission.last_error()))
+
+
+## Step the launch-rate cap. Free: a replan of the held measurement.
+func adjust_campaign_rate(step: int) -> void:
+	var r := clampi(pork_campaign_rate + step, CAMPAIGN_RATE_MIN, CAMPAIGN_RATE_MAX)
+	if r == pork_campaign_rate:
+		return
+	pork_campaign_rate = r
+	_refresh_campaign_plan()
+	porkchop_changed.emit()
+
+
+## Re-read the plan at the dialled rate. Called on every input it depends on —
+## a landed measurement, a rate step, a launcher change — and never per frame:
+## it marshals a dictionary per window.
+func _refresh_campaign_plan() -> void:
+	pork_campaign = mission.campaign_plan(pork_campaign_rate) if pork_online else {}
+
+
+func _poll_campaign() -> void:
+	if pork_campaign_solving and not mission.poll_campaign():
+		pork_campaign_solving = false
+		_refresh_campaign_plan()
+		if pork_campaign.is_empty():
+			event_logged.emit(_stamp(t) + "  CAMPAIGN SOLVE FAILED - " + str(mission.last_error()))
+		else:
+			event_logged.emit(_stamp(t) + "  CAMPAIGN: " + campaign_count_label())
+			# The first answer arrives checked: fly the plan without a second key.
+			_fly_campaign()
+		porkchop_changed.emit()
+	if pork_campaign_flying and not mission.poll_campaign_flight():
+		pork_campaign_flying = false
+		var f := pork_campaign_flight()
+		if f.is_empty():
+			event_logged.emit(_stamp(t) + "  CAMPAIGN FLIGHT FAILED - " + str(mission.last_error()))
+		else:
+			# The verdict only: the log column ends at the readout panel's left edge,
+			# and the full line (with the linearity check) is on the panel itself.
+			event_logged.emit(_stamp(t) + "  CAMPAIGN FLOWN: " +
+				campaign_flight_label().get_slice("  (", 0))
+		porkchop_changed.emit()
+
+
+## Whether the held measurement is for the selected launcher. A campaign measured
+## for another rocket is not shown as this one's: the windows and the payloads
+## are both the launcher's.
+func pork_campaign_is_current_vehicle() -> bool:
+	return not pork_campaign.is_empty() and int(pork_campaign.vehicle) == pork_vehicle
+
+
+func pork_campaign_flight() -> Dictionary:
+	if not pork_online:
+		return {}
+	return mission.campaign_flight()
+
+
+## Whether the last flight flew the plan now on screen — same launcher, same rate.
+func pork_campaign_flight_is_current() -> bool:
+	var f := pork_campaign_flight()
+	if f.is_empty() or not pork_campaign_is_current_vehicle():
+		return false
+	return int(f.vehicle) == pork_vehicle and int(f.launches_per_year) == pork_campaign_rate
+
+
+## The count in one line, **with the rate it was counted under** — a count
+## without its cap means nothing.
+func campaign_count_label() -> String:
+	var c := pork_campaign
+	if c.is_empty():
+		return "NOT SOLVED"
+	var tgt := float(c.target_b_km)
+	match str(c.outcome):
+		"already_clear":
+			return "NOMINAL ALREADY MISSES BY THE TARGET - NO LAUNCH NEEDED"
+		"planned":
+			return "%d LAUNCHES AT UP TO %d/YR - PREDICTED |B| %s OF %s KM" % [
+				int(c.total_launches), int(c.launches_per_year),
+				group_num(int(c.predicted_b_km)), group_num(int(tgt))]
+		"unreachable":
+			# An answer, not a failure: the best this rate can do, and how short.
+			return "NOT REACHABLE AT %d/YR - %d LAUNCHES GET |B| %s OF %s KM" % [
+				int(c.launches_per_year), int(c.total_launches),
+				group_num(int(c.predicted_b_km)), group_num(int(tgt))]
+	return "UNKNOWN"
+
+
+## Which windows the plan uses, as "2031-04 2X RETRO" items, in launch order.
+func campaign_windows_label() -> String:
+	var c := pork_campaign
+	if c.is_empty():
+		return ""
+	var used: Array = []
+	for w: Dictionary in c.windows:
+		if int(w.launches) > 0:
+			used.append(w)
+	used.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return float(a.launch_tdb) < float(b.launch_tdb))
+	var parts: PackedStringArray = []
+	for w: Dictionary in used:
+		parts.append("%s %dX" % [
+			date_string((float(w.launch_tdb) - EPOCH0_TDB) / DAY_S).substr(0, 7),
+			int(w.launches)])
+	if parts.is_empty():
+		return ""
+	# Direction first and one space between items: at 1/yr the plan uses every
+	# year, and the two-space form ran to the panel's right border (measured).
+	var dir := "RETRO PUSH:" if not bool(used[0].prograde) else "PRO PUSH:"
+	return dir + " " + " ".join(parts)
+
+
+## The full-field flight in one line: the verdict, then how far the flight sits
+## from the arithmetic — the linearity claim the whole plan rests on, measured.
+func campaign_flight_label() -> String:
+	var f := pork_campaign_flight()
+	if f.is_empty():
+		return "NOT FLOWN"
+	var s := ""
+	match str(f.outcome):
+		"clean_miss":
+			return "CLEAN MISS - NO EARTH ENCOUNTER"
+		"not_hyperbolic":
+			return "DEAD-CENTRE CAPTURE - NO B-PLANE SOLUTION"
+		"encounter":
+			var word: String = "SURFACE IMPACT" if bool(f.is_hit) else "MISS"
+			s = "%s - PERIGEE %s KM" % [word, group_num(int(float(f.perigee_m) / 1000.0))]
+	var nl := float(f.get("nonlinearity", NAN))
+	if is_finite(nl):
+		s += "  (%.2f%% OFF THE ARITHMETIC)" % (100.0 * nl)
+	return s
+
+
+## The keyhole row at the flown aim point, worded like the planner's: a campaign
+## that clears the safe line can still park the rock on a resonant return.
+func campaign_keyhole_label() -> String:
+	var f := pork_campaign_flight()
+	if f.is_empty():
+		return ""
+	var k: Dictionary = f.get("keyhole", {})
+	if k.is_empty():
+		return "KEYHOLES UNMEASURED - NO B-PLANE POINT OR NO RETURN IN REACH"
+	if keyhole_exposure_km(k) <= 0.0:
+		return "** KEYHOLE %s: %s KM OFF - INSIDE THE PLACEMENT BAND" % [
+			keyhole_name(k), group_num(int(abs(float(k.get("distance_km", 0.0)))))]
+	return "KEYHOLES CLEAR - CLOSEST DOOR %s IS %s KM OUTSIDE ITS BAND" % [
+		keyhole_name(k), group_num(int(keyhole_exposure_km(k)))]
 
 
 # ----------------------------------------------------------------- tractor ---

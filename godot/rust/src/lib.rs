@@ -21,16 +21,17 @@ use std::sync::{mpsc, Arc};
 
 use godot::prelude::*;
 
+use asteroid_core::campaign::CampaignOutcome;
 use asteroid_core::launch_vehicle::LaunchVehicle;
 use asteroid_core::mission::MassSolveOutcome;
 use asteroid_core::scenario::{ImpactorConfig, ScenarioError, SAFE_PERIGEE_TARGET_M};
 use asteroid_core::{Epoch, OrbitalElements};
 use mission_core::tractor_min_hover_radii;
 use mission_core::{
-    display_comet, heaviest_deliverable_kg, launch_vehicle, launch_vehicle_count, load_neo_bodies,
+    display_comet, fly_campaign_plan, heaviest_deliverable_kg, measure_campaign_candidates, launch_vehicle, launch_vehicle_count, load_neo_bodies,
     measure_tier2_shifts, mount_small_bodies, probe_tow_plan, required_cell_mass, seed_orrery_body,
     solve_required_dv_anchor, tractor_readout as score_tractor_plan, verify_porkchop_cell,
-    BuiltScenario, CellVerdict, KeyholePlanRow, MissionCore, OrreryBody, PorkchopView,
+    BuiltScenario, CampaignCandidates, CampaignFlight, CellVerdict, CAMPAIGN_PERIOD_S, KeyholePlanRow, MissionCore, OrreryBody, PorkchopView,
     ThreatOrbitKnobs, Tier2Shifts, Tier3View, TractorPlan, REQUIRED_DV_LAW_MIN_PERIODS,
     SB441_BODIES, THREAT_RADIUS_M, TRACTOR_HOVER_RADII,
 };
@@ -166,6 +167,21 @@ struct Mission {
     /// The last mass requirement and the cell it belongs to. Same staleness
     /// discipline as `verdict`: shown only against the cell it was solved for.
     mass_requirement: Option<(i64, i64, MassSolveOutcome)>,
+    /// The in-flight campaign measurement — every launch year's best window flown
+    /// once. Its own channel: minutes of work that must not block the verify, the
+    /// mass solve or a grid rebuild.
+    campaign_build: Option<mpsc::Receiver<Result<CampaignCandidates, String>>>,
+    /// Which launcher the in-flight campaign measurement is for.
+    pending_campaign_vehicle: i64,
+    /// The held campaign measurement and its launcher. Cap-independent, so the
+    /// rate knob replans it for free. Dropped with the grid and the scenario.
+    campaign: Option<(i64, CampaignCandidates)>,
+    /// The in-flight whole-campaign flight.
+    campaign_fly_build: Option<mpsc::Receiver<Result<CampaignFlight, String>>>,
+    /// Which plan the in-flight flight is for, `(vehicle, launches per year)`.
+    pending_campaign_flight: (i64, u32),
+    /// The last whole-campaign flight and the plan it flew.
+    campaign_flight: Option<(i64, u32, CampaignFlight)>,
     /// The in-flight one-period required-Δv anchor solve — a **seventh** channel.
     ///
     /// Unlike the other six this one is not fired repeatedly: it is asked once per
@@ -689,6 +705,10 @@ impl Mission {
                         self.porkchop = None;
                         self.verdict = None;
                         self.mass_requirement = None;
+                        // A campaign is flights through this grid against this
+                        // rock — stale on both counts.
+                        self.campaign = None;
+                        self.campaign_flight = None;
                         // …and so does a tow probe. It is a perigee reached by
                         // towing *this* rock through *this* field over *this*
                         // trajectory; against a rebuilt threat it is a measurement
@@ -1000,6 +1020,9 @@ impl Mission {
                 // requirement is keyed the same way and goes for the same reason.
                 self.verdict = None;
                 self.mass_requirement = None;
+                // A campaign's windows are cells of the previous grid too.
+                self.campaign = None;
+                self.campaign_flight = None;
                 self.error = GString::new();
                 false
             }
@@ -1628,6 +1651,302 @@ impl Mission {
         heaviest_deliverable_kg()
     }
 
+    // --- Multi-launch campaigns on the launch-window map ---------------------
+
+    /// Measure every launch year's best window for `vehicle`, on a worker — the
+    /// expensive half of a campaign, and **independent of the launch-rate cap**.
+    ///
+    /// One full-field flight per (year, push direction) with a reachable cell — up
+    /// to ~18 on the shipping grid, a few minutes; the frontend must show that it is
+    /// running. Everything after it is free: [`campaign_plan`](Self::campaign_plan)
+    /// replans under any cap by arithmetic, so the rate knob costs nothing per
+    /// press. Keyed by vehicle, like the verify: a `[L]` press makes it stale, not
+    /// wrong-and-shown.
+    ///
+    /// Returns `false` — with a reason in [`last_error`](Self::last_error) — when a
+    /// campaign solve is already in flight, there is no grid or scenario, or the
+    /// vehicle index is out of range.
+    #[func]
+    fn begin_campaign(&mut self, vehicle: i64) -> bool {
+        if self.campaign_build.is_some() {
+            return false;
+        }
+        let Some(core) = self.core.as_ref() else {
+            self.error = "load() must succeed before begin_campaign()".into();
+            return false;
+        };
+        let Some(scenario) = core.scenario_arc() else {
+            self.error = "build the scenario before planning a campaign".into();
+            return false;
+        };
+        let Some(view) = self.porkchop.clone() else {
+            self.error = "no launch-window grid to plan a campaign on".into();
+            return false;
+        };
+        let Some(v) = vehicle_at(vehicle) else {
+            self.error = format!("no launcher at index {vehicle}").as_str().into();
+            return false;
+        };
+        let Some(origin) = view.launch_tdb().first().copied() else {
+            self.error = "the grid has no launch dates".into();
+            return false;
+        };
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = measure_campaign_candidates(&scenario, &view, v, origin)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+        self.campaign_build = Some(rx);
+        self.pending_campaign_vehicle = vehicle;
+        // A held campaign (and its flight) beside a running solve would read as
+        // this solve's answer.
+        self.campaign = None;
+        self.campaign_flight = None;
+        self.error = GString::new();
+        true
+    }
+
+    /// Whether the campaign measurement is in flight.
+    #[func]
+    fn is_solving_campaign(&self) -> bool {
+        self.campaign_build.is_some()
+    }
+
+    /// Pump the campaign worker. `true` while **still running**, `false` once
+    /// finished (or none in flight). Non-blocking; safe every frame.
+    #[func]
+    fn poll_campaign(&mut self) -> bool {
+        let Some(rx) = self.campaign_build.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Ok(Ok(c)) => {
+                self.campaign_build = None;
+                self.campaign = Some((self.pending_campaign_vehicle, c));
+                self.error = GString::new();
+                false
+            }
+            Ok(Err(message)) => {
+                self.campaign_build = None;
+                self.error = message.as_str().into();
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.campaign_build = None;
+                self.error = "the campaign thread died without reporting".into();
+                false
+            }
+        }
+    }
+
+    /// The campaign under a cap of `launches_per_year` — arithmetic on the held
+    /// measurement, free — or an **empty dictionary** when nothing is held.
+    ///
+    /// Keys: `vehicle` (which launcher it was measured for — compare it with the
+    /// selected one), `launches_per_year`, `period_origin_tdb`, `period_s`,
+    /// `period_count`, `target_b_km`, `nominal_b_km` (`|B|` of the nominal),
+    /// `windows` (an array, one dictionary per window flown: `launch_index`,
+    /// `arrival_index`, `period`, `launch_tdb`, `arrival_tdb`, `payload_kg`,
+    /// `prograde`, `shift_km` — `|shift|` of one launch — and `launches`, how many
+    /// the plan sends through it), and `outcome`, one of:
+    ///
+    /// - `"planned"` — plus `total_launches` and `predicted_b_km`.
+    /// - `"unreachable"` — **an answer, not a failure**: no push direction reaches
+    ///   the target at this rate. Plus `total_launches` and `predicted_b_km` of the
+    ///   plan that got furthest, so the display can say how short it falls.
+    /// - `"already_clear"` — the nominal already misses by the target.
+    #[func]
+    fn campaign_plan(&self, launches_per_year: i64) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        let Some((vehicle, c)) = self.campaign.as_ref() else {
+            return d;
+        };
+        let cap = launches_per_year.clamp(1, 1_000) as u32;
+        let outcome = match c.plan(cap) {
+            Ok(o) => o,
+            Err(_) => return d,
+        };
+        d.set("vehicle", *vehicle);
+        d.set("launches_per_year", cap as i64);
+        d.set("period_origin_tdb", c.period_origin_tdb);
+        d.set("period_s", CAMPAIGN_PERIOD_S);
+        d.set("period_count", c.period_count as i64);
+        d.set("target_b_km", c.target_b_m / 1e3);
+        d.set("nominal_b_km", c.nominal_b_m.0.hypot(c.nominal_b_m.1) / 1e3);
+        let launches: Vec<u32> = match &outcome {
+            CampaignOutcome::AlreadyClear => {
+                d.set("outcome", "already_clear");
+                vec![0; c.candidates.len()]
+            }
+            CampaignOutcome::Planned(p) | CampaignOutcome::Unreachable(p) => {
+                let planned = matches!(outcome, CampaignOutcome::Planned(_));
+                d.set("outcome", if planned { "planned" } else { "unreachable" });
+                d.set("total_launches", p.total_launches as i64);
+                d.set("predicted_b_km", p.predicted_impact_parameter() / 1e3);
+                p.launches.clone()
+            }
+        };
+        let mut arr = VarArray::new();
+        for (k, n) in c.candidates.iter().zip(launches) {
+            let mut w = VarDictionary::new();
+            w.set("launch_index", k.launch_index as i64);
+            w.set("arrival_index", k.arrival_index as i64);
+            w.set("period", k.period as i64);
+            w.set("launch_tdb", k.launch_tdb);
+            w.set("arrival_tdb", k.arrival_tdb);
+            w.set("payload_kg", k.payload_kg);
+            w.set("prograde", k.proxy_along_track_dv_ms > 0.0);
+            w.set(
+                "shift_km",
+                k.shift_per_launch_m.0.hypot(k.shift_per_launch_m.1) / 1e3,
+            );
+            w.set("launches", n as i64);
+            arr.push(&w.to_variant());
+        }
+        d.set("windows", &arr);
+        d
+    }
+
+    /// Fly the campaign planned under `launches_per_year` whole, on a worker — one
+    /// full-field propagation, chained through every impulse in arrival order —
+    /// and read the keyhole exposure at the flown aim point with the same census
+    /// and band arguments [`keyhole_readout`](Self::keyhole_readout) takes.
+    ///
+    /// Returns `false` (with a reason) when a flight is already in flight, no
+    /// campaign is held, or the plan at this cap does not reach the target (there
+    /// is nothing to check).
+    #[func]
+    fn begin_campaign_flight(
+        &mut self,
+        launches_per_year: i64,
+        keyhole_max_years: i64,
+        placement_band_a_km: f64,
+    ) -> bool {
+        if self.campaign_fly_build.is_some() {
+            return false;
+        }
+        let Some(core) = self.core.as_ref() else {
+            self.error = "load() must succeed before begin_campaign_flight()".into();
+            return false;
+        };
+        let Some(scenario) = core.scenario_arc() else {
+            self.error = "build the scenario before flying a campaign".into();
+            return false;
+        };
+        let Some((vehicle, c)) = self.campaign.clone() else {
+            self.error = "no campaign to fly - solve one first".into();
+            return false;
+        };
+        let cap = launches_per_year.clamp(1, 1_000) as u32;
+        let plan = match c.plan(cap) {
+            Ok(CampaignOutcome::Planned(p)) => p,
+            _ => {
+                self.error = "no campaign reaches the target at this rate - nothing to fly".into();
+                return false;
+            }
+        };
+        // The keyhole read takes the planner's own census and band, passed in by the
+        // caller exactly as `keyhole_readout` takes them, so the two panels cannot
+        // disagree about which door is exposed.
+        let keyhole_years = keyhole_max_years.clamp(2, 20) as u32;
+        let band = placement_band_a_km.max(0.0);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = fly_campaign_plan(&scenario, &c, &plan, keyhole_years, band)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+        self.campaign_fly_build = Some(rx);
+        self.pending_campaign_flight = (vehicle, cap);
+        self.campaign_flight = None;
+        self.error = GString::new();
+        true
+    }
+
+    /// Whether the whole-campaign flight is in flight.
+    #[func]
+    fn is_flying_campaign(&self) -> bool {
+        self.campaign_fly_build.is_some()
+    }
+
+    /// Pump the campaign-flight worker. `true` while **still running**.
+    #[func]
+    fn poll_campaign_flight(&mut self) -> bool {
+        let Some(rx) = self.campaign_fly_build.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Ok(Ok(f)) => {
+                self.campaign_fly_build = None;
+                let (v, cap) = self.pending_campaign_flight;
+                // Only kept if the measurement it was planned from is still the
+                // held one — a re-solve in the meantime would otherwise inherit it.
+                if self.campaign.as_ref().is_some_and(|(hv, _)| *hv == v) {
+                    self.campaign_flight = Some((v, cap, f));
+                }
+                self.error = GString::new();
+                false
+            }
+            Ok(Err(message)) => {
+                self.campaign_fly_build = None;
+                self.error = message.as_str().into();
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.campaign_fly_build = None;
+                self.error = "the campaign flight thread died without reporting".into();
+                false
+            }
+        }
+    }
+
+    /// The last whole-campaign flight, or an **empty dictionary**. Keys:
+    /// `vehicle` and `launches_per_year` (which plan it flew — the display greys it
+    /// when either no longer matches), `outcome` as in
+    /// [`cell_verdict`](Self::cell_verdict) (`"encounter"` with
+    /// `impact_parameter_m`, `capture_radius_m`, `perigee_m`, `earth_radius_m`,
+    /// `is_hit`; or `"clean_miss"` / `"not_hyperbolic"`), `nonlinearity` (NaN when
+    /// there is no b-plane point), and `keyhole` (a keyhole row as in the planner
+    /// readout, or empty).
+    #[func]
+    fn campaign_flight(&self) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        let Some((vehicle, cap, f)) = self.campaign_flight.as_ref() else {
+            return d;
+        };
+        d.set("vehicle", *vehicle);
+        d.set("launches_per_year", *cap as i64);
+        match f.flown {
+            CellVerdict::CleanMiss => d.set("outcome", "clean_miss"),
+            CellVerdict::NotHyperbolic => d.set("outcome", "not_hyperbolic"),
+            CellVerdict::Encounter {
+                impact_parameter_m,
+                capture_radius_m,
+                perigee_m,
+                earth_radius_m,
+                is_hit,
+            } => {
+                d.set("outcome", "encounter");
+                d.set("impact_parameter_m", impact_parameter_m);
+                d.set("capture_radius_m", capture_radius_m);
+                d.set("perigee_m", perigee_m);
+                d.set("earth_radius_m", earth_radius_m);
+                d.set("is_hit", is_hit);
+            }
+        }
+        d.set("nonlinearity", f.nonlinearity.unwrap_or(f64::NAN));
+        d.set(
+            "keyhole",
+            &f.keyhole_at_risk
+                .as_ref()
+                .map_or_else(VarDictionary::new, Self::keyhole_row),
+        );
+        d
+    }
+
     // --- The threat orbit ------------------------------------------------------
 
     /// Which named worker is running, for a refusal message that says what to wait
@@ -1646,8 +1965,12 @@ impl Mission {
             Some("the Tier-2 force-model preview")
         } else if self.porkchop_build.is_some() {
             Some("the launch-window map build")
+        } else if self.campaign_build.is_some() {
+            Some("the launch-campaign solve")
         } else if self.mass_build.is_some() {
             Some("the required-mass solve")
+        } else if self.campaign_fly_build.is_some() {
+            Some("the launch-campaign flight")
         } else if self.verify_build.is_some() {
             Some("a launch-window cell verify")
         } else if self.tow_build.is_some() {

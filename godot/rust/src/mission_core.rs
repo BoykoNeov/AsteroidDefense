@@ -44,7 +44,9 @@ use anise::prelude::Frame;
 use godot::global::godot_warn;
 use nalgebra::{Matrix2, Vector2, Vector3};
 
-use asteroid_core::campaign::{campaign_impulses, plan_campaign, CampaignOutcome, CampaignWindow};
+use asteroid_core::campaign::{
+    campaign_impulses, plan_campaign, CampaignOutcome, CampaignPlan, CampaignWindow,
+};
 use asteroid_core::deflection::DeflectionError;
 use asteroid_core::ephemeris::Ephemeris;
 use asteroid_core::geometry::BPlaneEncounter;
@@ -2936,6 +2938,7 @@ pub const DEFAULT_MAX_REVOLUTIONS: u32 = 2;
 /// projection of cells the core already solved, so the vehicle-independence the
 /// core layer bought survives to the display — switching launcher re-reads
 /// [`payload_kg_flat`](Self::payload_kg_flat), it never re-solves Lambert.
+#[derive(Clone)]
 pub struct PorkchopView {
     grid: Porkchop,
 }
@@ -3373,12 +3376,29 @@ pub fn required_cell_mass(
 // arithmetic (`asteroid_core::campaign`), and the chosen campaign is flown whole to
 // check the arithmetic.
 
+/// How long one launch period is, seconds: a Julian year. The campaign's rate cap
+/// is "at most N launches per period", so this is the unit the frontend's
+/// launches-per-year knob speaks in.
+///
+/// **Why a fixed period and not the grid's launch dates.** The cap used to be per
+/// launch date — per grid *row* — so a 120×120 map, with launch dates ~25 days
+/// apart, allowed five times the launches per year that a 24×24 map did under the
+/// same number. A period of fixed length in time asks the same question of every
+/// grid. It is not free of arbitrary choices: where the first period starts is
+/// one (two good dates either side of a boundary each get the full cap — up to
+/// `2N` launches within weeks), and the last period is a partial year that still
+/// gets the full `N`. `probe_campaign_rate_cap` measures how much both matter.
+pub const CAMPAIGN_PERIOD_S: f64 = 365.25 * 86_400.0;
+
 /// One candidate window as the campaign measured it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CampaignCandidate {
-    /// Grid row (launch) and column (arrival) of the cell chosen for this launch date.
+    /// Grid row (launch) and column (arrival) of the cell chosen for this period.
     pub launch_index: usize,
     pub arrival_index: usize,
+    /// The launch period (year) this window's launches count against, counted from
+    /// [`CampaignCandidates::period_origin_tdb`].
+    pub period: u32,
     /// Epochs, TDB seconds past J2000.
     pub launch_tdb: f64,
     pub arrival_tdb: f64,
@@ -3393,26 +3413,52 @@ pub struct CampaignCandidate {
     pub shift_per_launch_m: (f64, f64),
 }
 
-/// Everything a campaign solve found, including the flight that checks it.
+/// The expensive, **cap-independent** half of a campaign: every period's best
+/// window in each push direction, each flown once to measure what one launch does.
+///
+/// Held so the rate knob is free — replanning under a different cap is
+/// [`plan`](Self::plan), which is arithmetic. It depends on the grid, the launcher
+/// and the scenario, and on nothing else; a change to any of those makes it stale.
 #[derive(Debug, Clone, PartialEq)]
-pub struct LaunchCampaignReport {
-    /// The per-window cap the count was made under. A launch count means nothing
-    /// without it, so it travels with the answer.
-    pub max_launches_per_window: u32,
+pub struct CampaignCandidates {
+    /// Where period 0 starts, TDB seconds past J2000. The shipping choice is the
+    /// grid's first launch date.
+    pub period_origin_tdb: f64,
+    /// How many periods the launch axis touches (the last is usually partial).
+    pub period_count: u32,
     /// The target impact parameter, m — [`SAFE_PERIGEE_TARGET_M`] converted through
     /// the encounter's own focusing. Not the perigee: the two are not comparable.
     pub target_b_m: f64,
     /// The nominal aim point, `(ξ, ζ)` metres.
     pub nominal_b_m: (f64, f64),
-    /// The windows flown to measure a launch's shift, highest [`campaign_proxy`] first.
+    /// The windows flown, highest [`campaign_proxy`] first. At most two per period
+    /// (one per push direction), and every one of them, not a top few: a low cap
+    /// needs many periods, and a period never flown would read as "unreachable".
     pub candidates: Vec<CampaignCandidate>,
-    /// The planner's answer. `launches` is parallel to `candidates`.
-    pub outcome: CampaignOutcome,
-    /// The chosen campaign flown whole, chained through every impulse in order —
-    /// `None` when there was nothing to fly (already clear, or no reachable plan).
-    pub flown: Option<CellVerdict>,
+    /// The planner's view of `candidates`, parallel to it.
+    pub windows: Vec<CampaignWindow>,
+}
+
+impl CampaignCandidates {
+    /// Plan under a cap of `launches_per_period` — free, no propagation.
+    pub fn plan(&self, launches_per_period: u32) -> Result<CampaignOutcome, ScenarioError> {
+        plan_campaign(
+            Vector2::new(self.nominal_b_m.0, self.nominal_b_m.1),
+            self.target_b_m,
+            &self.windows,
+            launches_per_period,
+        )
+        .map_err(|e| ScenarioError::Integration(format!("launch campaign: planner: {e}")))
+    }
+}
+
+/// A planned campaign flown whole through the real field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CampaignFlight {
+    /// The chained flight's verdict.
+    pub flown: CellVerdict,
     /// Where that flight lands, `(ξ, ζ)` metres, projected into the nominal frame.
-    /// `None` for a clean miss (no b-plane point) or when nothing was flown.
+    /// `None` for a clean miss (no b-plane point) or a capture.
     pub flown_b_m: Option<(f64, f64)>,
     /// `|flown − predicted| / |predicted − nominal|` — how far the flight is from
     /// the arithmetic, as a fraction of the distance the campaign moved the point.
@@ -3421,6 +3467,24 @@ pub struct LaunchCampaignReport {
     /// The most exposed keyhole at the flown aim point, the same row the planner
     /// panel cuts its alert on. `None` without a b-plane point or a census.
     pub keyhole_at_risk: Option<KeyholePlanRow>,
+}
+
+/// Everything a campaign solve found, including the flight that checks it — the
+/// two halves above composed, for callers that want one answer at one cap.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct LaunchCampaignReport {
+    /// The cap the count was made under, launches per [`CAMPAIGN_PERIOD_S`]. A
+    /// launch count means nothing without it, so it travels with the answer.
+    pub max_launches_per_year: u32,
+    pub target_b_m: f64,
+    pub nominal_b_m: (f64, f64),
+    pub candidates: Vec<CampaignCandidate>,
+    /// The planner's answer. `launches` is parallel to `candidates`.
+    pub outcome: CampaignOutcome,
+    /// The chosen campaign flown whole — `None` when there was nothing to fly
+    /// (already clear, or no reachable plan).
+    pub flight: Option<CampaignFlight>,
 }
 
 /// A grid cell as the campaign ranks it: `(launch row, arrival column, metrics,
@@ -3435,32 +3499,31 @@ pub fn campaign_proxy(along_track_dv_ms: f64, lead_seconds: f64) -> f64 {
     along_track_dv_ms.abs() * lead_seconds.max(0.0)
 }
 
-/// Plan a multi-launch campaign for `vehicle` through the grid in `view`, flying
-/// the `n_candidates` most promising launch dates once each and then the chosen
-/// campaign once.
+/// Which period a launch epoch falls in, counted from `origin_tdb`.
+fn campaign_period(launch_tdb: f64, origin_tdb: f64) -> u32 {
+    ((launch_tdb - origin_tdb) / CAMPAIGN_PERIOD_S).floor().max(0.0) as u32
+}
+
+/// Measure every period's best window for `vehicle` in `view`: one full-field
+/// flight each, so a worker-thread call, never an interactive one.
 ///
-/// **Cost:** `n_candidates + 1` full-field propagations, each 6–18 s depending on
-/// how early the arrival is — a worker-thread call, never an interactive one.
+/// **Cost:** one propagation per (period, push direction) that has a reachable
+/// cell — up to ~18 on the shipping grid, each 6–18 s depending on how early the
+/// arrival is.
 ///
-/// **Every launch count is a lower bound**: delivered mass is counted as impactor
-/// mass, with no spacecraft bus and no propellant (see `asteroid_core::campaign`).
-///
-/// Each launch date contributes at most **one cell per push direction** — the one
-/// with the highest [`campaign_proxy`] — and the candidates are split half and half
-/// between the two directions. The planner never mixes directions in one plan, so
-/// a date's two cells never share launches; the per-window cap is a cap on
-/// launches per date, which is **per grid column**: it means more launches per year
-/// on a finer grid, and needs redefining over a span of time before a frontend
-/// exposes it.
-pub fn plan_launch_campaign(
+/// Periods are [`CAMPAIGN_PERIOD_S`] long, starting at `period_origin_tdb` (pass
+/// the grid's first launch date; the probe shifts it to measure the choice). Each
+/// period contributes at most **one cell per push direction** — the one with the
+/// highest [`campaign_proxy`] over every launch date in the period and every
+/// arrival date. So under a cap of `N` a year, all of a year's launches go through
+/// that year's best window: the model is a launch *rate*, and it assumes the year's
+/// launches can all use its best date.
+pub fn measure_campaign_candidates(
     scenario: &RealFieldScenario,
     view: &PorkchopView,
     vehicle: &LaunchVehicle,
-    max_launches_per_window: u32,
-    n_candidates: usize,
-    keyhole_max_years: u32,
-    placement_band_a_km: f64,
-) -> Result<LaunchCampaignReport, ScenarioError> {
+    period_origin_tdb: f64,
+) -> Result<CampaignCandidates, ScenarioError> {
     let fail = |what: &str, e: &dyn std::fmt::Display| {
         ScenarioError::Integration(format!("launch campaign: {what}: {e}"))
     };
@@ -3477,63 +3540,51 @@ pub fn plan_launch_campaign(
     let nominal_b = f.project(&nominal.b_vector);
     let asteroid_mass = threat_mass_kg();
 
-    // (1) Free: the best cell of each launch date, ranked by the proxy — the
-    // along-track push **times the lead it is applied at**. The push alone was the
-    // first ranking tried, and the first real run showed why it is wrong: it put a
-    // window arriving 3.95 yr out first, ahead of 8.66 yr windows that moved the
-    // rock almost twice as far per launch. Across those six flown windows the shift
-    // per launch was 65–68 km per (mm/s × yr), flat to 4 % — the project's own
-    // thesis, read off the b-plane. So the lead belongs in the key.
+    // Free: the best cell of each period and push direction, ranked by the proxy —
+    // the along-track push **times the lead it is applied at**. The push alone was
+    // the first ranking tried, and the first real run showed why it is wrong: it put
+    // a window arriving 3.95 yr out first, ahead of 8.66 yr windows that moved the
+    // rock almost twice as far per launch. So the lead belongs in the key.
+    //
+    // **Both push directions are kept.** A prograde push moves the aim point one way
+    // and a retrograde one the other, and which is cheaper depends on which side of
+    // Earth's centre the nominal already sits — on the shipping encounter the nominal
+    // is ~2 300 km to the retrograde side, so every prograde campaign spends most of
+    // a launch just crossing the centre. The planner never mixes the two in one plan,
+    // so a period's two cells never share its cap in practice.
     let impact_tdb = scenario.impact_epoch().tdb_seconds_past_j2000();
     let arrival_axis = view.arrival_tdb();
-    //
-    // **Both signs are kept, half the candidates each.** A prograde push moves the
-    // aim point one way and a retrograde one the other, and which is cheaper depends
-    // on which side of Earth's centre the nominal already sits — on the shipping
-    // encounter the nominal is ~2 300 km to the retrograde side, so every prograde
-    // campaign spends most of a launch just crossing the centre. Ranking by `|proxy|`
-    // alone filled the candidate list with one sign and never asked.
+    let launch_axis = view.launch_tdb();
     let key = |c: &RankedCell| campaign_proxy(c.4, impact_tdb - arrival_axis[c.1]);
-    let mut by_sign: [Vec<RankedCell>; 2] = [Vec::new(), Vec::new()];
+    let mut best: std::collections::BTreeMap<(u32, bool), RankedCell> =
+        std::collections::BTreeMap::new();
     for i in 0..view.launch_count() {
-        for (side, bucket) in by_sign.iter_mut().enumerate() {
-            let best = (0..view.arrival_count())
-                .filter_map(|j| {
-                    let m = view.metrics_at(i, j)?;
-                    let d = cell_delivery(&m, vehicle, IMPACTOR_BETA, asteroid_mass);
-                    let prograde = d.along_track_dv_ms > 0.0;
-                    (d.feasible && prograde == (side == 0)).then_some((
-                        i,
-                        j,
-                        m,
-                        d.payload_kg,
-                        d.along_track_dv_ms,
-                    ))
-                })
-                .max_by(|a, b| key(a).total_cmp(&key(b)));
-            bucket.extend(best);
+        let period = campaign_period(launch_axis[i], period_origin_tdb);
+        for j in 0..view.arrival_count() {
+            let Some(m) = view.metrics_at(i, j) else {
+                continue;
+            };
+            let d = cell_delivery(&m, vehicle, IMPACTOR_BETA, asteroid_mass);
+            if !d.feasible {
+                continue;
+            }
+            let cell = (i, j, m, d.payload_kg, d.along_track_dv_ms);
+            let slot = best.entry((period, d.along_track_dv_ms > 0.0)).or_insert(cell);
+            if key(&cell) > key(slot) {
+                *slot = cell;
+            }
         }
     }
-    for bucket in &mut by_sign {
-        bucket.sort_by(|a, b| key(b).total_cmp(&key(a)));
-    }
-    // Half each; a sign with too few cells hands its share to the other.
-    let half = n_candidates.div_ceil(2);
-    let take_pro = half.max(n_candidates.saturating_sub(by_sign[1].len()));
-    let take_retro = n_candidates.saturating_sub(take_pro.min(by_sign[0].len()));
-    let mut ranked: Vec<RankedCell> = by_sign[0]
-        .iter()
-        .take(take_pro)
-        .chain(by_sign[1].iter().take(take_retro))
-        .copied()
-        .collect();
-    ranked.sort_by(|a, b| key(b).total_cmp(&key(a)));
+    let mut ranked: Vec<(u32, RankedCell)> = best.into_iter().map(|((p, _), c)| (p, c)).collect();
+    ranked.sort_by(|a, b| key(&b.1).total_cmp(&key(&a.1)));
+    let period_count = launch_axis
+        .last()
+        .map_or(0, |&t| campaign_period(t, period_origin_tdb) + 1);
 
-    // (2) One flight per candidate: what one launch actually does on the b-plane.
-    let launch_axis = view.launch_tdb();
+    // One flight per candidate: what one launch actually does on the b-plane.
     let mut candidates = Vec::with_capacity(ranked.len());
     let mut windows = Vec::with_capacity(ranked.len());
-    for (i, j, m, payload, proxy) in ranked {
+    for (period, (i, j, m, payload, proxy)) in ranked {
         let arrival = Epoch::from_tdb_seconds_past_j2000(arrival_axis[j]);
         let impulse = impact_impulse(m.v_rel_vec, IMPACTOR_BETA, payload, asteroid_mass);
         // A single launch that already escapes the scan gate, or dives to a bound
@@ -3549,6 +3600,7 @@ pub fn plan_launch_campaign(
         candidates.push(CampaignCandidate {
             launch_index: i,
             arrival_index: j,
+            period,
             launch_tdb: launch_axis[i],
             arrival_tdb: arrival_axis[j],
             c3_km2_s2: m.c3_km2_s2,
@@ -3559,59 +3611,82 @@ pub fn plan_launch_campaign(
         });
         windows.push(CampaignWindow {
             launch_epoch: Epoch::from_tdb_seconds_past_j2000(launch_axis[i]),
+            period,
             arrival_epoch: arrival,
             impulse_per_launch: impulse,
             shift_per_launch: shift,
         });
     }
-
-    // (3) Arithmetic.
-    let outcome = plan_campaign(nominal_b, target_b, &windows, max_launches_per_window)
-        .map_err(|e| fail("planner", &e))?;
-
-    // (4) Fly the chosen campaign whole and read it the way the planner panel does.
-    let mut report = LaunchCampaignReport {
-        max_launches_per_window,
+    Ok(CampaignCandidates {
+        period_origin_tdb,
+        period_count,
         target_b_m: target_b,
         nominal_b_m: (nominal_b.x, nominal_b.y),
         candidates,
-        outcome: outcome.clone(),
-        flown: None,
-        flown_b_m: None,
-        nonlinearity: None,
-        keyhole_at_risk: None,
+        windows,
+    })
+}
+
+/// Fly a planned campaign whole — chained through every impulse in arrival order —
+/// and read it the way the planner panel does. One full-field propagation.
+pub fn fly_campaign_plan(
+    scenario: &RealFieldScenario,
+    cands: &CampaignCandidates,
+    plan: &CampaignPlan,
+    keyhole_max_years: u32,
+    placement_band_a_km: f64,
+) -> Result<CampaignFlight, ScenarioError> {
+    let fail = |what: &str, e: &dyn std::fmt::Display| {
+        ScenarioError::Integration(format!("launch campaign: {what}: {e}"))
     };
-    let CampaignOutcome::Planned(plan) = outcome else {
-        return Ok(report);
-    };
-    let impulses = campaign_impulses(&windows, &plan.launches);
+    let ds = scenario.deflection()?;
+    let nominal = ds
+        .nominal_encounter()
+        .map_err(|e| fail("nominal encounter", &e))?
+        .ok_or_else(|| ScenarioError::NominalNotAHit("no nominal encounter".into()))?;
+    let eph = scenario.ephemeris();
+    let f = opik_frame_for(&nominal, scenario.impact_epoch(), eph).ok_or_else(|| {
+        ScenarioError::Integration("launch campaign: no Öpik frame for the encounter".into())
+    })?;
+    let nominal_b = Vector2::new(cands.nominal_b_m.0, cands.nominal_b_m.1);
+
+    let impulses = campaign_impulses(&cands.windows, &plan.launches);
     let (clock, encounter) = match ds.campaign_trajectory(&impulses) {
         Ok(r) => r,
         Err(DeflectionError::Geometry(asteroid_core::geometry::GeometryError::NotHyperbolic {
             ..
         })) => {
-            report.flown = Some(CellVerdict::NotHyperbolic);
-            return Ok(report);
+            return Ok(CampaignFlight {
+                flown: CellVerdict::NotHyperbolic,
+                flown_b_m: None,
+                nonlinearity: None,
+                keyhole_at_risk: None,
+            });
         }
         Err(e) => return Err(fail("campaign flight", &e)),
     };
     let Some(bp) = encounter else {
-        report.flown = Some(CellVerdict::CleanMiss);
-        return Ok(report);
+        return Ok(CampaignFlight {
+            flown: CellVerdict::CleanMiss,
+            flown_b_m: None,
+            nonlinearity: None,
+            keyhole_at_risk: None,
+        });
     };
-    report.flown = Some(CellVerdict::Encounter {
-        impact_parameter_m: bp.impact_parameter,
-        capture_radius_m: bp.capture_radius,
-        perigee_m: bp.perigee,
-        earth_radius_m: bp.earth_radius,
-        is_hit: bp.is_hit(),
-    });
     let p = f.project(&bp.b_vector);
-    report.flown_b_m = Some((p.x, p.y));
     let moved = (plan.predicted_b - nominal_b).norm();
-    if moved > 0.0 {
-        report.nonlinearity = Some((p - plan.predicted_b).norm() / moved);
-    }
+    let mut flight = CampaignFlight {
+        flown: CellVerdict::Encounter {
+            impact_parameter_m: bp.impact_parameter,
+            capture_radius_m: bp.capture_radius,
+            perigee_m: bp.perigee,
+            earth_radius_m: bp.earth_radius,
+            is_hit: bp.is_hit(),
+        },
+        flown_b_m: Some((p.x, p.y)),
+        nonlinearity: (moved > 0.0).then(|| (p - plan.predicted_b).norm() / moved),
+        keyhole_at_risk: None,
+    };
 
     // The keyhole read, on the change across the encounter exactly as `set_plan`
     // places it: a campaign that stops short of the safe line can still park the
@@ -3632,10 +3707,52 @@ pub fn plan_launch_campaign(
         None => f.resonant_circles(years, 24, b_max),
     };
     let band_a = placement_band_a_km * M_PER_KM;
-    report.keyhole_at_risk = f
+    flight.keyhole_at_risk = f
         .most_exposed_keyhole(&circles, p, band_a)
         .map(|k| KeyholePlanRow::from_proximity(&f, p, &k, band_a));
-    Ok(report)
+    Ok(flight)
+}
+
+/// Plan a multi-launch campaign for `vehicle` through the grid in `view` under a
+/// cap of `max_launches_per_year`, and fly it: [`measure_campaign_candidates`]
+/// with periods starting at the grid's first launch date, then
+/// [`CampaignCandidates::plan`], then [`fly_campaign_plan`].
+///
+/// **The count is optimistic on mass** — delivered mass is counted as impactor
+/// mass, with no spacecraft bus and no propellant — **and pessimistic on search**
+/// (only one window per year and direction is considered). It is not a floor.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn plan_launch_campaign(
+    scenario: &RealFieldScenario,
+    view: &PorkchopView,
+    vehicle: &LaunchVehicle,
+    max_launches_per_year: u32,
+    keyhole_max_years: u32,
+    placement_band_a_km: f64,
+) -> Result<LaunchCampaignReport, ScenarioError> {
+    let origin = view.launch_tdb().first().copied().ok_or_else(|| {
+        ScenarioError::Integration("launch campaign: the grid has no launch dates".into())
+    })?;
+    let cands = measure_campaign_candidates(scenario, view, vehicle, origin)?;
+    let outcome = cands.plan(max_launches_per_year)?;
+    let flight = match &outcome {
+        CampaignOutcome::Planned(plan) => Some(fly_campaign_plan(
+            scenario,
+            &cands,
+            plan,
+            keyhole_max_years,
+            placement_band_a_km,
+        )?),
+        _ => None,
+    };
+    Ok(LaunchCampaignReport {
+        max_launches_per_year,
+        target_b_m: cands.target_b_m,
+        nominal_b_m: cands.nominal_b_m,
+        candidates: cands.candidates,
+        outcome,
+        flight,
+    })
 }
 
 // --- The Tier-3 uncertainty ellipse (HANDOFF §7) ------------------------------
@@ -3856,96 +3973,98 @@ mod tests {
         asteroid_core::kernels::resolve_for_test("the MissionCore kernel-gated tests").is_some()
     }
 
-    /// Probe, run by hand (`--ignored --nocapture`): does the campaign's launch count
-    /// survive the **shipping** grid resolution, and is there a strong push the
-    /// other way? The per-date cap is a cap per grid column, so a finer grid is
-    /// more launch dates per year under the same cap.
+    /// Probe, run by hand (`--ignored --nocapture`): is the launches-per-year cap
+    /// free of the grid, and how much does its own arbitrary choice matter?
+    ///
+    /// - **Grid.** The old per-launch-date cap allowed more launches per year on a
+    ///   finer grid. At a fixed rate, 120, 60 and 24 rows must now agree unless a
+    ///   finer grid genuinely finds better windows — which the printed best shift
+    ///   per launch says.
+    /// - **Where the years start.** Shifting period 0 by 3, 6 and 9 months moves
+    ///   which dates share a year. If that moves the count by more than about one
+    ///   launch, fixed years are the wrong definition.
+    ///
+    /// Each (grid, anchor) is measured on its own thread: the candidate flights are
+    /// the whole cost, and they are independent.
     #[test]
     #[ignore]
-    #[allow(clippy::needless_range_loop)]
-    fn probe_campaign_grid_resolution_and_sign() {
+    fn probe_campaign_rate_cap() {
         if !have_kernels() {
             return;
         }
         use asteroid_core::launch_vehicle::FALCON_HEAVY_EXPENDABLE;
+        use std::time::Instant;
         let mut mc = MissionCore::load().expect("kernels load");
         mc.build_scenario(&ImpactorConfig::default())
             .expect("scenario builds");
         let scenario = mc.scenario_arc().expect("a built scenario");
         let impact = mc.impact_tdb_seconds();
         let v = &FALCON_HEAVY_EXPENDABLE;
-        for n in [120usize] {
-            let view = PorkchopView::build(&scenario, n, n).expect("grid");
-            let arr = view.arrival_tdb();
-            let (mut pos, mut neg) = (0usize, 0usize);
-            let (mut best_pos, mut best_neg) = (0.0_f64, 0.0_f64);
-            for i in 0..view.launch_count() {
-                for j in 0..view.arrival_count() {
-                    let Some(m) = view.metrics_at(i, j) else {
-                        continue;
-                    };
-                    let d = cell_delivery(&m, v, IMPACTOR_BETA, threat_mass_kg());
-                    if !d.feasible {
-                        continue;
-                    }
-                    let p = campaign_proxy(d.along_track_dv_ms, impact - arr[j]);
-                    if d.along_track_dv_ms > 0.0 {
-                        pos += 1;
-                        best_pos = best_pos.max(p);
-                    } else {
-                        neg += 1;
-                        best_neg = best_neg.max(p);
-                    }
-                }
-            }
-            let launch_spacing_d = (view.launch_tdb()[1] - view.launch_tdb()[0]) / 86_400.0;
-            println!(
-                "grid {n}x{n}: launch dates {launch_spacing_d:.0} d apart; feasible cells \
-                 +{pos} / -{neg}; best proxy + {best_pos:.3e} / - {best_neg:.3e} m/s*s"
-            );
-            let r = plan_launch_campaign(&scenario, &view, v, 3, 6, 7, PLACEMENT_BAND_A_KM)
-                .expect("campaign");
-            for c in &r.candidates {
-                println!(
-                    "  launch {:5.2} yr, arrive {:5.2} yr before impact, {:6.0} kg, proxy {:+.2e}, \
-                     shift ({:+.1}, {:+.1}) km",
-                    (impact - c.launch_tdb) / 3.155_76e7,
-                    (impact - c.arrival_tdb) / 3.155_76e7,
-                    c.payload_kg,
-                    c.proxy_along_track_dv_ms,
-                    c.shift_per_launch_m.0 / 1e3,
-                    c.shift_per_launch_m.1 / 1e3
-                );
-            }
-            let nb = Vector2::new(r.nominal_b_m.0, r.nominal_b_m.1);
-            let windows: Vec<CampaignWindow> = r
-                .candidates
+        let yr = 3.155_76e7;
+
+        // (label, grid n, anchor shift in months back from the first launch date)
+        let runs: Vec<(String, usize, f64)> = vec![
+            ("120x120, anchor +0 mo".into(), 120, 0.0),
+            ("60x60,   anchor +0 mo".into(), 60, 0.0),
+            ("24x24,   anchor +0 mo".into(), 24, 0.0),
+            ("120x120, anchor -3 mo".into(), 120, 3.0),
+            ("120x120, anchor -6 mo".into(), 120, 6.0),
+            ("120x120, anchor -9 mo".into(), 120, 9.0),
+        ];
+        let results: Vec<(String, CampaignCandidates, f64, f64)> = std::thread::scope(|s| {
+            let handles: Vec<_> = runs
                 .iter()
-                .map(|c| CampaignWindow {
-                    launch_epoch: Epoch::from_tdb_seconds_past_j2000(c.launch_tdb),
-                    arrival_epoch: Epoch::from_tdb_seconds_past_j2000(c.arrival_tdb),
-                    impulse_per_launch: Vector3::zeros(),
-                    shift_per_launch: Vector2::new(c.shift_per_launch_m.0, c.shift_per_launch_m.1),
+                .map(|(label, n, months)| {
+                    let scenario = Arc::clone(&scenario);
+                    s.spawn(move || {
+                        let view = PorkchopView::build(&scenario, *n, *n).expect("grid");
+                        let spacing = (view.launch_tdb()[1] - view.launch_tdb()[0]) / 86_400.0;
+                        let origin = view.launch_tdb()[0] - months * CAMPAIGN_PERIOD_S / 12.0;
+                        let t0 = Instant::now();
+                        let c = measure_campaign_candidates(&scenario, &view, v, origin)
+                            .expect("candidates");
+                        (label.clone(), c, spacing, t0.elapsed().as_secs_f64())
+                    })
                 })
                 .collect();
-            for cap in [1u32, 2, 3, 5, 10] {
-                let o = plan_campaign(nb, r.target_b_m, &windows, cap).expect("plan");
-                let s = match o {
-                    CampaignOutcome::Planned(p) => {
-                        format!("{} launches {:?}", p.total_launches, p.launches)
-                    }
-                    CampaignOutcome::Unreachable(p) => format!(
-                        "UNREACHABLE (best |B| {:.0} km)",
-                        p.predicted_impact_parameter() / 1e3
-                    ),
-                    CampaignOutcome::AlreadyClear => "already clear".into(),
-                };
-                println!("  cap {cap:2}/date: {s}");
-            }
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        for (label, c, spacing, secs) in &results {
+            let span = (c.candidates.iter().map(|k| k.launch_tdb).fold(f64::MIN, f64::max)
+                - c.period_origin_tdb)
+                / yr;
             println!(
-                "  flown (cap 3): {:?}, nonlinearity {:?}",
-                r.flown, r.nonlinearity
+                "\n{label}: launch dates {spacing:.0} d apart, {} periods (last launch {span:.2} yr after the origin), {} candidates flown in {secs:.0} s",
+                c.period_count,
+                c.candidates.len()
             );
+            for k in &c.candidates {
+                println!(
+                    "  yr {:2} {}  launch {:5.2} / arrive {:5.2} yr before impact, {:6.0} kg, shift/launch ({:+8.1}, {:+8.1}) km",
+                    k.period,
+                    if k.proxy_along_track_dv_ms > 0.0 { "pro " } else { "retr" },
+                    (impact - k.launch_tdb) / yr,
+                    (impact - k.arrival_tdb) / yr,
+                    k.payload_kg,
+                    k.shift_per_launch_m.0 / 1e3,
+                    k.shift_per_launch_m.1 / 1e3
+                );
+            }
+            let mut line = String::new();
+            for cap in [1u32, 2, 3, 4, 6, 10] {
+                let s = match c.plan(cap).expect("plan") {
+                    CampaignOutcome::Planned(p) => format!("{}", p.total_launches),
+                    CampaignOutcome::Unreachable(p) => format!(
+                        "short({:.0}/{:.0} km)",
+                        p.predicted_impact_parameter() / 1e3,
+                        c.target_b_m / 1e3
+                    ),
+                    CampaignOutcome::AlreadyClear => "clear".into(),
+                };
+                line.push_str(&format!("  {cap}/yr: {s}"));
+            }
+            println!("  launches needed ->{line}");
         }
     }
 
@@ -3981,17 +4100,15 @@ mod tests {
         // where 120x120 needs 6), so the test measures the grid the map draws.
         let view = PorkchopView::build(&scenario, 120, 120).expect("grid builds");
 
-        // A cap low enough that no single window can carry the campaign, so the
+        // A rate low enough that no single year can carry the campaign, so the
         // chain crosses windows — the case the chained flight exists for.
-        let cap = 3;
-        let n_candidates = 6;
+        let cap = 2;
         let t0 = Instant::now();
         let r = plan_launch_campaign(
             &scenario,
             &view,
             &FALCON_HEAVY_EXPENDABLE,
             cap,
-            n_candidates,
             7,
             PLACEMENT_BAND_A_KM,
         )
@@ -4002,7 +4119,7 @@ mod tests {
             r.candidates.len()
         );
         println!(
-            "target |B| {:.0} km (perigee {:.0} km), nominal |B| {:.0} km, cap {cap}/window",
+            "target |B| {:.0} km (perigee {:.0} km), nominal |B| {:.0} km, cap {cap}/yr",
             r.target_b_m / 1e3,
             SAFE_PERIGEE_TARGET_M / 1e3,
             Vector2::new(r.nominal_b_m.0, r.nominal_b_m.1).norm() / 1e3
@@ -4057,13 +4174,14 @@ mod tests {
             );
         }
         println!("outcome: {:?}", r.outcome);
+        let flight = r.flight.clone().expect("a planned campaign is flown");
         println!(
             "flown: {:?}, flown b {:?} km, nonlinearity {:?}",
-            r.flown,
-            r.flown_b_m.map(|(x, y)| (x / 1e3, y / 1e3)),
-            r.nonlinearity
+            flight.flown,
+            flight.flown_b_m.map(|(x, y)| (x / 1e3, y / 1e3)),
+            flight.nonlinearity
         );
-        if let Some(k) = &r.keyhole_at_risk {
+        if let Some(k) = &flight.keyhole_at_risk {
             println!(
                 "keyhole at risk: {}:{} margin {:.0} km, band {:.0} km, exposure {:.0} km",
                 k.h, k.k, k.margin_km, k.placement_band_km, k.exposure_km
@@ -4072,8 +4190,8 @@ mod tests {
 
         let CampaignOutcome::Planned(plan) = &r.outcome else {
             panic!(
-                "no campaign reaches the target under a cap of {cap} per window over the \
-                 {} best windows — widen the candidates or the cap in this test",
+                "no campaign reaches the target under a cap of {cap} per year over the \
+                 {} windows flown — raise the cap in this test",
                 r.candidates.len()
             );
         };
@@ -4103,7 +4221,7 @@ mod tests {
         );
 
         // The flight agrees with the arithmetic.
-        let nl = r.nonlinearity.expect("an encounter to compare against");
+        let nl = flight.nonlinearity.expect("an encounter to compare against");
         assert!(
             nl < 0.05,
             "the chained flight lands {:.1}% of the campaign's own reach away from the \
@@ -4119,8 +4237,10 @@ mod tests {
         // really is when a later impactor arrives, against the nominal its transfer
         // was solved for.
         let ds = scenario.deflection().expect("deflection");
+        // The six highest-ranked candidates only: each extra epoch costs another
+        // partial-campaign flight in the drift loop below.
         let mut distinct: Vec<usize> = Vec::new();
-        for (k, c) in r.candidates.iter().enumerate() {
+        for (k, c) in r.candidates.iter().enumerate().take(6) {
             if !distinct
                 .iter()
                 .any(|&q| r.candidates[q].arrival_tdb == c.arrival_tdb)
@@ -4141,6 +4261,7 @@ mod tests {
                     .expect("metrics");
                 CampaignWindow {
                     launch_epoch: Epoch::from_tdb_seconds_past_j2000(c.launch_tdb),
+                    period: c.period,
                     arrival_epoch: Epoch::from_tdb_seconds_past_j2000(c.arrival_tdb),
                     impulse_per_launch: impact_impulse(
                         m.v_rel_vec,

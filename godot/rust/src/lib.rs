@@ -28,12 +28,14 @@ use asteroid_core::scenario::{ImpactorConfig, ScenarioError, SAFE_PERIGEE_TARGET
 use asteroid_core::{Epoch, OrbitalElements};
 use mission_core::tractor_min_hover_radii;
 use mission_core::{
-    display_comet, fly_campaign_plan, heaviest_deliverable_kg, measure_campaign_candidates, launch_vehicle, launch_vehicle_count, load_neo_bodies,
+    busiest_rolling_year, display_comet, fly_campaign_plan, heaviest_deliverable_kg,
+    launch_vehicle, launch_vehicle_count, load_neo_bodies, measure_campaign_candidates,
     measure_tier2_shifts, mount_small_bodies, probe_tow_plan, required_cell_mass, seed_orrery_body,
     solve_required_dv_anchor, tractor_readout as score_tractor_plan, verify_porkchop_cell,
-    BuiltScenario, CampaignCandidates, CampaignFlight, CellVerdict, CAMPAIGN_PERIOD_S, KeyholePlanRow, MissionCore, OrreryBody, PorkchopView,
-    ThreatOrbitKnobs, Tier2Shifts, Tier3View, TractorPlan, REQUIRED_DV_LAW_MIN_PERIODS,
-    SB441_BODIES, THREAT_RADIUS_M, TRACTOR_HOVER_RADII,
+    BuiltScenario, CampaignCandidates, CampaignFlight, CellVerdict, KeyholePlanRow, MissionCore,
+    OrreryBody, PorkchopView, ThreatOrbitKnobs, Tier2Shifts, Tier3View, TractorPlan,
+    CAMPAIGN_PERIOD_S, REQUIRED_DV_LAW_MIN_PERIODS, SB441_BODIES, THREAT_RADIUS_M,
+    TRACTOR_HOVER_RADII,
 };
 
 /// The launcher at a GDScript-supplied index, or `None` for a negative or
@@ -1693,8 +1695,8 @@ impl Mission {
         };
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = measure_campaign_candidates(&scenario, &view, v, origin)
-                .map_err(|e| e.to_string());
+            let result =
+                measure_campaign_candidates(&scenario, &view, v, origin).map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
         self.campaign_build = Some(rx);
@@ -1750,7 +1752,9 @@ impl Mission {
     /// `windows` (an array, one dictionary per window flown: `launch_index`,
     /// `arrival_index`, `period`, `launch_tdb`, `arrival_tdb`, `payload_kg`,
     /// `prograde`, `shift_km` — `|shift|` of one launch — and `launches`, how many
-    /// the plan sends through it), and `outcome`, one of:
+    /// the plan sends through it), `busiest_rolling_year` (the most launches inside
+    /// any 365.25 days - it can exceed the cap, which is per fixed year), and
+    /// `outcome`, one of:
     ///
     /// - `"planned"` — plus `total_launches` and `predicted_b_km`.
     /// - `"unreachable"` — **an answer, not a failure**: no push direction reaches
@@ -1789,6 +1793,7 @@ impl Mission {
             }
         };
         let mut arr = VarArray::new();
+        let launches_for_rolling = launches.clone();
         for (k, n) in c.candidates.iter().zip(launches) {
             let mut w = VarDictionary::new();
             w.set("launch_index", k.launch_index as i64);
@@ -1806,6 +1811,13 @@ impl Mission {
             arr.push(&w.to_variant());
         }
         d.set("windows", &arr);
+        let dated: Vec<(f64, u32)> = c
+            .candidates
+            .iter()
+            .zip(&launches_for_rolling)
+            .map(|(k, &n)| (k.launch_tdb, n))
+            .collect();
+        d.set("busiest_rolling_year", busiest_rolling_year(&dated) as i64);
         d
     }
 

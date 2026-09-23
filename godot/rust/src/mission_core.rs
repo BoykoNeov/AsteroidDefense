@@ -3500,8 +3500,31 @@ pub fn campaign_proxy(along_track_dv_ms: f64, lead_seconds: f64) -> f64 {
 }
 
 /// Which period a launch epoch falls in, counted from `origin_tdb`.
+/// The most launches a plan puts inside any one rolling year (any 365.25 days),
+/// from `(launch epoch TDB s, launches)` pairs.
+///
+/// The cap is per *fixed* year, so this can exceed it: two good dates either side
+/// of a year boundary each take the full cap. The shipping 7-launch plan at 2 a
+/// year has 4 inside seven months (2029-09 and 2030-04). The panel prints this
+/// beside the cap so the label does not overstate how tight the cap is.
+pub fn busiest_rolling_year(launches: &[(f64, u32)]) -> u32 {
+    launches
+        .iter()
+        .map(|&(t0, _)| {
+            launches
+                .iter()
+                .filter(|&&(t, _)| t >= t0 && t < t0 + CAMPAIGN_PERIOD_S)
+                .map(|&(_, n)| n)
+                .sum()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 fn campaign_period(launch_tdb: f64, origin_tdb: f64) -> u32 {
-    ((launch_tdb - origin_tdb) / CAMPAIGN_PERIOD_S).floor().max(0.0) as u32
+    ((launch_tdb - origin_tdb) / CAMPAIGN_PERIOD_S)
+        .floor()
+        .max(0.0) as u32
 }
 
 /// Measure every period's best window for `vehicle` in `view`: one full-field
@@ -3569,7 +3592,9 @@ pub fn measure_campaign_candidates(
                 continue;
             }
             let cell = (i, j, m, d.payload_kg, d.along_track_dv_ms);
-            let slot = best.entry((period, d.along_track_dv_ms > 0.0)).or_insert(cell);
+            let slot = best
+                .entry((period, d.along_track_dv_ms > 0.0))
+                .or_insert(cell);
             if key(&cell) > key(slot) {
                 *slot = cell;
             }
@@ -3963,6 +3988,22 @@ impl Tier3View {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn busiest_rolling_year_counts_across_a_year_boundary() {
+        let d = 86_400.0;
+        // 2 in late year 0 and 2 early in year 1: a fixed-year cap of 2 allows it,
+        // and a rolling year sees all four.
+        let plan = [(300.0 * d, 2), (420.0 * d, 2), (900.0 * d, 2)];
+        assert_eq!(super::busiest_rolling_year(&plan), 4);
+        assert_eq!(super::busiest_rolling_year(&[(0.0, 3)]), 3);
+        assert_eq!(super::busiest_rolling_year(&[]), 0);
+        // Exactly one year apart is the next year, not the same one.
+        assert_eq!(
+            super::busiest_rolling_year(&[(0.0, 1), (super::CAMPAIGN_PERIOD_S, 1)]),
+            1
+        );
+    }
+
     use super::*;
 
     /// Whether the binding's kernel-gated tests can run. Goes through the shared
@@ -4031,7 +4072,11 @@ mod tests {
         });
 
         for (label, c, spacing, secs) in &results {
-            let span = (c.candidates.iter().map(|k| k.launch_tdb).fold(f64::MIN, f64::max)
+            let span = (c
+                .candidates
+                .iter()
+                .map(|k| k.launch_tdb)
+                .fold(f64::MIN, f64::max)
                 - c.period_origin_tdb)
                 / yr;
             println!(
@@ -4221,7 +4266,9 @@ mod tests {
         );
 
         // The flight agrees with the arithmetic.
-        let nl = flight.nonlinearity.expect("an encounter to compare against");
+        let nl = flight
+            .nonlinearity
+            .expect("an encounter to compare against");
         assert!(
             nl < 0.05,
             "the chained flight lands {:.1}% of the campaign's own reach away from the \

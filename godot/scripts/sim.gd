@@ -2197,7 +2197,9 @@ func campaign_count_label() -> String:
 				group_num(int(c.predicted_b_km)), group_num(int(tgt))]
 		"unreachable":
 			# An answer, not a failure: the best this rate can do, and how short.
-			return "NOT REACHABLE AT %d/YR - %d LAUNCHES GET |B| %s OF %s KM" % [
+			# "Falls short", not "unreachable": how far short moves with where the
+			# years start (2 041 km short at the shipping start, 437 km at -6 months).
+			return "FALLS SHORT AT %d/YR - %d LAUNCHES GET |B| %s OF %s KM" % [
 				int(c.launches_per_year), int(c.total_launches),
 				group_num(int(c.predicted_b_km)), group_num(int(tgt))]
 	return "UNKNOWN"
@@ -2224,7 +2226,12 @@ func campaign_windows_label() -> String:
 	# Direction first and one space between items: at 1/yr the plan uses every
 	# year, and the two-space form ran to the panel's right border (measured).
 	var dir := "RETRO PUSH:" if not bool(used[0].prograde) else "PRO PUSH:"
-	return dir + " " + " ".join(parts)
+	# The busiest rolling 12 months, because the cap is per FIXED year and two
+	# dates either side of a boundary each take the full cap: the shipping plan at
+	# 2/yr puts 4 launches inside seven months. Printed so the rate does not read
+	# tighter than it is.
+	return dir + " " + " ".join(parts) + "  PEAK 12 MO: %d" % int(
+		c.get("busiest_rolling_year", 0))
 
 
 ## The full-field flight in one line: the verdict, then how far the flight sits

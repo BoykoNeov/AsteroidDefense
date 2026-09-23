@@ -10,7 +10,7 @@ extends Node
 ## What it pins, beyond "it drew":
 ## - the cap is per YEAR: no year of the plan carries more launches than the rate;
 ## - the rate knob is free (no solve fires on [Z]/[X]) and greys the flight line;
-## - 1/yr is an answer ("NOT REACHABLE"), not a failure;
+## - 1/yr is an answer ("FALLS SHORT"), not a failure;
 ## - [L] makes the held campaign stale instead of showing it as this rocket's;
 ## - [M] does not open the planner or start a mass solve while the panel is up.
 

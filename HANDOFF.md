@@ -272,8 +272,8 @@ Read this table first, then the session that owns the layer you are touching.
    2026-09-23, on the `[4]` map the same day** — chained impulses, a planner, and
    a real-field composition that flies its own answer. The launch cap is now
    **launches per year** (it was per grid row, so a finer map allowed more):
-   **7 Falcon Heavy (expendable) launches at 2 or 3 a year, 6 at 4+, unreachable
-   at 1** on the shipping grid, retrograde — optimistic on mass (no bus or
+   **7 Falcon Heavy (expendable) launches at 2 or 3 a year, 6 at 4+, short of
+   the line at 1** on the shipping grid, retrograde — optimistic on mass (no bus or
    propellant yet), not a floor. `[C]` on the map shows it. See *Several launches
    against one rock* and *The campaign on the map*. Next in order: the payload
    mass budget, then orbital assembly.
@@ -5766,8 +5766,13 @@ than on a 24×24 one (133 d). This batch redefines the cap as **launches per yea
 and puts the campaign on the launch-window map.
 
 **Headline (Falcon Heavy expendable, shipping 120×120 grid): 7 launches at 2 or 3
-a year, 6 at 4 or more; at 1 a year no plan reaches the safe line** (the best gets
-`|B|` 23 914 of 25 955 km). The old "6 at any cap 2..10 per date" is superseded:
+a year, 6 at 4 or more; at 1 a year every year-start tried falls short of the safe
+line** (by 2 041 km at the shipping start, 437 km at −6 months).
+**But "a year" is a fixed slot, and the headline plan uses the loophole**: at 2 a
+year it launches 2× in 2029-09 and 2× in 2030-04 - different slots, 4 launches
+inside seven months. The panel prints each plan's busiest rolling 12 months beside
+the rate (`busiest_rolling_year`) and names where the slots start, so the label no
+longer reads tighter than it is. A true rolling rule is the open decision (below). The old "6 at any cap 2..10 per date" is superseded:
 a per-date cap of 3 on 120 rows was ~40 launches a year of allowance.
 
 #### The definition, and why this one
@@ -5841,6 +5846,10 @@ a per-date cap of 3 on 120 rows was ~40 launches a year of allowance.
 
 - **The payload mass budget** (bus + propellant out of delivered mass) - still the
   biggest known optimism in every count here.
+- **Rolling-year cap - a decision for the user.** Fixed slots let a plan double
+  the rate across a boundary (the shipping plan does). A rolling rule is not a
+  partition, so it needs a real search (small integer program over ~18 windows)
+  instead of the greedy fill.
 - **Grid convergence of window quality**: a 240×240 run would say whether 120 rows
   still leaves better windows unfound.
 - Orbital assembly against this baseline.

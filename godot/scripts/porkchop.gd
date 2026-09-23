@@ -448,8 +448,13 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 	var col2 := x + _font.get_string_size(
 		"LAUNCH CAMPAIGN  FALCON HEAVY (EXPENDABLE)  ", HORIZONTAL_ALIGNMENT_LEFT, -1, _fs).x
 	_t(Vector2(x, y), "LAUNCH CAMPAIGN  %s" % Sim.pork_vehicle_name(), bright)
-	_t(Vector2(col2, y), "RATE  UP TO %d LAUNCH%s A YEAR" % [
-		Sim.pork_campaign_rate, "" if Sim.pork_campaign_rate == 1 else "ES"], bright)
+	# The years are fixed slots, so the label names where they start: "a year"
+	# alone reads as any twelve months, and the busiest twelve months of a plan can
+	# hold twice the rate (printed on the windows line).
+	var rate := "RATE  UP TO %d A YEAR" % Sim.pork_campaign_rate
+	if Sim.pork_rows > 0:
+		rate += ", YEARS FROM %s" % _date_of(Sim.pork_launch_tdb, 0).substr(0, 7)
+	_t(Vector2(col2, y), rate, bright)
 	y += lh
 
 	var current := Sim.pork_campaign_is_current_vehicle()
@@ -496,7 +501,7 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 	_t(Vector2(x, y), "OPTIMISTIC ON MASS: DELIVERED MASS COUNTED AS IMPACTOR, NO BUS OR PROPELLANT", faint,
 		_fs - 3)
 	y += lh - 3.0
-	_t(Vector2(x, y), "ONE WINDOW PER YEAR AND PUSH DIRECTION; A YEAR'S LAUNCHES SHARE IT; YEARS FROM THE FIRST DATE",
+	_t(Vector2(x, y), "ONE WINDOW PER YEAR AND PUSH DIRECTION, AND A YEAR'S LAUNCHES ALL USE IT",
 		faint, _fs - 3)
 	y += lh
 	_t(Vector2(x, y), "[Z]/[X] LAUNCHES PER YEAR  [E] MEASURE / FLY  [L] LAUNCHER  [C] WINDOW READOUT  [1] BACK",

@@ -722,17 +722,103 @@ impl<'a> DeflectionScenario<'a> {
         deflection_epoch: Epoch,
         delta_v: Vector3<f64>,
     ) -> Result<(Clock, Option<BPlaneEncounter>), DeflectionError> {
-        let t_d = deflection_epoch.tdb_seconds_past_j2000();
-        if t_d >= self.span_end_seconds {
-            return Err(DeflectionError::InvalidInput(format!(
-                "deflection epoch ({t_d} s) is at or past the span end ({} s)",
-                self.span_end_seconds
-            )));
+        self.campaign_trajectory(&[(deflection_epoch, delta_v)])
+    }
+
+    /// Apply a **sequence** of impulses — a multi-mission campaign (§8 Phase 3) —
+    /// and return the resulting Earth encounter, or `None` for a clean miss.
+    ///
+    /// `impulses` is `(epoch, Δv)` pairs in non-decreasing epoch order (unsorted
+    /// input is refused, not sorted: a caller that built its list out of order has
+    /// a bug worth hearing about). Two impulses at the same epoch simply add.
+    pub fn evaluate_campaign(
+        &self,
+        impulses: &[(Epoch, Vector3<f64>)],
+    ) -> Result<Option<BPlaneEncounter>, DeflectionError> {
+        let (_clock, encounter) = self.campaign_trajectory(impulses)?;
+        Ok(encounter)
+    }
+
+    /// Like [`evaluate_campaign`](Self::evaluate_campaign), but also hands back the
+    /// clock of the **last** segment — the arc from the final impulse to the span
+    /// end, which is the one the encounter was reduced from.
+    ///
+    /// # Chained, not superposed
+    /// Impulse `k+1` is added to the state the rock is *actually* in at its epoch —
+    /// the arc segment `k` left it on — never to the nominal. Seeding every impulse
+    /// from the nominal would silently throw away all but the last one's effect on
+    /// the cruise, and a "the miss got bigger" check would still pass. This method
+    /// is the only campaign path, and the single-impulse
+    /// [`deflected_trajectory`](Self::deflected_trajectory) is its one-element
+    /// case, so the two can never disagree.
+    ///
+    /// Each intermediate segment is flown on the scenario's own snapshot cadence
+    /// (rounded up past the next impulse and read back from the dense output at
+    /// its exact epoch), so every step stays capped the way the single-impulse
+    /// path's does — that cap, not the tolerance, is what makes dop853 accurate
+    /// over a long cruise.
+    pub fn campaign_trajectory(
+        &self,
+        impulses: &[(Epoch, Vector3<f64>)],
+    ) -> Result<(Clock, Option<BPlaneEncounter>), DeflectionError> {
+        let Some(&(first_epoch, _)) = impulses.first() else {
+            return Err(DeflectionError::InvalidInput(
+                "a campaign needs at least one impulse".into(),
+            ));
+        };
+        let mut t_prev = f64::NEG_INFINITY;
+        for (epoch, dv) in impulses {
+            let t = epoch.tdb_seconds_past_j2000();
+            if t >= self.span_end_seconds {
+                return Err(DeflectionError::InvalidInput(format!(
+                    "deflection epoch ({t} s) is at or past the span end ({} s)",
+                    self.span_end_seconds
+                )));
+            }
+            if t < t_prev {
+                return Err(DeflectionError::InvalidInput(format!(
+                    "campaign impulses must be in non-decreasing epoch order ({t} s follows {t_prev} s)"
+                )));
+            }
+            if !(dv.x.is_finite() && dv.y.is_finite() && dv.z.is_finite()) {
+                return Err(DeflectionError::InvalidInput(format!(
+                    "impulse at {t} s is not finite ({dv:?})"
+                )));
+            }
+            t_prev = t;
         }
 
-        let seed = self.nominal.state_at(deflection_epoch)?;
-        let deflected = apply_impulse(seed, delta_v);
-        self.propagate_and_reduce(self.force, deflection_epoch, deflected)
+        let mut epoch = first_epoch;
+        let mut state = self.nominal.state_at(first_epoch)?;
+        let mut rest = impulses;
+        loop {
+            // Fold in every impulse that lands on the current epoch.
+            let t_now = epoch.tdb_seconds_past_j2000();
+            while let Some(&(e, dv)) = rest.first() {
+                if e.tdb_seconds_past_j2000() > t_now {
+                    break;
+                }
+                state = apply_impulse(state, dv);
+                rest = &rest[1..];
+            }
+            let Some(&(next_epoch, _)) = rest.first() else {
+                return self.propagate_and_reduce(self.force, epoch, state);
+            };
+            // Fly to the next impulse on the scenario's cadence, then read the
+            // state at its exact epoch off the dense output.
+            let gap = next_epoch.tdb_seconds_past_j2000() - t_now;
+            let n = ((gap / self.cadence_seconds).ceil() as u32).max(1);
+            let segment = Clock::propagate(
+                &self.integrator,
+                self.force,
+                epoch,
+                state,
+                self.cadence_seconds,
+                n,
+            )?;
+            state = segment.state_at(next_epoch)?;
+            epoch = next_epoch;
+        }
     }
 
     /// Propagate `seed` from `start` to the span end under **`force`**, and reduce
@@ -1382,6 +1468,87 @@ mod tests {
         let seed = sc.nominal().state_at(e0).unwrap();
         let start = clock.state_at(e0).unwrap();
         assert_eq!(start.velocity, seed.velocity + dv);
+    }
+
+    // ---- Campaigns: chained impulses ------------------------------------------
+
+    /// With no force, a chained campaign has a closed form: every impulse keeps
+    /// drifting from its own epoch, so at `T` the rock sits at
+    /// `x₀ + v₀·T + Σ Δvᵢ·(T − tᵢ)`. The bug this is built to catch — re-seeding a
+    /// later impulse from the *nominal* instead of from the arc the earlier one
+    /// left — drops the first term's `0.05 m/s × 8e5 s = 40 km` and fails by four
+    /// orders of magnitude, where a "the miss grew" check would still pass. The
+    /// second epoch is deliberately not a multiple of the cadence, so the
+    /// dense-output read-back at an off-grid impulse is on the path.
+    #[test]
+    fn a_chained_campaign_matches_the_straight_line_closed_form() {
+        let force = ZeroForce;
+        let earth = |_e: Epoch| Ok(StateVector::new(Vector3::zeros(), Vector3::zeros()));
+        let sc = straight_line_scenario(&force, &earth);
+
+        let t1 = 0.0;
+        let t2 = 2.37e5;
+        let dv1 = Vector3::new(0.0, 0.05, 0.0);
+        let dv2 = Vector3::new(0.0, 0.0, 0.03);
+        let (clock, _) = sc
+            .campaign_trajectory(&[
+                (Epoch::from_tdb_seconds_past_j2000(t1), dv1),
+                (Epoch::from_tdb_seconds_past_j2000(t2), dv2),
+            ])
+            .expect("campaign flies");
+
+        let t_end = 8.0e5;
+        let got = clock
+            .state_at(Epoch::from_tdb_seconds_past_j2000(t_end))
+            .expect("inside the last segment");
+        let s0 = sc
+            .nominal()
+            .state_at(Epoch::from_tdb_seconds_past_j2000(0.0))
+            .unwrap();
+        let want = s0.position + s0.velocity * t_end + dv1 * (t_end - t1) + dv2 * (t_end - t2);
+        assert!(
+            (got.position - want).norm() < 1.0,
+            "chained position off the closed form by {:.3e} m",
+            (got.position - want).norm()
+        );
+        assert!((got.velocity - (s0.velocity + dv1 + dv2)).norm() < 1e-9);
+    }
+
+    /// Two impulses at one epoch are one impulse of their sum, and a one-element
+    /// campaign is exactly [`DeflectionScenario::evaluate`].
+    #[test]
+    fn coincident_impulses_add_and_one_impulse_is_evaluate() {
+        let force = ZeroForce;
+        let earth = |_e: Epoch| Ok(StateVector::new(Vector3::zeros(), Vector3::zeros()));
+        let sc = straight_line_scenario(&force, &earth);
+        let e = Epoch::from_tdb_seconds_past_j2000(1.0e5);
+        let a = Vector3::new(0.0, 0.02, 0.0);
+        let b = Vector3::new(0.0, 0.03, 0.0);
+
+        let split = sc.evaluate_campaign(&[(e, a), (e, b)]).unwrap().unwrap();
+        let summed = sc.evaluate(e, a + b).unwrap().unwrap();
+        assert!((split.perigee - summed.perigee).abs() < 1e-6 * summed.perigee);
+
+        let single = sc.evaluate_campaign(&[(e, a)]).unwrap().unwrap();
+        assert_eq!(single.perigee, sc.evaluate(e, a).unwrap().unwrap().perigee);
+    }
+
+    #[test]
+    fn campaign_refuses_empty_and_out_of_order_lists() {
+        let force = ZeroForce;
+        let earth = |_e: Epoch| Ok(StateVector::new(Vector3::zeros(), Vector3::zeros()));
+        let sc = straight_line_scenario(&force, &earth);
+        let dv = Vector3::new(0.0, 0.01, 0.0);
+        assert!(matches!(
+            sc.evaluate_campaign(&[]),
+            Err(DeflectionError::InvalidInput(_))
+        ));
+        let late = Epoch::from_tdb_seconds_past_j2000(2.0e5);
+        let early = Epoch::from_tdb_seconds_past_j2000(1.0e5);
+        assert!(matches!(
+            sc.evaluate_campaign(&[(late, dv), (early, dv)]),
+            Err(DeflectionError::InvalidInput(_))
+        ));
     }
 
     // ---- Test 3: the thesis — earlier deflection costs less Δv ---------------

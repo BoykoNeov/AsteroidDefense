@@ -20,6 +20,7 @@
 //! and [`keyhole`] (the pinned Öpik ξ,ζ frame, resonant-return circles and
 //! keyhole widths).
 
+pub mod campaign;
 pub mod clock;
 pub mod close_approach;
 pub mod deflection;
@@ -44,6 +45,9 @@ pub mod scenario;
 pub mod state;
 pub mod uncertainty;
 
+pub use campaign::{
+    campaign_impulses, plan_campaign, CampaignError, CampaignOutcome, CampaignPlan, CampaignWindow,
+};
 pub use clock::{Clock, ClockError};
 pub use close_approach::{
     closest_approach, find_close_approaches, CloseApproach, CloseApproachError, GeocentricState,

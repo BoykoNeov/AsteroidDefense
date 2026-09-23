@@ -268,7 +268,14 @@ Read this table first, then the session that owns the layer you are touching.
 10. Phase 3 — noting that its first bullet (plausible launch vehicles + payload
    mass budgets) is already built, in `core/src/launch_vehicle.rs` and the `[M]`
    readout. What is actually left there is orbital assembly, standing defence
-   systems, and multi-mission campaigns.
+   systems, and multi-mission campaigns. **Multi-mission campaigns: core DONE
+   2026-09-23** — chained impulses, a planner, and a real-field composition that
+   flies its own answer: **10 Falcon Heavy (expendable) launches at a cap of 3 per
+   launch date, 9 at 10 — both floors** (no bus or propellant mass yet). Ranking
+   windows by Δv alone was wrong; the shift per launch is Δv × lead. See *Several
+   launches against one rock*. Next in order: the campaign on the `[4]` map, then
+   the payload mass budget (turns the floor into an estimate), then orbital
+   assembly.
 
 ---
 
@@ -5649,3 +5656,80 @@ band's "fires at every dialable lead" was the wrong unit, not physics. Logs:
   (6:7 Plus at 104 000, or the 5:4 / 4:3 Plus at 18 - 21 thousand) would say
   whether it grows smoothly with depth.
 - **The five unflown close raising circles** are where 51 000 is least supported.
+
+### Several launches against one rock - 2026-09-23 session (Phase 3's first piece: multi-mission campaigns, core only)
+
+The porkchop layer's honest headline was that one real launch delivers about 1/65th
+of what the curve wants. This batch answers the question that leaves - **how many
+launches, through which windows?** - in the core, with the frontend deliberately
+left for the next batch (the same order every earlier layer took).
+
+**Headline: 10 Falcon Heavy (expendable) launches** clear the safe line (perigee
+20 000 km, which is `|B|` 25 955 km on this encounter) under a cap of **3 per
+launch date**, and **9** under a cap of 10. **Both are floors, not estimates**:
+delivered mass is still counted *as* impactor mass (no bus, no propellant), which
+was the safe direction for "one launch fails" and is the flattering one for "how
+many launches". The per-date cap is a **knob with no sourced value** - pads,
+production and cadence decide it and this project has no number for it - so a
+count is never printed without the cap it was counted under.
+
+#### What was built
+
+- **Chained impulses** - `DeflectionScenario::campaign_trajectory` /
+  `evaluate_campaign` (`core/src/deflection.rs`). Impulse `k+1` is added to the arc
+  impulse `k` left, never to the nominal; every segment is flown on the scenario's
+  own snapshot cadence (the cap that makes dop853 accurate - see *The integrator,
+  measured instead of replaced*) and read back at the next impulse's exact epoch
+  from the dense output. `deflected_trajectory` is now its one-element case, so
+  the single and campaign paths cannot disagree. Unsorted lists are refused, not
+  sorted. The discriminating test is the straight-line closed form
+  `x₀ + v₀T + Σ Δvᵢ(T − tᵢ)`, at an off-cadence second epoch; **planting the
+  re-seed-from-nominal bug makes it fail by exactly 40.000 km**, the dropped term.
+- **The planner** - `core/src/campaign.rs`, pure arithmetic, kernel-free. Each
+  window carries its measured `(ξ, ζ)` shift per launch; `plan_campaign` picks a
+  direction (each window's own, its opposite, the nominal's) and fills windows
+  largest-shift-first up to the cap, stopping when the true `|B|` clears.
+  Opposite pushes are never mixed (a window that meets the rock head-on moves the
+  aim point the other way and would cancel launches already paid for). Optimal on
+  collinear shifts, **pinned against brute force** over every allocation.
+- **The real-field composition** - `plan_launch_campaign` in
+  `godot/rust/src/mission_core.rs`: best cell per launch date, rank, fly the top
+  `n` once each at one launch's mass, plan, fly the plan whole, and read the
+  keyhole exposure at the flown point exactly as `set_plan` does (circles placed
+  on the change, the same `most_exposed_keyhole` row, the shipping band).
+  `n + 1` full-field flights, ~100-120 s for `n = 6`: a worker call.
+
+#### What was measured (kernel-gated test `a_launch_campaign_flies_the_way_it_was_planned`)
+
+- **The first ranking was wrong, and the thesis is why.** Ranking windows by the
+  grid's along-track Δv put a window arriving 3.95 yr out first, ahead of 8.66 yr
+  windows that move the rock ~1.7× further per launch. The shift per launch is
+  proportional to **Δv × lead**: 65-68 km per (mm/s × yr) over the first six flown
+  windows, 9.7 % spread over the second six. `campaign_proxy` is that product, and
+  the test asserts its spread stays under 50 %.
+- **Linearity holds to 0.03 %**: the planned campaign flown whole lands 2.8e-4 of
+  its own reach from the summed prediction - twice, on two different plans.
+- **But the plan put every launch on one arrival epoch** (the 24-point arrival axis
+  is coarse and the earliest reachable arrival wins), where chaining is only
+  adding. So the test also flies **one launch through each of three distinct
+  arrival epochs** (9.52, 8.66, 3.95 yr before impact): predicted and flown agree
+  to **5.3e-5**. The multi-epoch chain is what is actually pinned.
+- **Later impactors are aimed at a rock that has moved**: 206 km off its nominal
+  after one earlier launch, **3 274 km** after two. That is a targeting change -
+  the transfer is solved against the nominal - but its cost is ~0.026 m/s of
+  re-aim against a 7 240 m/s arrival: negligible for C3 and `v_rel`. Recorded,
+  not modelled.
+- **Keyholes**: the flown 10-launch campaign's most exposed door is the 7:6, 1 977
+  km outside it with a 25 km band - clear.
+
+#### What this leaves
+
+- **The frontend**: a campaign readout on the `[4]` launch-window map (cap knob,
+  count, the lower-bound caveat, the flown verdict, the keyhole row).
+- **The payload mass budget** (bus + propellant out of delivered mass), which turns
+  every count here from a floor into an estimate - and which orbital assembly
+  needs anyway. Needs sourced fractions; the launch-vehicle provenance gate
+  applies.
+- **Orbital assembly** is now answerable against a baseline: "one big impactor
+  instead of N small ones" is these same windows at a pooled mass.
+- The per-date cap has no default and no source.

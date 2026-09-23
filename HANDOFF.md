@@ -270,9 +270,10 @@ Read this table first, then the session that owns the layer you are touching.
    readout. What is actually left there is orbital assembly, standing defence
    systems, and multi-mission campaigns. **Multi-mission campaigns: core DONE
    2026-09-23** — chained impulses, a planner, and a real-field composition that
-   flies its own answer: **10 Falcon Heavy (expendable) launches at a cap of 3 per
-   launch date, 9 at 10 — both floors** (no bus or propellant mass yet). Ranking
-   windows by Δv alone was wrong; the shift per launch is Δv × lead. See *Several
+   flies its own answer: **6 Falcon Heavy (expendable) launches** on the shipping
+   grid, retrograde — optimistic on mass (no bus or propellant yet), not a floor
+   (a coarser grid said 10). Ranking by Δv alone was wrong (the shift per launch
+   is Δv × lead), and so was ranking one push direction only. See *Several
    launches against one rock*. Next in order: the campaign on the `[4]` map, then
    the payload mass budget (turns the floor into an estimate), then orbital
    assembly.
@@ -5664,14 +5665,20 @@ of what the curve wants. This batch answers the question that leaves - **how man
 launches, through which windows?** - in the core, with the frontend deliberately
 left for the next batch (the same order every earlier layer took).
 
-**Headline: 10 Falcon Heavy (expendable) launches** clear the safe line (perigee
-20 000 km, which is `|B|` 25 955 km on this encounter) under a cap of **3 per
-launch date**, and **9** under a cap of 10. **Both are floors, not estimates**:
-delivered mass is still counted *as* impactor mass (no bus, no propellant), which
-was the safe direction for "one launch fails" and is the flattering one for "how
-many launches". The per-date cap is a **knob with no sourced value** - pads,
-production and cadence decide it and this project has no number for it - so a
-count is never printed without the cap it was counted under.
+**Headline: 6 Falcon Heavy (expendable) launches** clear the safe line (perigee
+20 000 km, which is `|B|` 25 955 km on this encounter) on the **shipping 120×120
+grid**, all *retrograde* (slowing the rock), at any per-date cap from 2 to 10;
+flown whole, perigee 21 778 km. **It is not a floor**, and the first write-up of
+this section said it was. It is optimistic in one direction - delivered mass is
+counted *as* impactor mass (no bus, no propellant) - and pessimistic in another:
+a coarser grid or fewer flown candidates can only miss better windows. The
+first-pass numbers show how much that second direction weighs: **10** launches on a
+24×24 grid, **8** on 120×120 with prograde-only candidates, **6** once both push
+directions were flown. The per-date cap is a **knob with no sourced value** -
+pads, production and cadence decide it - and it is a cap **per grid column**, so
+the same number means ~5× more launches a year at 120×120 (dates 26 d apart) than
+at 24×24 (133 d). It must be redefined over a span of time before a frontend
+exposes it.
 
 #### What was built
 
@@ -5693,8 +5700,9 @@ count is never printed without the cap it was counted under.
   aim point the other way and would cancel launches already paid for). Optimal on
   collinear shifts, **pinned against brute force** over every allocation.
 - **The real-field composition** - `plan_launch_campaign` in
-  `godot/rust/src/mission_core.rs`: best cell per launch date, rank, fly the top
-  `n` once each at one launch's mass, plan, fly the plan whole, and read the
+  `godot/rust/src/mission_core.rs`: best cell per launch date **per push
+  direction**, rank, fly the top `n` (half per direction) once each at one launch's
+  mass, plan, fly the plan whole, and read the
   keyhole exposure at the flown point exactly as `set_plan` does (circles placed
   on the change, the same `most_exposed_keyhole` row, the shipping band).
   `n + 1` full-field flights, ~100-120 s for `n = 6`: a worker call.
@@ -5705,22 +5713,34 @@ count is never printed without the cap it was counted under.
   grid's along-track Δv put a window arriving 3.95 yr out first, ahead of 8.66 yr
   windows that move the rock ~1.7× further per launch. The shift per launch is
   proportional to **Δv × lead**: 65-68 km per (mm/s × yr) over the first six flown
-  windows, 9.7 % spread over the second six. `campaign_proxy` is that product, and
-  the test asserts its spread stays under 50 %.
-- **Linearity holds to 0.03 %**: the planned campaign flown whole lands 2.8e-4 of
-  its own reach from the summed prediction - twice, on two different plans.
+  windows. `campaign_proxy` is that product - but only *within* one push
+  direction (spread 4.3 % prograde, 12.6 % retrograde at 120×120); a retrograde
+  launch moves the rock ~30 % more per unit of proxy. The test asserts the spread
+  per direction.
+- **The second ranking was wrong too: one sign only.** The nominal sits ~2 300 km
+  on the retrograde side of Earth's centre, so every prograde campaign spends most
+  of a launch crossing it - and ranking by `|proxy|` filled the list with prograde
+  cells. The strongest retrograde cell is 88 % of the strongest prograde one by
+  proxy (and better per launch once flown). Candidates are now split by sign:
+  8 → **6** launches. Found by the pre-done review, not by a test.
+- **Linearity holds to 0.03 %**: the planned campaign flown whole lands 2.3e-4 to
+  2.8e-4 of its own reach from the summed prediction, on every plan flown.
 - **But the plan put every launch on one arrival epoch** (the 24-point arrival axis
   is coarse and the earliest reachable arrival wins), where chaining is only
-  adding. So the test also flies **one launch through each of three distinct
-  arrival epochs** (9.52, 8.66, 3.95 yr before impact): predicted and flown agree
-  to **5.3e-5**. The multi-epoch chain is what is actually pinned.
-- **Later impactors are aimed at a rock that has moved**: 206 km off its nominal
-  after one earlier launch, **3 274 km** after two. That is a targeting change -
-  the transfer is solved against the nominal - but its cost is ~0.026 m/s of
-  re-aim against a 7 240 m/s arrival: negligible for C3 and `v_rel`. Recorded,
-  not modelled.
-- **Keyholes**: the flown 10-launch campaign's most exposed door is the 7:6, 1 977
-  km outside it with a 25 km band - clear.
+  adding. So the test also flies **one launch through each distinct arrival
+  epoch** among the candidates (three at 24×24: 5.3e-5; four at 120×120, mixed
+  signs: 1.9e-3 of a small net reach). The multi-epoch chain is what is pinned.
+- **Later impactors are aimed at a rock that has moved**: 113 to 470 km off its
+  nominal at 120×120 (up to 3 274 km in the 24×24 run, whose last window arrived
+  3.95 yr out). A targeting change - the transfer is solved against the nominal -
+  costing ~0.002-0.026 m/s of re-aim against 7-17 km/s arrivals: negligible.
+  Recorded, not modelled.
+- **Keyholes**: the flown 6-launch campaign's most exposed door is the 7:11, 498 km
+  outside it with a 123 km band - exposure 374 km, clear, but the closest any
+  campaign here came. (The 24×24 prograde plan's was the 7:6 at 1 977 km.)
+- **Probe**: `probe_campaign_grid_resolution_and_sign` (ignored; run by hand)
+  prints the sign census and the count at caps 1/2/3/5/10. Logs:
+  `W:\temp\claude\campaign\`.
 
 #### What this leaves
 
@@ -5732,4 +5752,7 @@ count is never printed without the cap it was counted under.
   applies.
 - **Orbital assembly** is now answerable against a baseline: "one big impactor
   instead of N small ones" is these same windows at a pooled mass.
-- The per-date cap has no default and no source.
+- The per-date cap has no default and no source, and is per grid column - redefine
+  it over a span of time (launches per N days) before the frontend knob.
+- The candidate count (6) is itself a knob that can only make the answer worse by
+  being small; not yet swept.

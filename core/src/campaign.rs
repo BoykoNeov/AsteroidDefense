@@ -61,9 +61,9 @@
 //! Each launch pushes with the mass that **arrives**, not the mass the rocket
 //! lifts ([`crate::impactor_mass`]): DART's flown 3.6 % propellant loss comes off,
 //! and nothing else does — the bus hits the rock, and the launch adapter is already
-//! out of the tables. Measured on the shipping grid, that moves the Falcon Heavy
-//! count at 4 launches a year from 6 to 7 (that plan cleared the line by 1.1 %) and
-//! leaves every other rate where it was.
+//! out of the tables. Measured on the shipping grid at every rate from 1 to 10 a
+//! year, that moves the Falcon Heavy count only at 4 a year, from 6 to 7 (that plan
+//! cleared the line by 1.1 %). 5 a year stays 6, but clears by only 0.4 %.
 //!
 //! What is still optimistic: the whole separated mass is assumed to be a buildable
 //! impactor, with no design margin held back from the rocket's capability. But the

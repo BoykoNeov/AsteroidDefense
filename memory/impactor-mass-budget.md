@@ -1,6 +1,6 @@
 ---
 name: impactor-mass-budget
-description: "2026-10-01 Phase 3 payload mass budget: for a kinetic impactor the bus HITS the rock, so only burned propellant comes off (adapter is already out of the NASA LSP tables). Shipped IMPACT_MASS_FRACTION = DART 579.4/(615-14) = 0.964 in core/src/impactor_mass.rs. Moves FH count only at 4/yr (6 -> 7)."
+description: "2026-10-01 Phase 3 payload mass budget: for a kinetic impactor the bus HITS the rock, so only burned propellant comes off (adapter is already out of the NASA LSP tables). Shipped IMPACT_MASS_FRACTION = DART 579.4/(615-14) = 0.964 in core/src/impactor_mass.rs. Moves FH count only at 4/yr (6 -> 7), all rates 1..10 measured; 5/yr holds at 6 by 0.4 %."
 metadata:
   node_type: memory
   type: project
@@ -30,8 +30,9 @@ Scale-free (fixed Δv -> fixed fraction), so it carries to a 14 t impactor.
 `LaunchVehicle` stays the raw table. Solver seed/cap still sized off launch mass (bracket
 params; answer seed-independent). `[M]` ratio and "(N LAUNCHES)" divide by impact mass.
 
-**Effect (FH-exp, 120x120, scaled-shift check then flown):** counts unchanged at 1/2/3/6+
-per yr; **4/yr goes 6 -> 7** (that plan cleared by 1.1 %). 2/yr stays 7 even at a 10 % cut.
+**Effect (FH-exp, 120x120, every rate 1..10 measured with impact mass, 2/yr flown):**
+short/7/7/**7**/6/6/6/6/6/6 — only **4/yr moved (6 -> 7)**. **5/yr is 6 by just 0.4 %** — the
+next count a design margin would flip. 2/yr flown: perigee 20 670 km (was 21 497).
 
 **Traps:** Python via bash heredoc on this box mangles `²` — write edit scripts to a file
 under W:\temp\claude. Remaining optimism: no design margin held back from LV capability.

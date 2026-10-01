@@ -279,8 +279,8 @@ Read this table first, then the session that owns the layer you are touching.
    against one rock* and *The campaign on the map*. **The payload mass budget:
    DONE 2026-10-01** — every push now uses the mass at impact (DART's flown 3.6 %
    propellant off; the bus hits the rock and the adapter was never in the tables),
-   which moves the count only at 4 a year, 6 → 7. See *What actually hits the
-   rock*. Next: orbital assembly.
+   which moves the count only at 4 a year, 6 → 7 (every rate 1..10 measured; 5 a
+   year stays 6 by 0.4 %). See *What actually hits the rock*. Next: orbital assembly.
 
 ---
 
@@ -5867,7 +5867,9 @@ work.
 
 **Headline: for a kinetic impactor only the propellant burned on the way comes
 off - 3.6 % - and the Falcon Heavy campaign count moves only at 4 launches a year,
-from 6 to 7.** 1 a year still falls short; 2 and 3 a year stay 7; 6 or more stay 6.
+from 6 to 7** (every rate 1 to 10 measured). 1 a year still falls short; 2 and 3 a
+year stay 7; 5 or more stay 6 - but 5 a year clears the line by only **0.4 %**, so
+it is the next count any design margin would move.
 
 #### What comes off, and what does not
 
@@ -5911,7 +5913,7 @@ divide by the impact mass too, since a required mass is a mass at impact; the
 solver's seed and cap stay sized off the launch mass (bracket parameters - the
 answer does not depend on them). `LaunchVehicle` is untouched so its knots stay
 checkable against the source verbatim. The readout prints both masses
-(`DELIVERS 9 173 KG, 8 843 AT IMPACT`); the campaign panel's caveat line now says
+(`DELIVERS 3,569 KG, 3,441 AT IMPACT`, seen on screen); the campaign panel's caveat line now says
 what is assumed instead of "optimistic on mass".
 
 The ~1/65th single-launch headline from the porkchop batch becomes ~1/67th.
@@ -5922,7 +5924,10 @@ The ~1/65th single-launch headline from the porkchop batch becomes ~1/67th.
   shift scaled by the fraction and replanned. Before -> after, launches needed at
   1/2/3/4/6/10 a year: short/7/7/6/6/6 -> short/7/7/**7**/6/6. The 4-a-year plan had
   cleared the line by 1.1 % (|B| 26 241 vs 25 955 km). 2 a year stays 7 even at a
-  10 % cut; at 20 % it becomes 9.
+  10 % cut; at 20 % it becomes 9. **Every rate 1..10, re-measured with the impact
+  mass in the flights:** short/7/7/7/6/6/6/6/6/6 - 5 a year (not in the first
+  check) is 6 at |B| 26 067 km, 0.4 % over the line; it cannot have been fewer
+  before, since 6 is the floor at any rate. The rate-cap probe now includes 5.
 - **Then flown:** the 2-a-year plan (7 launches, same windows) misses with perigee **20 670 km** (was 21 497; the line is 20 000), **2.2e-4** of its reach off the summed prediction; the most exposed keyhole, the 7:11, is now 1 359 km outside its band (was 647). The `[4]` harness (`_campaign_shot.gd`) reads the same plan off the frontend, shows **7 at 4 a year**, and 1 a year falling short (9 launches reach |B| 23 195 of 25 954 km). The porkchop harness now asserts the `[M]` ratio divides by the impact mass (58x Atlas V on its probe cell, was 56x).
 
 #### What this leaves

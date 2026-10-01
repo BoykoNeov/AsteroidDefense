@@ -3298,6 +3298,11 @@ pub fn heaviest_impact_mass_kg() -> f64 {
 /// would return `InfeasibleAtCap` and the view would never show a mass at all — the
 /// number this whole feature exists to print. The best-coupled early window
 /// measured **157 t**, which a hundred brackets and ten does not.
+///
+/// Sized in **launch** mass, while the frontend quotes a cap-hit in launches of
+/// mass **at impact** ([`heaviest_impact_mass_kg`]), so that label reads ~104
+/// launches, not 100. Both are right; the bracket is a search parameter and the
+/// label is the physical count.
 pub fn mass_solve_cap_kg() -> f64 {
     100.0 * heaviest_deliverable_kg()
 }
@@ -4124,7 +4129,7 @@ mod tests {
                 );
             }
             let mut line = String::new();
-            for cap in [1u32, 2, 3, 4, 6, 10] {
+            for cap in [1u32, 2, 3, 4, 5, 6, 10] {
                 let s = match c.plan(cap).expect("plan") {
                     CampaignOutcome::Planned(p) => format!("{}", p.total_launches),
                     CampaignOutcome::Unreachable(p) => format!(

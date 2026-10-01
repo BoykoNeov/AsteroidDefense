@@ -41,9 +41,12 @@
 //! Endpoints are real — Earth from the ephemeris, the asteroid from its integrated
 //! nominal trajectory; the two-body Lambert arc only *sizes and aims* the delivery
 //! and never replaces the full-field propagation that decides hit/miss; and every
-//! quantity here is a **patched-conic planning estimate**. Delivered mass is
-//! modelled *as* impactor mass (no bus/propellant bookkeeping — a Phase-3
-//! refinement, §8).
+//! quantity here is a **patched-conic planning estimate**. The launcher's
+//! delivered (separated) mass and the mass that hits the rock are two numbers:
+//! [`CellDelivery::payload_kg`] is the first, [`CellDelivery::impact_mass_kg`] the
+//! second, and every push is computed from the second
+//! ([`crate::impactor_mass`] — DART's flown 3.6 % propellant loss; the bus itself
+//! hits the rock, and the launch adapter is already out of the tables).
 
 use std::sync::Arc;
 
@@ -53,6 +56,7 @@ use nalgebra::Vector3;
 use crate::deflection::{DeflectionError, DeflectionScenario};
 use crate::epoch::Epoch;
 use crate::geometry::BPlaneEncounter;
+use crate::impactor_mass::impact_mass_kg;
 use crate::lambert::{lambert_universal_multirev, LambertError, MultiRevBranch};
 use crate::launch_vehicle::LaunchVehicle;
 use crate::perturber_field::EphemerisPerturber;
@@ -130,15 +134,20 @@ pub struct Porkchop {
 }
 
 /// What a chosen launcher makes of one transfer cell: the mass it can deliver at
-/// that cell's `C3`, and the along-track Δv that mass would impart (the
-/// effectiveness proxy scaled by the *real* deliverable mass).
+/// that cell's `C3`, the part of it that hits the rock, and the along-track Δv
+/// that impact mass would impart (the effectiveness proxy scaled by real mass).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CellDelivery {
-    /// Deliverable impactor mass at this cell's `C3`, kg. `0` = the launcher
-    /// cannot reach this launch energy (infeasible cell).
+    /// Separated spacecraft mass the launcher delivers at this cell's `C3`, kg —
+    /// the launch-vehicle table's own number. `0` = the launcher cannot reach this
+    /// launch energy (infeasible cell).
     pub payload_kg: f64,
-    /// The along-track Δv the delivered impactor imparts,
-    /// `β·(m_sc/M)·along_track_proj`, m/s — the deliverability-weighted
+    /// The part of `payload_kg` still there at impact, kg —
+    /// [`impact_mass_kg`](crate::impactor_mass::impact_mass_kg). **This** is the
+    /// `m_sc` of every push; `payload_kg` is what the rocket lifts.
+    pub impact_mass_kg: f64,
+    /// The along-track Δv the impactor imparts,
+    /// `β·(m_impact/M)·along_track_proj`, m/s — the deliverability-weighted
     /// effectiveness proxy. `0` when the cell is infeasible.
     pub along_track_dv_ms: f64,
     /// Whether the launcher can reach this cell at all (`payload_kg > 0`).
@@ -279,9 +288,9 @@ pub fn impact_impulse(
     beta * (impactor_mass_kg / asteroid_mass_kg) * v_rel_vec
 }
 
-/// What a launcher makes of one transfer cell: deliverable mass at its `C3`, and
-/// the along-track Δv that mass imparts. Pure — the vehicle-mapping half of the
-/// vehicle-independent grid.
+/// What a launcher makes of one transfer cell: deliverable mass at its `C3`, the
+/// part of it that hits, and the along-track Δv that impact mass imparts. Pure —
+/// the vehicle-mapping half of the vehicle-independent grid.
 pub fn cell_delivery(
     metrics: &TransferMetrics,
     vehicle: &LaunchVehicle,
@@ -289,14 +298,16 @@ pub fn cell_delivery(
     asteroid_mass_kg: f64,
 ) -> CellDelivery {
     let payload_kg = vehicle.payload_kg(metrics.c3_km2_s2);
+    let impact_mass_kg = impact_mass_kg(payload_kg);
     let feasible = payload_kg > 0.0;
     let along_track_dv_ms = if feasible && asteroid_mass_kg > 0.0 {
-        beta * (payload_kg / asteroid_mass_kg) * metrics.along_track_proj_ms
+        beta * (impact_mass_kg / asteroid_mass_kg) * metrics.along_track_proj_ms
     } else {
         0.0
     };
     CellDelivery {
         payload_kg,
+        impact_mass_kg,
         along_track_dv_ms,
         feasible,
     }
@@ -508,6 +519,9 @@ pub fn porkchop_grid(
 /// sized by `β·(m_sc/M)·|v_rel|`. `Ok(None)` is a clean miss (the deflected pass
 /// left the scan gate). Expensive — one propagation — so it runs per *selected*
 /// cell, never across the grid.
+///
+/// `impactor_mass_kg` is the mass **at impact** — a launcher's
+/// [`CellDelivery::impact_mass_kg`], not its `payload_kg`.
 pub fn verify_cell(
     deflection: &DeflectionScenario,
     arrival_epoch: Epoch,
@@ -548,8 +562,10 @@ pub enum MassSolveOutcome {
     },
 }
 
-/// Solve for the impactor mass that raises the full-field b-plane perigee to
-/// `target_perigee_m`, for one cell's coupled-direction impulse at
+/// Solve for the impactor mass **at impact** that raises the full-field b-plane
+/// perigee to `target_perigee_m` (compare it with a launcher's
+/// [`CellDelivery::impact_mass_kg`], not its `payload_kg`), for one cell's
+/// coupled-direction impulse at
 /// `arrival_epoch`. Brackets outward from `seed_mass_kg` — doubling while the seed
 /// is too light, **halving while it is already too heavy** — then bisects the
 /// bracket to `rel_tol`; capped at `mass_cap_kg`.
@@ -809,7 +825,10 @@ mod tests {
         assert!(d.feasible);
         let expected_mass = FALCON_HEAVY_EXPENDABLE.payload_kg(15.0);
         assert!((d.payload_kg - expected_mass).abs() < 1e-6);
-        let expected_dv = beta * (expected_mass / m_ast) * 4000.0;
+        // The push is made by the mass that arrives, not the mass that launched.
+        let at_impact = expected_mass * crate::impactor_mass::IMPACT_MASS_FRACTION;
+        assert!((d.impact_mass_kg - at_impact).abs() < 1e-6);
+        let expected_dv = beta * (at_impact / m_ast) * 4000.0;
         assert!((d.along_track_dv_ms - expected_dv).abs() / expected_dv < 1e-12);
     }
 
@@ -827,6 +846,7 @@ mod tests {
         let d = cell_delivery(&metrics, &ATLAS_V_551, 3.6, 2.0e10);
         assert!(!d.feasible);
         assert_eq!(d.payload_kg, 0.0);
+        assert_eq!(d.impact_mass_kg, 0.0);
         assert_eq!(d.along_track_dv_ms, 0.0);
     }
 

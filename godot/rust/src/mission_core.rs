@@ -51,10 +51,11 @@ use asteroid_core::deflection::DeflectionError;
 use asteroid_core::ephemeris::Ephemeris;
 use asteroid_core::geometry::BPlaneEncounter;
 use asteroid_core::horizons::Neo;
+use asteroid_core::impactor_mass::impact_mass_kg;
 use asteroid_core::launch_vehicle::{LaunchVehicle, LAUNCH_VEHICLES};
 use asteroid_core::mission::{
     cell_delivery, impact_impulse, porkchop_grid, required_impactor_mass, verify_cell,
-    MassSolveOutcome, Porkchop, PorkchopCell, TransferMetrics,
+    CellDelivery, MassSolveOutcome, Porkchop, PorkchopCell, TransferMetrics,
 };
 use asteroid_core::scenario::{
     DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError, SrpParams,
@@ -2995,10 +2996,13 @@ pub struct CellDetail {
     pub along_track_proj_ms: f64,
     /// Complete laps of the Sun this transfer makes (0 = direct).
     pub revolutions: u32,
-    /// Deliverable impactor mass at this `C3` for the selected vehicle, kg.
-    /// `0` means this launcher cannot reach this launch energy.
+    /// Separated spacecraft mass at this `C3` for the selected vehicle, kg — what
+    /// the rocket lifts. `0` means this launcher cannot reach this launch energy.
     pub payload_kg: f64,
-    /// The along-track Δv that delivered mass imparts, m/s (signed).
+    /// The part of `payload_kg` that hits the rock, kg — the mass every push and
+    /// every required-mass ratio uses (`asteroid_core::impactor_mass`).
+    pub impact_mass_kg: f64,
+    /// The along-track Δv that impact mass imparts, m/s (signed).
     pub along_track_dv_ms: f64,
 }
 
@@ -3155,7 +3159,17 @@ impl PorkchopView {
         )
     }
 
-    /// The along-track Δv the delivered mass imparts per cell, m/s (signed;
+    /// Mass at impact per cell for `vehicle`, kg — [`payload_kg_flat`](Self::payload_kg_flat)
+    /// less the propellant burned on the way. The divisor of the `[M]` ratio: a
+    /// required impactor mass is a mass at impact, so it is compared with this.
+    pub fn impact_mass_kg_flat(&self, vehicle: &LaunchVehicle) -> Vec<f64> {
+        self.map_flat(
+            |m| cell_delivery(&m, vehicle, IMPACTOR_BETA, threat_mass_kg()).impact_mass_kg,
+            0.0,
+        )
+    }
+
+    /// The along-track Δv the impact mass imparts per cell, m/s (signed;
     /// `0` where infeasible or blank).
     pub fn along_track_dv_flat(&self, vehicle: &LaunchVehicle) -> Vec<f64> {
         self.map_flat(
@@ -3180,6 +3194,7 @@ impl PorkchopView {
             along_track_proj_ms: m.along_track_proj_ms,
             revolutions: m.revolutions,
             payload_kg: d.payload_kg,
+            impact_mass_kg: d.impact_mass_kg,
             along_track_dv_ms: d.along_track_dv_ms,
         })
     }
@@ -3203,8 +3218,8 @@ impl PorkchopView {
 /// of the layer, ~one propagation, fired per *selected* cell and never across the
 /// grid.
 ///
-/// `impactor_mass_kg` is meant to be the selected launcher's deliverable mass at
-/// that cell's `C3`, which is what makes this the honest question: not "would some
+/// `impactor_mass_kg` is meant to be the selected launcher's mass **at impact** at
+/// that cell's `C3` ([`CellDetail::impact_mass_kg`]), which is what makes this the honest question: not "would some
 /// impulse work" but "does *this launcher* through *this window* work".
 ///
 /// **Cost is cell-dependent: measured 5.8 s at a late arrival, 18.2 s at an early
@@ -3256,6 +3271,13 @@ pub fn heaviest_deliverable_kg() -> f64 {
         .iter()
         .map(|v| v.payload_kg(v.min_c3_km2_s2()))
         .fold(0.0, f64::max)
+}
+
+/// [`heaviest_deliverable_kg`] at impact, kg — the unit a required **impactor**
+/// mass converts into launches with. The solver's seed and cap stay sized off the
+/// launch mass: they are bracket parameters, and the answer does not depend on them.
+pub fn heaviest_impact_mass_kg() -> f64 {
+    impact_mass_kg(heaviest_deliverable_kg())
 }
 
 /// Where the required-mass bracket gives up, kg — **one hundred** of the best
@@ -3407,6 +3429,8 @@ pub struct CampaignCandidate {
     pub revolutions: u32,
     /// What one launch of the chosen vehicle delivers through this window, kg.
     pub payload_kg: f64,
+    /// The part of `payload_kg` that hits the rock, kg — the mass the flight used.
+    pub impact_mass_kg: f64,
     /// The grid's free ranking number: the signed along-track Δv that mass imparts.
     pub proxy_along_track_dv_ms: f64,
     /// The measured b-plane shift of **one** launch, `(ξ, ζ)` metres.
@@ -3488,8 +3512,8 @@ pub struct LaunchCampaignReport {
 }
 
 /// A grid cell as the campaign ranks it: `(launch row, arrival column, metrics,
-/// payload kg, signed along-track Δv m/s)`.
-type RankedCell = (usize, usize, TransferMetrics, f64, f64);
+/// delivery, signed along-track Δv m/s)`.
+type RankedCell = (usize, usize, TransferMetrics, CellDelivery, f64);
 
 /// The campaign's free ranking key for one cell: `|along-track Δv| × lead`, in
 /// m/s·s. A launch's b-plane shift is proportional to it (measured flat to 4 %
@@ -3591,7 +3615,7 @@ pub fn measure_campaign_candidates(
             if !d.feasible {
                 continue;
             }
-            let cell = (i, j, m, d.payload_kg, d.along_track_dv_ms);
+            let cell = (i, j, m, d, d.along_track_dv_ms);
             let slot = best
                 .entry((period, d.along_track_dv_ms > 0.0))
                 .or_insert(cell);
@@ -3609,9 +3633,10 @@ pub fn measure_campaign_candidates(
     // One flight per candidate: what one launch actually does on the b-plane.
     let mut candidates = Vec::with_capacity(ranked.len());
     let mut windows = Vec::with_capacity(ranked.len());
-    for (period, (i, j, m, payload, proxy)) in ranked {
+    for (period, (i, j, m, d, proxy)) in ranked {
         let arrival = Epoch::from_tdb_seconds_past_j2000(arrival_axis[j]);
-        let impulse = impact_impulse(m.v_rel_vec, IMPACTOR_BETA, payload, asteroid_mass);
+        // The mass that arrives, not the mass that launched.
+        let impulse = impact_impulse(m.v_rel_vec, IMPACTOR_BETA, d.impact_mass_kg, asteroid_mass);
         // A single launch that already escapes the scan gate, or dives to a bound
         // pass, has no b-plane point to difference against — and neither happens at
         // one launch's millimetres per second, so it is skipped, not guessed at.
@@ -3630,7 +3655,8 @@ pub fn measure_campaign_candidates(
             arrival_tdb: arrival_axis[j],
             c3_km2_s2: m.c3_km2_s2,
             revolutions: m.revolutions,
-            payload_kg: payload,
+            payload_kg: d.payload_kg,
+            impact_mass_kg: d.impact_mass_kg,
             proxy_along_track_dv_ms: proxy,
             shift_per_launch_m: (shift.x, shift.y),
         });
@@ -3743,9 +3769,10 @@ pub fn fly_campaign_plan(
 /// with periods starting at the grid's first launch date, then
 /// [`CampaignCandidates::plan`], then [`fly_campaign_plan`].
 ///
-/// **The count is optimistic on mass** — delivered mass is counted as impactor
-/// mass, with no spacecraft bus and no propellant — **and pessimistic on search**
-/// (only one window per year and direction is considered). It is not a floor.
+/// **The count is optimistic on margin** — each launch pushes with its mass at
+/// impact (DART's flown propellant loss off), but no design margin is held back
+/// from the rocket's capability — **and pessimistic on search** (only one window
+/// per year and direction is considered). It is not a floor.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn plan_launch_campaign(
     scenario: &RealFieldScenario,
@@ -4086,12 +4113,12 @@ mod tests {
             );
             for k in &c.candidates {
                 println!(
-                    "  yr {:2} {}  launch {:5.2} / arrive {:5.2} yr before impact, {:6.0} kg, shift/launch ({:+8.1}, {:+8.1}) km",
+                    "  yr {:2} {}  launch {:5.2} / arrive {:5.2} yr before impact, {:6.0} kg at impact, shift/launch ({:+8.1}, {:+8.1}) km",
                     k.period,
                     if k.proxy_along_track_dv_ms > 0.0 { "pro " } else { "retr" },
                     (impact - k.launch_tdb) / yr,
                     (impact - k.arrival_tdb) / yr,
-                    k.payload_kg,
+                    k.impact_mass_kg,
                     k.shift_per_launch_m.0 / 1e3,
                     k.shift_per_launch_m.1 / 1e3
                 );
@@ -4173,12 +4200,12 @@ mod tests {
         for c in &r.candidates {
             println!(
                 "  launch {:5.2} yr before impact, arrive {:5.2} yr before, C3 {:6.2}, {} laps, \
-                 {:6.0} kg, proxy {:+.2e} m/s, shift/launch ({:+8.1}, {:+8.1}) km",
+                 {:6.0} kg at impact, proxy {:+.2e} m/s, shift/launch ({:+8.1}, {:+8.1}) km",
                 (impact - c.launch_tdb) / 3.155_76e7,
                 (impact - c.arrival_tdb) / 3.155_76e7,
                 c.c3_km2_s2,
                 c.revolutions,
-                c.payload_kg,
+                c.impact_mass_kg,
                 c.proxy_along_track_dv_ms,
                 c.shift_per_launch_m.0 / 1e3,
                 c.shift_per_launch_m.1 / 1e3
@@ -4241,7 +4268,7 @@ mod tests {
             );
         };
         println!(
-            "{} Falcon Heavy (expendable) launches - optimistic on mass (no bus or propellant), \
+            "{} Falcon Heavy (expendable) launches - mass at impact, no design margin held, \
              and only as good as this grid and these {} candidates",
             plan.total_launches,
             r.candidates.len()
@@ -4313,7 +4340,7 @@ mod tests {
                     impulse_per_launch: impact_impulse(
                         m.v_rel_vec,
                         IMPACTOR_BETA,
-                        c.payload_kg,
+                        c.impact_mass_kg,
                         threat_mass_kg(),
                     ),
                     shift_per_launch: shift(0),
@@ -4576,9 +4603,19 @@ mod tests {
             "cell {k} has a {:.1} d transfer, below the grid's own {MIN_TOF_DAYS} d floor",
             d.tof_days
         );
-        // Δv is the delivered mass acting through the projection — including its
-        // sign, which says which way the push moves the semi-major axis.
-        let expect_dv = IMPACTOR_BETA * (d.payload_kg / threat_mass_kg()) * d.along_track_proj_ms;
+        // Δv is the mass that *arrives* acting through the projection — including
+        // its sign, which says which way the push moves the semi-major axis. The
+        // launch mass would overstate it by the propellant burned on the way.
+        assert!(
+            (d.impact_mass_kg - d.payload_kg * asteroid_core::impactor_mass::IMPACT_MASS_FRACTION)
+                .abs()
+                <= 1e-9 * d.payload_kg.max(1.0),
+            "cell {k}: impact mass {} is not the launch mass {} less the propellant",
+            d.impact_mass_kg,
+            d.payload_kg
+        );
+        let expect_dv =
+            IMPACTOR_BETA * (d.impact_mass_kg / threat_mass_kg()) * d.along_track_proj_ms;
         assert!((d.along_track_dv_ms - expect_dv).abs() <= 1e-12 * expect_dv.abs().max(1e-12));
         assert_eq!(
             d.along_track_dv_ms < 0.0,
@@ -4749,8 +4786,14 @@ mod tests {
         let metrics = view.metrics_at(i, j).expect("metrics");
         println!(
             "verify cell ({i},{j}): C3 {:.1} km²/s², N={}, TOF {:.0} d, {} delivers {:.0} kg \
-             → along-track {:+.3} m/s",
-            d.c3_km2_s2, d.revolutions, d.tof_days, strong.name, d.payload_kg, d.along_track_dv_ms
+             ({:.0} at impact) → along-track {:+.3} m/s",
+            d.c3_km2_s2,
+            d.revolutions,
+            d.tof_days,
+            strong.name,
+            d.payload_kg,
+            d.impact_mass_kg,
+            d.along_track_dv_ms
         );
 
         // (1) Zero delivered mass ⇒ zero impulse ⇒ the nominal hit, to the metre.
@@ -4777,8 +4820,8 @@ mod tests {
         // so the discriminating claim is that the b-plane MOVED, and moved outward
         // for a prograde push. A verify that silently ignored its mass would fail
         // here while passing (1).
-        let verdict =
-            verify_porkchop_cell(&scenario, d.arrival_tdb, &metrics, d.payload_kg).expect("verify");
+        let verdict = verify_porkchop_cell(&scenario, d.arrival_tdb, &metrics, d.impact_mass_kg)
+            .expect("verify");
         let moved_b = match verdict {
             CellVerdict::CleanMiss => f64::INFINITY,
             CellVerdict::Encounter {
@@ -4787,14 +4830,14 @@ mod tests {
             CellVerdict::NotHyperbolic => 0.0,
         };
         println!(
-            "  {} kg through this window: |B| {nominal_b:.0} → {moved_b:.0} m (capture {capture:.0} m)",
-            d.payload_kg as i64
+            "  {} kg at impact through this window: |B| {nominal_b:.0} → {moved_b:.0} m (capture {capture:.0} m)",
+            d.impact_mass_kg as i64
         );
         assert!(
             (moved_b - nominal_b).abs() > 1.0,
             "delivering {:.0} kg changed |B| by less than a metre ({nominal_b:.1} → \
              {moved_b:.1}) — the impactor mass is not reaching the propagation",
-            d.payload_kg
+            d.impact_mass_kg
         );
 
         // (3) A deliberately huge impactor must clear the capture disc — the

@@ -226,10 +226,18 @@ func _run() -> void:
 			% float(m.target_perigee_m))
 	if str(m.outcome) == "feasible":
 		var need: float = float(m.impactor_mass_kg)
-		var pay: float = float(Sim.pork_cell().payload_kg)
-		print("PORKSHOT  needs %.0f kg; %s delivers %.0f kg here (%.1fx)"
-			% [need, Sim.pork_vehicle_name(), pay, need / maxf(pay, 1.0)])
+		var here := Sim.pork_cell()
+		var pay: float = float(here.payload_kg)
+		var hits: float = float(here.impact_mass_kg)
+		print("PORKSHOT  needs %.0f kg at impact; %s delivers %.0f kg here, %.0f at impact (%.1fx)"
+			% [need, Sim.pork_vehicle_name(), pay, hits, need / maxf(hits, 1.0)])
 		assert(need > 0.0, "a feasible requirement of zero mass is not a requirement")
+		# A requirement is a mass at impact, so it divides by the mass that arrives -
+		# less than the launch mass by the propellant burned on the way.
+		assert(hits > 0.0 and hits < pay, "impact mass %f must be >0 and below the payload %f" % [hits, pay])
+		assert(Sim.pork_required_mass_label().ends_with("%dx %s" % [
+			int(round(need / hits)), Sim.pork_vehicle_name()]),
+			"the [M] ratio must divide by the impact mass: " + Sim.pork_required_mass_label())
 	else:
 		print("PORKSHOT  over the cap: reaches %.0f km of %.0f km"
 			% [float(m.perigee_reached_m) / 1000.0, float(m.target_perigee_m) / 1000.0])

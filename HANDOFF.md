@@ -8,7 +8,7 @@ This document is the starting context for continuing development in Claude Code.
 
 ---
 
-## Where things stand — 2026-09-23
+## Where things stand — 2026-10-01
 
 A dashboard, because §10's task list has been complete since the MVP and the
 truth has lived in the dated session sections at the end of this file since.
@@ -20,6 +20,7 @@ Read this table first, then the session that owns the layer you are touching.
 | The thesis: `required_dv` curve, kinetic / nuclear-standoff / gravity-tractor spectrum | done; curve slope −1.05 measured | `core/src/deflection.rs`, `forces/tractor.rs`, `viewer/` |
 | Tier 2: 1PN, Yarkovsky, SRP, J2, 16 sb441 perturbers, Pluto toggle | done; per-term closed forms + Apophis vs Horizons capstone | `core/src/forces/*`, `core/tests/capstone_neo_vs_horizons.rs` |
 | Mission design: Lambert (multi-rev), porkchop, launch vehicles, required impactor mass, cell verify | done | `core/src/{lambert,mission,launch_vehicle}.rs` |
+| **Impactor mass budget** — the rocket's separated mass vs the mass that hits the rock, sourced (NASA LSP adapter bookkeeping, DART flown masses) and cross-checked against DART's own Δv budget | **done 2026-10-01**; only burned propellant comes off (3.6 %), so the Falcon Heavy campaign count moves only at 4 a year (6 → 7) | `core/src/impactor_mass.rs`, `CellDelivery::impact_mass_kg` |
 | Tier 3a: covariance → b-plane Jacobian → P(impact), linearity shell | done (the synthetic rock's covariance is invented, labelled) | `core/src/uncertainty.rs` |
 | **Tier 3e: real covariances** — JPL SBDB cometary elements + 8×8 matrix at their own epoch, marginalised, unit-scaled, mapped through a measured element→state Jacobian, and gated three ways against JPL's own numbers | **done 2026-09-06**; Apophis' 2029 ellipse is 18.2 km — the same size as our own dynamical error over the arc | `core/src/{sbdb,frames}.rs`, `pyref/fetch_sbdb_covariance.py`, `core/tests/fixtures/apophis.sbdb` |
 | **Tier 3b: keyholes** — Öpik (ξ, ζ) frame and b-vector sign pinned, resonant circles in closed form, keyhole widths, the keyhole map, **the 3:4 keyhole flown to a return impact** | **done 2026-09-02** | `core/src/keyhole.rs`, `examples/probe_keyhole_{map,return}.rs`, `docs/keyhole_map.*` |
@@ -275,8 +276,11 @@ Read this table first, then the session that owns the layer you are touching.
    **7 Falcon Heavy (expendable) launches at 2 or 3 a year, 6 at 4+, short of
    the line at 1** on the shipping grid, retrograde — optimistic on mass (no bus or
    propellant yet), not a floor. `[C]` on the map shows it. See *Several launches
-   against one rock* and *The campaign on the map*. Next in order: the payload
-   mass budget, then orbital assembly.
+   against one rock* and *The campaign on the map*. **The payload mass budget:
+   DONE 2026-10-01** — every push now uses the mass at impact (DART's flown 3.6 %
+   propellant off; the bus hits the rock and the adapter was never in the tables),
+   which moves the count only at 4 a year, 6 → 7. See *What actually hits the
+   rock*. Next: orbital assembly.
 
 ---
 
@@ -601,7 +605,7 @@ That MVP delivers the whole lesson *and* an honest hit→miss flip. Everything b
 
 ### Phase 3 (future)
 
-- Plausible launch vehicles + payload mass budgets
+- Plausible launch vehicles + payload mass budgets — **both DONE** (vehicles 2026-07; mass budget 2026-10-01, *What actually hits the rock*)
 - Orbital assembly (assemble-in-orbit when payload too big for one launch)
 - Standing/ready Earth-defense systems
 - Multi-mission campaigns
@@ -5844,8 +5848,8 @@ a per-date cap of 3 on 120 rows was ~40 launches a year of allowance.
 
 #### What this leaves
 
-- **The payload mass budget** (bus + propellant out of delivered mass) - still the
-  biggest known optimism in every count here.
+- ~~**The payload mass budget**~~ - **DONE 2026-10-01**, see *What actually hits
+  the rock* (the next section): 4 a year becomes 7 launches, nothing else moves.
 - **Rolling-year cap - a decision for the user.** Fixed slots let a plan double
   the rate across a boundary (the shipping plan does). A rolling rule is not a
   partition, so it needs a real search (small integer program over ~18 windows)
@@ -5853,3 +5857,78 @@ a per-date cap of 3 on 120 rows was ~40 launches a year of allowance.
 - **Grid convergence of window quality**: a 240×240 run would say whether 120 rows
   still leaves better windows unfound.
 - Orbital assembly against this baseline.
+
+### What actually hits the rock - 2026-10-01 session (Phase 3: the payload mass budget)
+
+Every launch count so far pushed the rock with the **whole** mass the rocket can
+send to that launch energy. The item on the list was "take bus and propellant out
+of delivered mass". Half of that was wrong, and finding out which half was the
+work.
+
+**Headline: for a kinetic impactor only the propellant burned on the way comes
+off - 3.6 % - and the Falcon Heavy campaign count moves only at 4 launches a year,
+from 6 to 7.** 1 a year still falls short; 2 and 3 a year stay 7; 6 or more stay 6.
+
+#### What comes off, and what does not
+
+- **The bus does not.** Structure, avionics, power and any unburned propellant all
+  hit the rock and carry momentum. A science mission's dry-mass budget is the
+  wrong model here; the advisor caught the overstatement before any code.
+- **The launch adapter does not either - it was never in the tables.** NASA's
+  Launch Services Program figures (what AMAT tabulates) are *separated spacecraft
+  mass* with the separation system "book-kept on the launch vehicle side". The
+  Girija dataset paper and the elvperf site itself do not say so; three NASA AO
+  ELV information summaries do, verbatim (SMEX 2007, MIDEX 2016 Rev A, EVM-3
+  2020). Quoted in `core/src/impactor_mass.rs`.
+- **Propellant burned before impact does.** The transfers are ballistic Lambert
+  arcs, so that is course corrections, attitude control and terminal targeting.
+
+#### The number, flown
+
+`IMPACT_MASS_FRACTION = 579.4 / (615 - 14) = 0.9641`: DART's launch mass (APL
+Final Technical Report, Oct 2023), less LICIACube, the ~14 kg cubesat it released
+15 days out (Dotto et al. 2021), against its mass at impact (Cheng et al. 2023,
+Nature, Extended Data Table 1). The fraction is *derived* from the three cited
+masses in code, never written down alone, and a test pins the arithmetic.
+
+**Cross-checked against a second source:** the same report sizes DART's hydrazine
+for a 99th-percentile 55.2 m/s, on MR-103G thrusters at 202-224 s. The rocket
+equation turns that into 2.5-2.8 % - the same few percent, and *below* the flown
+3.6 % because a Δv budget leaves out attitude control and the ion-engine demo. A
+test pins that ordering. The fraction is scale-free (fixed Δv -> fixed fraction), so
+it carries from DART's 0.6 t to a 14 t impactor; what would break it is a mission
+needing a different Δv (a deep-space burn, a rendezvous), which this layer never
+flies.
+
+#### Where it is used - two names on purpose
+
+`CellDelivery` now carries `payload_kg` (what the rocket lifts, the raw table) and
+`impact_mass_kg` (what hits). Every push - the porkchop's along-track Δv, `[E]`
+verify, the campaign's candidate flights - uses the second. `payload_kg` was not
+repurposed: one name meaning two masses is a bug this codebase has had before. The
+`[M]` ratio (required impactor mass ÷ one launch) and its "(N LAUNCHES)" now
+divide by the impact mass too, since a required mass is a mass at impact; the
+solver's seed and cap stay sized off the launch mass (bracket parameters - the
+answer does not depend on them). `LaunchVehicle` is untouched so its knots stay
+checkable against the source verbatim. The readout prints both masses
+(`DELIVERS 9 173 KG, 8 843 AT IMPACT`); the campaign panel's caveat line now says
+what is assumed instead of "optimistic on mass".
+
+The ~1/65th single-launch headline from the porkchop batch becomes ~1/67th.
+
+#### Measured
+
+- **Cheap check first** (the shift is linear in mass): every candidate's measured
+  shift scaled by the fraction and replanned. Before -> after, launches needed at
+  1/2/3/4/6/10 a year: short/7/7/6/6/6 -> short/7/7/**7**/6/6. The 4-a-year plan had
+  cleared the line by 1.1 % (|B| 26 241 vs 25 955 km). 2 a year stays 7 even at a
+  10 % cut; at 20 % it becomes 9.
+- **Then flown:** the 2-a-year plan (7 launches, same windows) misses with perigee **20 670 km** (was 21 497; the line is 20 000), **2.2e-4** of its reach off the summed prediction; the most exposed keyhole, the 7:11, is now 1 359 km outside its band (was 647). The `[4]` harness (`_campaign_shot.gd`) reads the same plan off the frontend, shows **7 at 4 a year**, and 1 a year falling short (9 launches reach |B| 23 195 of 25 954 km). The porkchop harness now asserts the `[M]` ratio divides by the impact mass (58x Atlas V on its probe cell, was 56x).
+
+#### What this leaves
+
+- **Design margin.** The whole separated mass is still assumed to be a buildable
+  impactor; real proposals hold margin against the rocket's capability. No sourced
+  number for it yet - the next honest refinement of every count.
+- The open items from *The campaign on the map* stand: the rolling-year cap (a
+  user decision), grid convergence at 240×240, and orbital assembly, which is next.

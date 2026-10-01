@@ -333,7 +333,8 @@ func _draw_panel(origin: Vector2, bright: Color, mid: Color, dim: Color, faint: 
 	_t(Vector2(x, y), "C3 %7.2f KM2/S2   IMPACT SPEED %5.2f KM/S" %
 		[float(cell.c3_km2_s2), float(cell.arrival_v_rel_ms) / 1000.0], mid)
 	if pay > 0.0:
-		_t(Vector2(col2, y), "DELIVERS %s KG" % Sim.group_num(int(pay)), bright)
+		_t(Vector2(col2, y), "DELIVERS %s KG, %s AT IMPACT" % [
+			Sim.group_num(int(pay)), Sim.group_num(int(float(cell.impact_mass_kg)))], bright)
 	else:
 		_t(Vector2(col2, y), "DELIVERS NOTHING (ABOVE %s CEILING)" %
 			("C3 %.0f" % Sim.pork_vehicle_max_c3()), dim)
@@ -498,7 +499,7 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 			y += lh
 
 	y += lh * 0.3
-	_t(Vector2(x, y), "OPTIMISTIC ON MASS: DELIVERED MASS COUNTED AS IMPACTOR, NO BUS OR PROPELLANT", faint,
+	_t(Vector2(x, y), "PUSHES USE MASS AT IMPACT (DART'S 3.6% PROPELLANT OFF) - NO DESIGN MARGIN HELD", faint,
 		_fs - 3)
 	y += lh - 3.0
 	_t(Vector2(x, y), "ONE WINDOW PER YEAR AND PUSH DIRECTION, AND A YEAR'S LAUNCHES ALL USE IT",

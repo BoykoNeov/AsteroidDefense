@@ -455,6 +455,7 @@ var pork_c3 := PackedFloat64Array()
 var pork_along := PackedFloat64Array()   # signed along-track projection, m/s
 var pork_revs := PackedInt32Array()      # complete solar laps; -1 where blank
 var pork_payload := PackedFloat64Array() # deliverable mass for pork_vehicle, kg
+var pork_impact := PackedFloat64Array()  # the part of it that hits the rock, kg
 var pork_dv := PackedFloat64Array()      # delivered along-track dv, m/s (signed)
 var pork_vehicle := 0                    # index into the core's launcher table
 var pork_metric := 0                     # index into PORK_METRICS
@@ -1158,6 +1159,7 @@ func _invalidate_derived_views() -> void:
 	pork_along = PackedFloat64Array()
 	pork_revs = PackedInt32Array()
 	pork_payload = PackedFloat64Array()
+	pork_impact = PackedFloat64Array()
 	pork_dv = PackedFloat64Array()
 	pork_i = 0
 	pork_j = 0
@@ -1862,6 +1864,7 @@ func _fetch_porkchop() -> void:
 ## never re-solves a single Lambert arc.
 func _fetch_porkchop_vehicle() -> void:
 	pork_payload = mission.porkchop_payload_kg(pork_vehicle)
+	pork_impact = mission.porkchop_impact_mass_kg(pork_vehicle)
 	pork_dv = mission.porkchop_along_track_dv(pork_vehicle)
 
 
@@ -2515,7 +2518,7 @@ func pork_required_mass_label() -> String:
 			var cap: float = float(m.mass_cap_kg)
 			var got: float = float(m.perigee_reached_m) / 1000.0
 			return "OVER %s KG (%d LAUNCHES) - GETS %s OF %s KM" % [
-				group_num(int(cap)), int(round(cap / maxf(mission.heaviest_deliverable_kg(), 1.0))),
+				group_num(int(cap)), int(round(cap / maxf(mission.heaviest_impact_mass_kg(), 1.0))),
 				group_num(int(got)), group_num(int(tgt))]
 	return "UNKNOWN REQUIREMENT"
 
@@ -2524,12 +2527,14 @@ func pork_required_mass_label() -> String:
 ## the requirement was solved for**, which the caller passes explicitly rather than
 ## letting this reach for the cursor. The ratio is the point of the whole readout;
 ## it is left off rather than faked when the selected rocket delivers nothing there.
+## The divisor is the mass **at impact**: the requirement is an impactor mass, and
+## dividing it by the launch mass would undercount the launches by the propellant.
 func _mass_ratio_suffix(required_kg: float, i: int, j: int) -> String:
 	var k := pork_index(i, j)
-	if k < 0 or pork_payload[k] <= 0.0:
+	if k < 0 or k >= pork_impact.size() or pork_impact[k] <= 0.0:
 		return ""
 	return " - %sx %s" % [
-		group_num(int(round(required_kg / pork_payload[k]))), pork_vehicle_name()]
+		group_num(int(round(required_kg / pork_impact[k]))), pork_vehicle_name()]
 
 
 func try_commit() -> void:

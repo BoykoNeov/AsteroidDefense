@@ -29,13 +29,13 @@ use asteroid_core::{Epoch, OrbitalElements};
 use mission_core::tractor_min_hover_radii;
 use mission_core::{
     busiest_rolling_year, display_comet, fly_campaign_plan, heaviest_deliverable_kg,
-    launch_vehicle, launch_vehicle_count, load_neo_bodies, measure_campaign_candidates,
-    measure_tier2_shifts, mount_small_bodies, probe_tow_plan, required_cell_mass, seed_orrery_body,
-    solve_required_dv_anchor, tractor_readout as score_tractor_plan, verify_porkchop_cell,
-    BuiltScenario, CampaignCandidates, CampaignFlight, CellVerdict, KeyholePlanRow, MissionCore,
-    OrreryBody, PorkchopView, ThreatOrbitKnobs, Tier2Shifts, Tier3View, TractorPlan,
-    CAMPAIGN_PERIOD_S, REQUIRED_DV_LAW_MIN_PERIODS, SB441_BODIES, THREAT_RADIUS_M,
-    TRACTOR_HOVER_RADII,
+    heaviest_impact_mass_kg, launch_vehicle, launch_vehicle_count, load_neo_bodies,
+    measure_campaign_candidates, measure_tier2_shifts, mount_small_bodies, probe_tow_plan,
+    required_cell_mass, seed_orrery_body, solve_required_dv_anchor,
+    tractor_readout as score_tractor_plan, verify_porkchop_cell, BuiltScenario, CampaignCandidates,
+    CampaignFlight, CellVerdict, KeyholePlanRow, MissionCore, OrreryBody, PorkchopView,
+    ThreatOrbitKnobs, Tier2Shifts, Tier3View, TractorPlan, CAMPAIGN_PERIOD_S,
+    REQUIRED_DV_LAW_MIN_PERIODS, SB441_BODIES, THREAT_RADIUS_M, TRACTOR_HOVER_RADII,
 };
 
 /// The launcher at a GDScript-supplied index, or `None` for a negative or
@@ -162,7 +162,7 @@ struct Mission {
     ///
     /// **No vehicle index, and that is the point.** The requirement is a property of
     /// the *window* — its arrival geometry and its lead — not of whatever rocket is
-    /// selected; the frontend divides it by the launcher's payload to get the ratio.
+    /// selected; the frontend divides it by the launcher's mass at impact to get the ratio.
     /// Keying it by vehicle would invite re-solving 30 s of propagation on a `[L]`
     /// press that cannot change the answer.
     pending_mass: (i64, i64),
@@ -1271,7 +1271,8 @@ impl Mission {
             .unwrap_or_default()
     }
 
-    /// Deliverable impactor mass per cell for launcher `vehicle`, kg.
+    /// Separated spacecraft mass per cell for launcher `vehicle`, kg — what the
+    /// rocket lifts. The mass that hits is [`porkchop_impact_mass_kg`](Self::porkchop_impact_mass_kg).
     ///
     /// `0` means **this launcher cannot reach that `C3`** — and is *also* `0` where
     /// no transfer exists at all. Read against [`porkchop_c3`](Self::porkchop_c3) to
@@ -1285,7 +1286,18 @@ impl Mission {
         }
     }
 
-    /// The along-track Δv the delivered mass imparts per cell, m/s (signed; `0`
+    /// Mass at impact per cell for launcher `vehicle`, kg — the payload less the
+    /// propellant burned on the way. A required impactor mass is compared with
+    /// this, never with the payload. `0` exactly where the payload is `0`.
+    #[func]
+    fn porkchop_impact_mass_kg(&self, vehicle: i64) -> PackedFloat64Array {
+        match (self.porkchop.as_ref(), vehicle_at(vehicle)) {
+            (Some(p), Some(v)) => PackedFloat64Array::from(p.impact_mass_kg_flat(v).as_slice()),
+            _ => PackedFloat64Array::new(),
+        }
+    }
+
+    /// The along-track Δv the impact mass imparts per cell, m/s (signed; `0`
     /// where the launcher cannot reach the cell, or no transfer exists).
     #[func]
     fn porkchop_along_track_dv(&self, vehicle: i64) -> PackedFloat64Array {
@@ -1319,6 +1331,7 @@ impl Mission {
         d.set("along_track_proj_ms", c.along_track_proj_ms);
         d.set("revolutions", c.revolutions as i64);
         d.set("payload_kg", c.payload_kg);
+        d.set("impact_mass_kg", c.impact_mass_kg);
         d.set("along_track_dv_ms", c.along_track_dv_ms);
         d
     }
@@ -1350,8 +1363,9 @@ impl Mission {
     /// Re-fly the asteroid through the **full `n`-body field** after the impulse
     /// this cell's window would actually deliver, on a worker thread.
     ///
-    /// The impactor mass is the selected launcher's deliverable payload at that
-    /// cell's `C3`, which is what makes this the honest question — not "would some
+    /// The impactor mass is the selected launcher's payload at that cell's `C3`
+    /// **as it arrives** (less the propellant burned on the way), which is what
+    /// makes this the honest question — not "would some
     /// impulse work" but "does *this launcher*, through *this window*, work". One
     /// propagation (~1 s), so it is fired per selected cell and never across a grid.
     ///
@@ -1394,7 +1408,7 @@ impl Mission {
             return false;
         }
         let arrival_tdb = detail.arrival_tdb;
-        let mass = detail.payload_kg;
+        let mass = detail.impact_mass_kg;
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let result = verify_porkchop_cell(&scenario, arrival_tdb, &metrics, mass)
@@ -1653,6 +1667,14 @@ impl Mission {
         heaviest_deliverable_kg()
     }
 
+    /// [`heaviest_deliverable_kg`](Self::heaviest_deliverable_kg) as it arrives at
+    /// the rock, kg — the divisor that turns a required **impactor** mass into a
+    /// count of launches.
+    #[func]
+    fn heaviest_impact_mass_kg(&self) -> f64 {
+        heaviest_impact_mass_kg()
+    }
+
     // --- Multi-launch campaigns on the launch-window map ---------------------
 
     /// Measure every launch year's best window for `vehicle`, on a worker — the
@@ -1751,6 +1773,7 @@ impl Mission {
     /// `period_count`, `target_b_km`, `nominal_b_km` (`|B|` of the nominal),
     /// `windows` (an array, one dictionary per window flown: `launch_index`,
     /// `arrival_index`, `period`, `launch_tdb`, `arrival_tdb`, `payload_kg`,
+    /// `impact_mass_kg` (what of it hits the rock — the mass the flight used),
     /// `prograde`, `shift_km` — `|shift|` of one launch — and `launches`, how many
     /// the plan sends through it), `busiest_rolling_year` (the most launches inside
     /// any 365.25 days - it can exceed the cap, which is per fixed year), and
@@ -1802,6 +1825,7 @@ impl Mission {
             w.set("launch_tdb", k.launch_tdb);
             w.set("arrival_tdb", k.arrival_tdb);
             w.set("payload_kg", k.payload_kg);
+            w.set("impact_mass_kg", k.impact_mass_kg);
             w.set("prograde", k.proxy_along_track_dv_ms > 0.0);
             w.set(
                 "shift_km",

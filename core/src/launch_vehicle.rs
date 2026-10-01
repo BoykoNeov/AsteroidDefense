@@ -43,10 +43,12 @@
 //! *exactly* at their own `C3` values — the transcription was faithful, only the
 //! sampling was too sparse.
 //!
-//! # The one caveat that remains, labelled as such
-//! Delivered mass is modelled *as* impactor mass — no cruise-stage / bus /
-//! propellant bookkeeping; that is a Phase-3 refinement (§8), and the mission layer
-//! labels its outputs as patched-conic planning estimates accordingly.
+//! # What these numbers are: separated spacecraft mass, not impact mass
+//! The tables are NASA LSP *separated spacecraft mass* — the launch adapter and
+//! separation system are already book-kept on the launch-vehicle side. What hits
+//! the rock is a little less (the propellant burned on the way); that conversion
+//! lives in [`crate::impactor_mass`], and this module deliberately stays the raw
+//! table so its knots can keep being checked against the source verbatim.
 //!
 //! # Kernel-free by construction
 //! Pure tabulated data + interpolation; no ephemeris, no I/O. Validated in

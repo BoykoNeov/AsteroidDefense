@@ -57,14 +57,19 @@
 //! it is not a partition — a greedy fill can take one strong window that blocks two
 //! neighbours worth more together — so it would need a real search.
 //!
-//! # Optimistic on mass, so not a floor
-//! The delivered mass is counted *as* impactor mass — no spacecraft bus, no
-//! propellant ([`crate::mission`]'s module doc). For "does one launch fail?" that
-//! was the safe direction: it fails even with generous mass. For "how many
-//! launches?" it is the flattering direction. But the count is **not** a lower
-//! bound either: the planner only sees the windows its caller flew, and a better
-//! window it was never shown would lower the count. Optimistic on mass, pessimistic
-//! on search — a count, not a bound either way.
+//! # On mass: the impact mass, but no design margin — so not a floor
+//! Each launch pushes with the mass that **arrives**, not the mass the rocket
+//! lifts ([`crate::impactor_mass`]): DART's flown 3.6 % propellant loss comes off,
+//! and nothing else does — the bus hits the rock, and the launch adapter is already
+//! out of the tables. Measured on the shipping grid, that moves the Falcon Heavy
+//! count at 4 launches a year from 6 to 7 (that plan cleared the line by 1.1 %) and
+//! leaves every other rate where it was.
+//!
+//! What is still optimistic: the whole separated mass is assumed to be a buildable
+//! impactor, with no design margin held back from the rocket's capability. But the
+//! count is **not** a lower bound either: the planner only sees the windows its
+//! caller flew, and a better window it was never shown would lower the count.
+//! Optimistic on margin, pessimistic on search — a count, not a bound either way.
 
 use nalgebra::{Vector2, Vector3};
 

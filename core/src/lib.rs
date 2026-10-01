@@ -31,6 +31,7 @@ pub mod forces;
 pub mod frames;
 pub mod geometry;
 pub mod horizons;
+pub mod impactor_mass;
 pub mod integrator;
 pub mod kernels;
 pub mod keyhole;

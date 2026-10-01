@@ -280,7 +280,10 @@ Read this table first, then the session that owns the layer you are touching.
    DONE 2026-10-01** — every push now uses the mass at impact (DART's flown 3.6 %
    propellant off; the bus hits the rock and the adapter was never in the tables),
    which moves the count only at 4 a year, 6 → 7 (every rate 1..10 measured; 5 a
-   year stays 6 by 0.4 %). See *What actually hits the rock*. Next: orbital assembly.
+   year stays 6 by 0.4 %). See *What actually hits the rock*. **Grid convergence:
+   measured 2026-10-01 - the 120×120 map is NOT converged**: at 477×477 (converged by
+   953) 2-4 a year need **6**, not 7 (flown), and 1 a year sits on the line. Which
+   fix ships is open - see *Is the 120×120 map fine enough?*. Next: orbital assembly.
 
 ---
 
@@ -5854,8 +5857,8 @@ a per-date cap of 3 on 120 rows was ~40 launches a year of allowance.
   the rate across a boundary (the shipping plan does). A rolling rule is not a
   partition, so it needs a real search (small integer program over ~18 windows)
   instead of the greedy fill.
-- **Grid convergence of window quality**: a 240×240 run would say whether 120 rows
-  still leaves better windows unfound.
+- ~~**Grid convergence of window quality**~~ - **measured 2026-10-01**: not
+  converged at 120; see *Is the 120×120 map fine enough?*.
 - Orbital assembly against this baseline.
 
 ### What actually hits the rock - 2026-10-01 session (Phase 3: the payload mass budget)
@@ -5937,3 +5940,76 @@ The ~1/65th single-launch headline from the porkchop batch becomes ~1/67th.
   number for it yet - the next honest refinement of every count.
 - The open items from *The campaign on the map* stand: the rolling-year cap (a
   user decision), grid convergence at 240×240, and orbital assembly, which is next.
+
+### Is the 120×120 map fine enough? No - 2026-10-01 session (Phase 3: campaign grid convergence)
+
+The open item from *The campaign on the map*: "120 not proven converged - 60 → 120
+still gained 30 %". Measured now on **nested** grids - the axes are
+`lo + k·(hi − lo)/(n − 1)` over fixed spans, so 239, 477 and 953 samples contain
+every one of 120's points (240 would interleave, not refine), and each year's best
+ranking key can only rise. Probes: `probe_campaign_grid_convergence` (sizes from
+`CAMPAIGN_GRID_SIZES`, flies a plan with `CAMPAIGN_FLY_RATE`) and
+`probe_campaign_window_width` (grid only; `CAMPAIGN_GRID_N`), both ignored, in
+`godot/rust/src/mission_core.rs`. Falcon Heavy expendable, shipping anchor.
+
+**Headline: the 120 map is not converged, and the counts move.**
+
+| grid | 1/yr | 2/yr | 3/yr | 4/yr | 5..10/yr | best retro shift/launch |
+|---|---|---|---|---|---|---|
+| 120×120 | short (23 196 / 25 955 km) | 7 | 7 | 7 | 6 | 3 948 km |
+| 239×239 | short (24 310) | 7 | 7 | 7 | 6 | 3 948 |
+| 477×477 | short (25 819 - 0.5 % off) | **6** | **6** | **6** | 6 | **4 492** |
+| 953×953 | **9** | 6 | 6 | 6 | 6 | 4 492 |
+| 120×477 (finer arrival only) | short (24 923) | 7 | 7 | 7 | 6 | 3 948 |
+| 477×120 (finer launch only) | short (24 400) | 7 | 7 | 7 | 6 | 3 979 |
+
+- **477 → 953 is converged for 2..10 a year**: every year's winner is the same
+  cell, flown shifts move ≤ 2 % (one year 6 %), and the 4 492 km window holds to
+  the kilometre. **1 a year sits on the line** (0.5 % short at 477, clears at 953
+  with 9) - call it "at the line", not a flip either way.
+- **Flown, not summed** (2 a year): 120 reproduces the published plan exactly
+  (7 launches, perigee 20 670 km); **477 flies 6 launches to perigee 20 268 km**
+  (line 20 000), 2.1e-4 off the arithmetic, most exposed keyhole the 5:8 at
+  1 048 km outside its band.
+- **Both axes are needed.** Refining launch dates alone or arrival dates alone
+  keeps 7; the new year-2 window needs a launch date *and* an arrival date the
+  coarse grid has neither of.
+
+#### Why: the best arrival sits on a cliff
+
+For a given launch date the cheapest transfer is usually a lapping one (1-2 laps
+of the Sun), and its cheapest arrival lies **right at the edge where that lap
+family stops existing** - one arrival step later the solver reports "this many laps
+do not fit". The edge is real geometry, not a solver failure, measured at the
+winner (477, year 2 retrograde, 301 d flight): each 7.55 d of later arrival swings
+the transfer angle 12.5° (the rock is fast there), so the 1-lap family needs
+**+15.8 d** more flight than it gets, then +34.3 d. Re-flown Sun-only (RK4, 1 h
+steps), **all 79 conics with C3 < 200 km²/s²** around the 18 winners close on the
+rock to under a kilometre. 63 others do not close (up to 10¹¹ km off), every one at
+C3 ≥ 496 - multi-lap roots far beyond any launcher, probably Sun-grazing arcs a 1 h
+step cannot follow or bad roots; never feasible, so never chosen, but unverified. So the windows are real
+and the coarse grid misses them **systematically**: within 5 % of the peak, the key
+spans one arrival step at every grid (7.6 d at 477, 3.8 d at 953), i.e. the peak is
+a cliff edge and the error is the distance from the last sample to it.
+
+Two consequences:
+
+- The ranking proxy was **not** the confound: on nested grids the proxy rose
+  everywhere, and the flown shift fell in only 3 of 18 slots, by ≤ 2 %.
+- Narrow in arrival date is not narrow operationally - each launch picks its own
+  flight time - but the launch-date width is 6-19 days within 5 % at the winners.
+  That adds to the existing caveat that a year's launches all use its best date.
+
+**Cost of a finer shipping grid**: 477×477 builds in **17.8 s in the debug DLL**
+(19 s release - the core is `opt-level = 3` in dev too), against ~1 s at 120;
+953 is ~100 s. The candidate flights stay ~3.5 min (18 flights) at any size.
+
+#### What this leaves - a decision for the user
+
+- **Leave it**: keep 120, and say the count is pessimistic by one launch at 2-4 a
+  year.
+- **Campaign on its own 477 grid**: the map keeps drawing 120; the campaign
+  measure (already minutes) adds ~18 s and gets the converged count. The drawn
+  window boxes would then sit between map cells.
+- **Follow the edge**: per launch date, solve each lap family's arrival edge
+  directly instead of sampling - exact, cheap per row, more code.

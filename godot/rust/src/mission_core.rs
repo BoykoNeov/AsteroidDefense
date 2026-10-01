@@ -4145,6 +4145,425 @@ mod tests {
         }
     }
 
+    /// Probe, run by hand (`--ignored --nocapture`): has the shipping 120×120 grid
+    /// found the campaign's windows, or would a finer map find better ones?
+    ///
+    /// - **Nested grids.** The axes are `lo + k·(hi − lo)/(n − 1)` over fixed spans,
+    ///   so 239 samples contain every one of 120's and halve the spacing (cell
+    ///   `(i, j)` at 120 is `(2i, 2j)` at 239). Each year's best *proxy* can then
+    ///   only rise; "finer found nothing" means something rather than luck of
+    ///   where the samples fell. (240 would interleave, not refine.)
+    /// - **Grid vs ranking.** Each year's window is the cell with the highest
+    ///   [`campaign_proxy`], then flown. The proxy is nested-monotone; the flown
+    ///   shift is not. A year whose proxy rises while its flown shift falls is the
+    ///   proxy choosing a different cell, not the grid missing a window - so both
+    ///   are printed side by side, per year and push direction.
+    /// - **Pre-registered bar.** Converged if every year's best flown shift moves
+    ///   < ~5 % and the launch counts at 1..=10 a year do not move.
+    #[test]
+    #[ignore]
+    fn probe_campaign_grid_convergence() {
+        if !have_kernels() {
+            return;
+        }
+        use asteroid_core::launch_vehicle::FALCON_HEAVY_EXPENDABLE;
+        use std::time::Instant;
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+        let impact = mc.impact_tdb_seconds();
+        let v = &FALCON_HEAVY_EXPENDABLE;
+        let yr = 3.155_76e7;
+
+        // Sizes as `CAMPAIGN_GRID_SIZES=120x120,239x239` (launch rows x arrival
+        // columns); the first is the base the per-year table is indexed in.
+        let sizes: Vec<(usize, usize)> = std::env::var("CAMPAIGN_GRID_SIZES")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(|p| {
+                        let (a, b) = p.split_once('x').expect("sizes like 120x120,239x239");
+                        (a.trim().parse().unwrap(), b.trim().parse().unwrap())
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![(120, 120), (239, 239)]);
+
+        // Each result: (rows, cols, grid build s, flights s, candidates).
+        let results: Vec<(usize, usize, f64, f64, CampaignCandidates)> = std::thread::scope(|s| {
+            let handles: Vec<_> = sizes
+                .iter()
+                .map(|&(nl, na)| {
+                    let scenario = Arc::clone(&scenario);
+                    s.spawn(move || {
+                        let t0 = Instant::now();
+                        let view = PorkchopView::build(&scenario, nl, na).expect("grid");
+                        let build_s = t0.elapsed().as_secs_f64();
+                        println!("{nl}x{na}: grid built in {build_s:.0} s");
+                        let t1 = Instant::now();
+                        // The shipping anchor: the first launch date, which is
+                        // the same epoch at every size.
+                        let c =
+                            measure_campaign_candidates(&scenario, &view, v, view.launch_tdb()[0])
+                                .expect("candidates");
+                        (nl, na, build_s, t1.elapsed().as_secs_f64(), c)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        let key = |k: &CampaignCandidate| {
+            campaign_proxy(k.proxy_along_track_dv_ms, impact - k.arrival_tdb)
+        };
+        let shift_km = |k: &CampaignCandidate| {
+            Vector2::new(k.shift_per_launch_m.0, k.shift_per_launch_m.1).norm() / 1e3
+        };
+        for (nl, na, build_s, fly_s, c) in &results {
+            println!(
+                "\n{nl}x{na}: grid {build_s:.0} s, {} candidates flown in {fly_s:.0} s, {} periods",
+                c.candidates.len(),
+                c.period_count
+            );
+            for prograde in [false, true] {
+                let best = c
+                    .candidates
+                    .iter()
+                    .filter(|k| (k.proxy_along_track_dv_ms > 0.0) == prograde)
+                    .map(shift_km)
+                    .fold(0.0, f64::max);
+                println!(
+                    "  best {} shift per launch: {best:.0} km",
+                    if prograde { "prograde  " } else { "retrograde" }
+                );
+            }
+            let mut line = String::new();
+            for cap in 1u32..=10 {
+                let s = match c.plan(cap).expect("plan") {
+                    CampaignOutcome::Planned(p) => format!("{}", p.total_launches),
+                    CampaignOutcome::Unreachable(p) => format!(
+                        "short({:.0}/{:.0} km)",
+                        p.predicted_impact_parameter() / 1e3,
+                        c.target_b_m / 1e3
+                    ),
+                    CampaignOutcome::AlreadyClear => "clear".into(),
+                };
+                line.push_str(&format!("  {cap}/yr: {s}"));
+            }
+            println!("  launches needed ->{line}");
+            // Every headline count so far was flown, not just summed: with
+            // `CAMPAIGN_FLY_RATE=N`, fly this size's plan at N a year whole.
+            if let Some(rate) = std::env::var("CAMPAIGN_FLY_RATE")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+            {
+                let CampaignOutcome::Planned(p) = c.plan(rate).expect("plan") else {
+                    println!("  flown at {rate}/yr: no plan to fly");
+                    continue;
+                };
+                let t = Instant::now();
+                let flight = fly_campaign_plan(&scenario, c, &p, 7, PLACEMENT_BAND_A_KM)
+                    .expect("campaign flight");
+                println!(
+                    "  flown at {rate}/yr ({} launches, {:.0} s): {:?}, nonlinearity {:?}, b {:?} km, keyhole {:?}",
+                    p.total_launches,
+                    t.elapsed().as_secs_f64(),
+                    flight.flown,
+                    flight.nonlinearity,
+                    flight.flown_b_m.map(|b| Vector2::new(b.0, b.1).norm() / 1e3),
+                    flight.keyhole_at_risk.map(|k| format!("{}:{} margin {:.0} km, band {:.0} km, exposure {:.0} km", k.h, k.k, k.margin_km, k.placement_band_km, k.exposure_km))
+                );
+            }
+        }
+
+        // Per year and push direction, every size side by side. The cell is printed
+        // in units of the coarsest grid's spacing, so a fractional index is a date
+        // the coarse grid cannot represent.
+        let (base_l, base_a) = sizes[0];
+        let mut slots: Vec<(u32, bool)> = results
+            .iter()
+            .flat_map(|r| {
+                r.4.candidates
+                    .iter()
+                    .map(|k| (k.period, k.proxy_along_track_dv_ms > 0.0))
+            })
+            .collect();
+        slots.sort();
+        slots.dedup();
+        println!("\nper year (cell in {base_l}x{base_a} units; proxy m/s*yr; flown |shift| km)");
+        for (period, prograde) in slots {
+            let mut row = format!("  yr {period:2} {}", if prograde { "pro " } else { "retr" });
+            for (nl, na, _, _, c) in &results {
+                match c
+                    .candidates
+                    .iter()
+                    .find(|k| k.period == period && (k.proxy_along_track_dv_ms > 0.0) == prograde)
+                {
+                    Some(k) => {
+                        let li = k.launch_index as f64 * (base_l - 1) as f64 / (*nl - 1) as f64;
+                        let ai = k.arrival_index as f64 * (base_a - 1) as f64 / (*na - 1) as f64;
+                        row.push_str(&format!(
+                            " | {nl}: ({li:6.1},{ai:6.1}) proxy {:7.4} shift {:7.1} lead {:4.2}",
+                            key(k) / yr,
+                            shift_km(k),
+                            (impact - k.arrival_tdb) / yr
+                        ));
+                    }
+                    None => row.push_str(&format!(" | {nl}: -")),
+                }
+            }
+            println!("{row}");
+        }
+    }
+
+    /// Probe, run by hand (`--ignored --nocapture`): is each year's best window a
+    /// ridge or a single-date spike? No flights — the grid alone.
+    ///
+    /// The grid convergence probe found the 477×477 map's best retrograde window
+    /// pushing 14 % harder than anything at 120 or 239, at a cell whose arrival
+    /// neighbours the 239 map had already sampled lower. A real window is a broad
+    /// ridge; a one-cell peak, or a lap-count / C3 change at the winner, is a
+    /// Lambert branch edge, and either way a window a day wide makes "all of a
+    /// year's launches use its best date" more optimistic. So for each year's
+    /// winner (per push direction) this prints the cells ±3 along each axis, and
+    /// how many days along each axis the ranking key stays within 5 % of its peak.
+    #[test]
+    #[ignore]
+    fn probe_campaign_window_width() {
+        if !have_kernels() {
+            return;
+        }
+        use asteroid_core::launch_vehicle::FALCON_HEAVY_EXPENDABLE;
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+        let impact = mc.impact_tdb_seconds();
+        let v = &FALCON_HEAVY_EXPENDABLE;
+        let yr = 3.155_76e7;
+        let n: usize = std::env::var("CAMPAIGN_GRID_N")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(477);
+        let t0 = std::time::Instant::now();
+        let view = PorkchopView::build(&scenario, n, n).expect("grid");
+        println!(
+            "{n}x{n}: grid built in {:.1} s ({} profile)",
+            t0.elapsed().as_secs_f64(),
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+        );
+        let la = view.launch_tdb();
+        let aa = view.arrival_tdb();
+        let (dl, da) = ((la[1] - la[0]) / 86_400.0, (aa[1] - aa[0]) / 86_400.0);
+        let asteroid_mass = threat_mass_kg();
+        use asteroid_core::lambert::{lambert_universal_multirev, LambertError, MultiRevBranch};
+        use asteroid_core::perturber_field::EphemerisPerturber;
+        let eph = scenario.ephemeris();
+        let mu_sun = eph.sun_gm_m3_s2().expect("sun GM");
+        let sun = EphemerisPerturber::new(Arc::clone(eph), SUN_J2000);
+        let earth = EphemerisPerturber::new(Arc::clone(eph), EARTH_J2000);
+        let ds = scenario.deflection().expect("deflection");
+        let helio = |body: StateVector, t: f64| {
+            let s = sun
+                .state_at(Epoch::from_tdb_seconds_past_j2000(t))
+                .expect("sun");
+            StateVector::new(body.position - s.position, body.velocity - s.velocity)
+        };
+        let earth_at = |t: f64| {
+            helio(
+                earth
+                    .state_at(Epoch::from_tdb_seconds_past_j2000(t))
+                    .expect("earth"),
+                t,
+            )
+        };
+        let ast_at = |t: f64| {
+            helio(
+                ds.nominal()
+                    .state_at(Epoch::from_tdb_seconds_past_j2000(t))
+                    .expect("asteroid"),
+                t,
+            )
+        };
+        // The feasible cell's metrics and delivery, else None (no transfer, or
+        // beyond the launcher).
+        let cell = |i: usize, j: usize| -> Option<(TransferMetrics, CellDelivery)> {
+            let m = view.metrics_at(i, j)?;
+            let d = cell_delivery(&m, v, IMPACTOR_BETA, asteroid_mass);
+            d.feasible.then_some((m, d))
+        };
+        let key = |i: usize, j: usize, prograde: bool| -> f64 {
+            cell(i, j)
+                .filter(|(_, d)| (d.along_track_dv_ms > 0.0) == prograde)
+                .map_or(0.0, |(_, d)| {
+                    campaign_proxy(d.along_track_dv_ms, impact - aa[j])
+                })
+        };
+        let origin = la[0];
+        let mut best: std::collections::BTreeMap<(u32, bool), (usize, usize, f64)> =
+            std::collections::BTreeMap::new();
+        for i in 0..n {
+            let p = campaign_period(la[i], origin);
+            for j in 0..n {
+                for prograde in [false, true] {
+                    let k = key(i, j, prograde);
+                    if k <= 0.0 {
+                        continue;
+                    }
+                    let slot = best.entry((p, prograde)).or_insert((i, j, k));
+                    if k > slot.2 {
+                        *slot = (i, j, k);
+                    }
+                }
+            }
+        }
+        println!("{n}x{n}: launch dates {dl:.2} d apart, arrival dates {da:.2} d apart");
+        for ((p, prograde), (i, j, k)) in &best {
+            // Days along each axis the key stays within 5 % of the peak, walking out
+            // contiguously from the winner (a gap ends the run).
+            let run = |di: isize, dj: isize| -> usize {
+                let mut s = 0;
+                loop {
+                    let (ii, jj) = (
+                        *i as isize + di * (s + 1) as isize,
+                        *j as isize + dj * (s + 1) as isize,
+                    );
+                    if ii < 0 || jj < 0 || ii >= n as isize || jj >= n as isize {
+                        return s;
+                    }
+                    if key(ii as usize, jj as usize, *prograde) < 0.95 * k {
+                        return s;
+                    }
+                    s += 1;
+                }
+            };
+            let w_launch = (run(-1, 0) + run(1, 0) + 1) as f64 * dl;
+            let w_arrival = (run(0, -1) + run(0, 1) + 1) as f64 * da;
+            println!(
+                "\nyr {p} {}: winner ({i},{j}) key {:.4} m/s*yr, lead {:.2} yr; within 5%: {w_launch:.1} d of launch, {w_arrival:.1} d of arrival",
+                if *prograde { "pro " } else { "retr" },
+                k / yr,
+                (impact - aa[*j]) / yr
+            );
+            for (axis, di, dj) in [("launch ", 1isize, 0isize), ("arrival", 0, 1)] {
+                for s in -3isize..=3 {
+                    let (ii, jj) = (*i as isize + di * s, *j as isize + dj * s);
+                    if ii < 0 || jj < 0 || ii >= n as isize || jj >= n as isize {
+                        continue;
+                    }
+                    let (ii, jj) = (ii as usize, jj as usize);
+                    let line = match cell(ii, jj) {
+                        Some((m, d)) => format!(
+                            "key {:+.4}  C3 {:6.2}  laps {}  impact {:6.0} kg  |v_rel| {:5.2} km/s  along {:+6.2} km/s",
+                            d.along_track_dv_ms.signum() * campaign_proxy(d.along_track_dv_ms, impact - aa[jj]) / yr,
+                            m.c3_km2_s2,
+                            m.revolutions,
+                            d.impact_mass_kg,
+                            m.arrival_v_rel_ms / 1e3,
+                            m.along_track_proj_ms / 1e3
+                        ),
+                        None => "infeasible / no transfer".into(),
+                    };
+                    println!("  {axis} {s:+}: {line}");
+                }
+            }
+            // Why the cells past the winner are empty: every lap count and branch
+            // solved on its own, with its own failure — a real "no cheap transfer"
+            // and a solver giving up look identical in the grid.
+            for s in 0..=2usize {
+                let jj = *j + s;
+                if jj >= n {
+                    break;
+                }
+                let (e0, a0) = (earth_at(la[*i]), ast_at(aa[jj]));
+                let c = e0.position.cross(&a0.position);
+                let mut dnu = c.norm().atan2(e0.position.dot(&a0.position)).to_degrees();
+                if c.z < 0.0 {
+                    dnu = 360.0 - dnu; // the prograde sense, as the grid solves it
+                }
+                let mut line = format!(
+                    "  lambert at arrival +{s} (tof {:.1} d, angle {dnu:.1} deg):",
+                    (aa[jj] - la[*i]) / 86_400.0
+                );
+                for (rev, branch) in [
+                    (0u32, MultiRevBranch::LowZ),
+                    (1, MultiRevBranch::LowZ),
+                    (1, MultiRevBranch::HighZ),
+                    (2, MultiRevBranch::LowZ),
+                    (2, MultiRevBranch::HighZ),
+                ] {
+                    let (e, a) = (earth_at(la[*i]), ast_at(aa[jj]));
+                    let r = lambert_universal_multirev(
+                        e.position,
+                        a.position,
+                        aa[jj] - la[*i],
+                        mu_sun,
+                        true,
+                        rev,
+                        branch,
+                    );
+                    let tof = aa[jj] - la[*i];
+                    let txt = match r {
+                        Ok(sol) => {
+                            // Re-fly the conic Sun-only (RK4, 1 h steps) and say how far
+                            // from the rock it ends: a real transfer closes to metres
+                            // per AU, a bad root does not close at all.
+                            let steps = (tof / 3600.0).ceil() as usize;
+                            let h = tof / steps as f64;
+                            let acc = |r: Vector3<f64>| -mu_sun * r / r.norm().powi(3);
+                            let (mut r, mut vv) = (e.position, sol.v1);
+                            for _ in 0..steps {
+                                let k1v = acc(r);
+                                let k1r = vv;
+                                let k2v = acc(r + 0.5 * h * k1r);
+                                let k2r = vv + 0.5 * h * k1v;
+                                let k3v = acc(r + 0.5 * h * k2r);
+                                let k3r = vv + 0.5 * h * k2v;
+                                let k4v = acc(r + h * k3r);
+                                let k4r = vv + h * k3v;
+                                r += h / 6.0 * (k1r + 2.0 * k2r + 2.0 * k3r + k4r);
+                                vv += h / 6.0 * (k1v + 2.0 * k2v + 2.0 * k3v + k4v);
+                            }
+                            format!(
+                                "C3 {:.1} (closes {:.0} km)",
+                                (sol.v1 - e.velocity).norm_squared() * 1e-6,
+                                (r - a.position).norm() / 1e3
+                            )
+                        }
+                        Err(LambertError::NonConvergence {
+                            residual_seconds, ..
+                        }) => {
+                            format!("NONCONV(res {residual_seconds:.0} s)")
+                        }
+                        Err(LambertError::NoSolutionForRevolutions {
+                            minimum_tof_seconds,
+                            ..
+                        }) => format!(
+                            "no-fit(needs {:+.1} d more)",
+                            (minimum_tof_seconds - tof) / 86_400.0
+                        ),
+                        Err(LambertError::DegenerateGeometry { .. }) => "degenerate".into(),
+                        Err(e) => format!("{e:?}"),
+                    };
+                    let tag = match branch {
+                        MultiRevBranch::LowZ => "lo",
+                        MultiRevBranch::HighZ => "hi",
+                    };
+                    line.push_str(&format!(
+                        "  N{rev}{}: {txt}",
+                        if rev == 0 { "" } else { tag }
+                    ));
+                }
+                println!("{line}");
+            }
+        }
+    }
+
     /// A multi-launch campaign on the real field, end to end: rank, fly the
     /// candidates, plan, fly the plan whole, and read it back.
     ///

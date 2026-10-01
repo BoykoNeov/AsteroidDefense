@@ -4407,8 +4407,8 @@ mod tests {
         let origin = la[0];
         let mut best: std::collections::BTreeMap<(u32, bool), (usize, usize, f64)> =
             std::collections::BTreeMap::new();
-        for i in 0..n {
-            let p = campaign_period(la[i], origin);
+        for (i, &t_launch) in la.iter().enumerate() {
+            let p = campaign_period(t_launch, origin);
             for j in 0..n {
                 for prograde in [false, true] {
                     let k = key(i, j, prograde);

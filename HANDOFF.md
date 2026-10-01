@@ -281,8 +281,8 @@ Read this table first, then the session that owns the layer you are touching.
    propellant off; the bus hits the rock and the adapter was never in the tables),
    which moves the count only at 4 a year, 6 → 7 (every rate 1..10 measured; 5 a
    year stays 6 by 0.4 %). See *What actually hits the rock*. **Grid convergence:
-   measured 2026-10-01 - the 120×120 map is NOT converged**: at 477×477 (converged by
-   953) 2-4 a year need **6**, not 7 (flown), and 1 a year sits on the line. Which
+   measured 2026-10-01 - the 120×120 map is NOT converged**: at 477×477 (holding at
+   953 for 2..10 a year) 2-4 a year need **6**, not 7 (flown), and 1 a year is at the line. Which
    fix ships is open - see *Is the 120×120 map fine enough?*. Next: orbital assembly.
 
 ---
@@ -5959,14 +5959,24 @@ ranking key can only rise. Probes: `probe_campaign_grid_convergence` (sizes from
 | 120×120 | short (23 196 / 25 955 km) | 7 | 7 | 7 | 6 | 3 948 km |
 | 239×239 | short (24 310) | 7 | 7 | 7 | 6 | 3 948 |
 | 477×477 | short (25 819 - 0.5 % off) | **6** | **6** | **6** | 6 | **4 492** |
-| 953×953 | **9** | 6 | 6 | 6 | 6 | 4 492 |
+| 953×953 | 9 (arithmetic, not flown) | 6 | 6 | 6 | 6 | 4 492 |
 | 120×477 (finer arrival only) | short (24 923) | 7 | 7 | 7 | 6 | 3 948 |
 | 477×120 (finer launch only) | short (24 400) | 7 | 7 | 7 | 6 | 3 979 |
 
-- **477 → 953 is converged for 2..10 a year**: every year's winner is the same
-  cell, flown shifts move ≤ 2 % (one year 6 %), and the 4 492 km window holds to
-  the kilometre. **1 a year sits on the line** (0.5 % short at 477, clears at 953
-  with 9) - call it "at the line", not a flip either way.
+- **The pre-registered bar failed at 477 → 953**, on both clauses (every year's
+  flown shift < 5 %, and no count at 1..10 a year moves): year 4 prograde moved
+  +5.8 %, and 1 a year flipped from 0.5 % short to 9 launches. Most winners
+  moved to dates only the 953 grid has; flown shifts moved ≤ 3 % apart from that
+  +5.8 %. The retrograde winners of years 1, 2 and 7 did not move at all (the
+  4 492 km window holds to the kilometre); the other retrograde ones moved
+  −0.2 % to +3.0 %.
+- **Why the failure does not reach 2..10 a year**: the plans are retrograde only
+  (the +5.8 % is prograde); the 6-launch plan flies to 1.3 % over the line in
+  perigee; and 5 launches would need ~20 % more push per launch (6/5), far beyond
+  anything 477 → 953 moved. So 6 at 2..10 a year is the measured answer. **1 a year
+  is at the line**: short by 0.5 % at 477, clear at 953 by arithmetic only (never
+  flown, margin not printed). The old headline "1 a year falls short at every
+  year-start tried" was a 120-grid result and is now contradicted at 953.
 - **Flown, not summed** (2 a year): 120 reproduces the published plan exactly
   (7 launches, perigee 20 670 km); **477 flies 6 launches to perigee 20 268 km**
   (line 20 000), 2.1e-4 off the arithmetic, most exposed keyhole the 5:8 at
@@ -5975,12 +5985,14 @@ ranking key can only rise. Probes: `probe_campaign_grid_convergence` (sizes from
   keeps 7; the new year-2 window needs a launch date *and* an arrival date the
   coarse grid has neither of.
 
-#### Why: the best arrival sits on a cliff
+#### Why: the best arrival sits just inside an edge
 
 For a given launch date the cheapest transfer is usually a lapping one (1-2 laps
-of the Sun), and its cheapest arrival lies **right at the edge where that lap
-family stops existing** - one arrival step later the solver reports "this many laps
-do not fit". The edge is real geometry, not a solver failure, measured at the
+of the Sun), and its best arrival lies **just inside the edge where that lap family
+stops existing** - one arrival step later the solver reports "this many laps do not
+fit". (Not *on* the edge: there the two solution branches merge, at a launch energy
+between the low branch's C3 39 and the high branch's 103 one step before it - worse
+than the winner. That is also why the 4 492 km window did not move at 953.) The edge is real geometry, not a solver failure, measured at the
 winner (477, year 2 retrograde, 301 d flight): each 7.55 d of later arrival swings
 the transfer angle 12.5° (the rock is fast there), so the 1-lap family needs
 **+15.8 d** more flight than it gets, then +34.3 d. Re-flown Sun-only (RK4, 1 h
@@ -5989,13 +6001,15 @@ rock to under a kilometre. 63 others do not close (up to 10¹¹ km off), every o
 C3 ≥ 496 - multi-lap roots far beyond any launcher, probably Sun-grazing arcs a 1 h
 step cannot follow or bad roots; never feasible, so never chosen, but unverified. So the windows are real
 and the coarse grid misses them **systematically**: within 5 % of the peak, the key
-spans one arrival step at every grid (7.6 d at 477, 3.8 d at 953), i.e. the peak is
-a cliff edge and the error is the distance from the last sample to it.
+spans one arrival step at every grid (7.6 d at 477, 3.8 d at 953) - the peak is a
+steep shoulder against the edge, so the error is roughly how far the last sample
+before the edge falls from it.
 
 Two consequences:
 
 - The ranking proxy was **not** the confound: on nested grids the proxy rose
-  everywhere, and the flown shift fell in only 3 of 18 slots, by ≤ 2 %.
+  everywhere, and the flown shift fell in only 3 of 18 slots at 120 → 239 (by
+  ≤ 2 %) and 1 of 18 at 477 → 953 (0.2 %).
 - Narrow in arrival date is not narrow operationally - each launch picks its own
   flight time - but the launch-date width is 6-19 days within 5 % at the winners.
   That adds to the existing caveat that a year's launches all use its best date.
@@ -6006,10 +6020,15 @@ Two consequences:
 
 #### What this leaves - a decision for the user
 
-- **Leave it**: keep 120, and say the count is pessimistic by one launch at 2-4 a
-  year.
+- **Leave it**: keep 120 everywhere and print the count as pessimistic by one
+  launch at 2-4 a year. Free; the panel's number is knowingly off.
 - **Campaign on its own 477 grid**: the map keeps drawing 120; the campaign
-  measure (already minutes) adds ~18 s and gets the converged count. The drawn
-  window boxes would then sit between map cells.
-- **Follow the edge**: per launch date, solve each lap family's arrival edge
-  directly instead of sampling - exact, cheap per row, more code.
+  measure (already minutes) adds ~18 s and gets the measured count. Cost: the
+  window boxes drawn on the map sit between its cells - a visible mismatch, in a
+  view that has repeatedly passed tests and failed the frame.
+- **Search each launch date's arrival up to the edge**: per launch date (and per
+  lap family), maximise the ranking key over arrival date, bounded by where the
+  family stops fitting - continuous instead of sampled. Exact and cheap per row,
+  keeps the 120 map, but more code, and the launch axis still needs refining
+  (both axes were needed above).
+- Whichever ships, **1 a year is labelled "at the line"**, not short or clear.

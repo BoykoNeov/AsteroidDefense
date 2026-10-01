@@ -481,8 +481,12 @@ const CAMPAIGN_RATE_MAX := 12
 ## How close to the target a campaign's predicted |B| must come, as a fraction of
 ## it either side, before its count is printed "AT THE LINE" rather than as a clear
 ## yes or no. Set by how far two honest searches disagree near the line: the window
-## search and the 953x953 map, flown at 1 a year, part by ~0.7 % in perigee
-## (HANDOFF *The windows searched continuously*).
+## search and the 953x953 map, flown at 1 a year, part by ~0.7 % in perigee - a
+## spread measured under the retired fixed-year cap, on retrograde windows
+## (HANDOFF *The windows searched continuously*). A plan resting on prograde
+## windows, which the search has not converged, spreads far wider: two seeds part by
+## ~6 % of the target |B| at 1 in any 12 months. So a count outside this band is not
+## necessarily settled - only one inside it is necessarily not.
 const CAMPAIGN_AT_LINE_FRACTION := 0.01
 var pork_campaign_rate := 2
 var pork_campaign_open := false          # the panel shows the campaign, not the cell

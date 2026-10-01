@@ -6103,7 +6103,9 @@ year carries the label; 2 a year (2.7 %) does not.
 
 Supersedes: "7 at 2-3 a year" (120 cells), "6 → 7 at 4 a year from the mass budget"
 (120 cells), "1 a year falls short" (120 cells). The headline is now **6 Falcon Heavy
-(expendable) launches at 2 to 10 a year, 9 at 1 a year (at the line)**.
+(expendable) launches at 2 to 10 a year, 9 at 1 a year (at the line)** - under the
+fixed-year cap. **Under the rolling cap that replaced it the same day, 1 a year
+falls short** - see *A launch cap in any 12 months*.
 
 ### A launch cap in any 12 months - 2026-10-01 session (Phase 3: the rolling-year rule)
 
@@ -6133,13 +6135,18 @@ and lap count, scaled by the ranking key. The key tracks the flown shift only to
 10 %) - the "flat to 4 %" in `campaign_proxy`'s doc was a six-window number and is
 corrected. So: plan on the pool, fly every pool window the plan uses, swap in the
 measured shift, replan, until the plan uses flown windows only - for every rate
-1..`CAMPAIGN_MAX_RATE` (12) at measure time, so the knob stays free. A plan that
+1..`CAMPAIGN_MAX_RATE` (12) at measure time, so the knob stays free. **Each push
+direction is planned on its own**, so each direction's best chain is flown and the
+two are compared on flown shifts (a joint loop flies only the winner's windows, and
+at 1 a year the loser was being ruled out on estimates); and the sweep over rates
+repeats until a whole pass flies nothing, since a window flown for one rate moves
+the estimates another rate planned on. A plan that
 is best over the whole pool and uses flown windows only is also best over the
 flown ones, so `plan(rate)` afterwards is arithmetic on flown windows.
 
 **And the flights now run side by side** (one deflection scenario per thread):
-the measurement went from ~3.5 min to **50 s** with 24 windows flown (the 18
-per-year bests plus 6 the 1/yr plan needed).
+the measurement went from ~3.5 min to **85 s** with 40 windows flown (the 18
+per-year bests plus 22 that each direction's rolling plans needed).
 
 **Result, FH expendable (`probe_campaign_rolling_check`):** the fixed-year count
 is a lower bound on the rolling one (a fixed year is one of the rolling windows),
@@ -6147,11 +6154,26 @@ and at **2..12 per 12 months** the fixed plans already kept every 365.25 days
 within the rate - **6 launches, unchanged, same plans** (2/yr flown: perigee
 20 533 km). **1 in any 12 months now falls short**: 9 launches exactly a year apart
 reach |B| 22 362 of 25 955 km, flown to perigee **16 542 km** (a miss, short of the
-20 000 km line). That plan is **prograde** - the direction the search has not
-converged - and at the finest seed tried (0.5 d x 477) it gets closer, |B| 23 950
-km, perigee **18 065 km**, still short. So "falls short" holds at both seeds; by
-how much (8-14 % of the target |B|) is seed-dependent. This retires "prograde is a
-lower bound no plan uses": under the rolling cap the 1/yr plan uses it.
+20 000 km line). Both directions flown, both seeds:
+
+| 1 in any 12 months | retrograde best, flown | prograde best, flown |
+|---|---|---|
+| shipping seed (2 d x 120) | perigee 15 862 km | **16 542 km** |
+| finest seed (0.5 d x 477) | perigee 16 197 km | **18 065 km** |
+
+So it falls short **whichever way it pushes and at both seeds**; prograde is the
+better direction, and prograde is the one the search has not converged, so by how
+much it falls short (8-14 % of the target |B|) is seed-dependent. This retires
+"prograde is a lower bound no plan uses": under the rolling cap the 1/yr plan uses
+it. One caveat on every count here: "best window" means best by the ranking key
+(as the 953 reference also chose), and the key tracks the flown shift only to
+24 % across the per-year bests, 30 % across the 20 strong retrograde windows flown,
+and **57 %** once three weak ones join (keys 2.5-8 % of the strongest: the key is
+the *along-track* push, and where that is small the rest of the push dominates).
+So the counts are true flown counts **for the windows chosen** - another date could
+still push harder. `a_launch_campaign_flies_the_way_it_was_planned` now pins the
+key's ordering on strong windows only (key >= 10 % of the direction's strongest),
+which is the claim the ranking needs.
 
 **Frontend.** "RATE UP TO N IN ANY 12 MONTHS"; the dashed fixed-year lines are
 gone from the map; the windows line prints "BUSIEST 12 MO" (at most the rate by

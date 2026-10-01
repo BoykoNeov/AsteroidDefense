@@ -3557,8 +3557,11 @@ pub struct LaunchCampaignReport {
 /// windows measured (3.95 to 8.66 yr of lead) sat within 4 %, but across all nine
 /// retrograde per-year windows of the continuous search the shift per unit of key
 /// spans 79 000 to 98 000 km per m/s·yr (24 %), and prograde 62 000 to 68 000
-/// (10 %; 2026-10-01, `probe_campaign_rolling_check`). Good enough to *choose*
-/// windows with; never used to *count* — every count is on flown shifts.
+/// (10 %; 2026-10-01, `probe_campaign_rolling_check`); across the 20 strong
+/// retrograde windows the rolling cap flies it is 30 %, and **57 %** once three weak
+/// ones join (along-track push 2.5-8 % of the strongest, where the other components
+/// of the push dominate). Good enough to *choose* strong windows with; never used
+/// to *count* — every count is on flown shifts.
 pub fn campaign_proxy(along_track_dv_ms: f64, lead_seconds: f64) -> f64 {
     along_track_dv_ms.abs() * lead_seconds.max(0.0)
 }
@@ -4177,47 +4180,82 @@ pub fn measure_campaign_candidates_from(
             Vector2::new(k.shift_per_launch_m.0, k.shift_per_launch_m.1) * (key(p) / k_key)
         })
     };
-    for rate in 1..=CAMPAIGN_MAX_RATE {
-        loop {
-            let est: Vec<(usize, CampaignWindow)> = pool
-                .iter()
-                .enumerate()
-                .filter_map(|(i, p)| {
-                    let shift = estimate(p, &candidates)?;
-                    Some((i, record(p, shift).1))
-                })
-                .collect();
-            let mut all = windows.clone();
-            all.extend(est.iter().map(|(_, w)| *w));
-            let plan =
-                match plan_campaign_rolling(nominal_b, target_b, &all, rate, CAMPAIGN_PERIOD_S)
+    //
+    // **Per push direction, and swept until nothing new flies.** One loop over both
+    // directions only flies the winning plan's windows, so the losing direction's
+    // best chain would be ruled out on estimates — and on the shipping rock at 1 a
+    // year that is a prograde-vs-retrograde call on 23 %-loose numbers. So each
+    // direction is planned alone, which makes its own best chain flown; `plan` then
+    // compares the two on flown shifts. And a window flown for one rate changes the
+    // estimates another rate planned on, so the sweep over rates repeats until a
+    // whole pass flies nothing.
+    loop {
+        let mut flew = false;
+        for rate in 1..=CAMPAIGN_MAX_RATE {
+            for prograde in [false, true] {
+                loop {
+                    let signed = |dv: f64| (dv > 0.0) == prograde && dv != 0.0;
+                    // This direction's flown windows, then its pool estimates; `slot`
+                    // maps each back to where it lives (`Ok` flown, `Err` pool).
+                    let mut all: Vec<CampaignWindow> = Vec::new();
+                    let mut slot: Vec<Result<usize, usize>> = Vec::new();
+                    for (k, c) in candidates.iter().enumerate() {
+                        if signed(c.proxy_along_track_dv_ms) {
+                            all.push(windows[k]);
+                            slot.push(Ok(k));
+                        }
+                    }
+                    for (i, p) in pool.iter().enumerate() {
+                        if !signed(p.delivery.along_track_dv_ms) {
+                            continue;
+                        }
+                        if let Some(shift) = estimate(p, &candidates) {
+                            all.push(record(p, shift).1);
+                            slot.push(Err(i));
+                        }
+                    }
+                    let plan = match plan_campaign_rolling(
+                        nominal_b,
+                        target_b,
+                        &all,
+                        rate,
+                        CAMPAIGN_PERIOD_S,
+                    )
                     .map_err(|e| fail("rolling planner", &e))?
-                {
-                    CampaignOutcome::Planned(p) | CampaignOutcome::Unreachable(p) => p,
-                    CampaignOutcome::AlreadyClear => break,
-                };
-            let mut chosen: Vec<usize> = est
-                .iter()
-                .enumerate()
-                .filter(|(k, _)| plan.launches[windows.len() + k] > 0)
-                .map(|(_, &(i, _))| i)
-                .collect();
-            if chosen.is_empty() {
-                break;
-            }
-            let to_fly: Vec<FoundWindow> = chosen.iter().map(|&i| pool[i]).collect();
-            for (w, shift) in to_fly.iter().zip(fly_all(&to_fly)?) {
-                if let Some(shift) = shift {
-                    let (c, cw) = record(w, shift);
-                    candidates.push(c);
-                    windows.push(cw);
+                    {
+                        CampaignOutcome::Planned(p) | CampaignOutcome::Unreachable(p) => p,
+                        CampaignOutcome::AlreadyClear => break,
+                    };
+                    let mut chosen: Vec<usize> = slot
+                        .iter()
+                        .zip(&plan.launches)
+                        .filter_map(|(s, &n)| match s {
+                            Err(i) if n > 0 => Some(*i),
+                            _ => None,
+                        })
+                        .collect();
+                    if chosen.is_empty() {
+                        break;
+                    }
+                    flew = true;
+                    let to_fly: Vec<FoundWindow> = chosen.iter().map(|&i| pool[i]).collect();
+                    for (w, shift) in to_fly.iter().zip(fly_all(&to_fly)?) {
+                        if let Some(shift) = shift {
+                            let (c, cw) = record(w, shift);
+                            candidates.push(c);
+                            windows.push(cw);
+                        }
+                    }
+                    // Flown (or unflyable) either way: out of the pool.
+                    chosen.sort_unstable_by(|a, b| b.cmp(a));
+                    for i in chosen {
+                        pool.swap_remove(i);
+                    }
                 }
             }
-            // Flown (or unflyable) either way: out of the pool.
-            chosen.sort_unstable_by(|a, b| b.cmp(a));
-            for i in chosen {
-                pool.swap_remove(i);
-            }
+        }
+        if !flew {
+            break;
         }
     }
 
@@ -5504,6 +5542,43 @@ mod tests {
                 dates.join(" ")
             );
         }
+        // Each push direction's own best plan at 1 in any 12 months, flown whole: the
+        // two are compared on flown shifts, not on estimates.
+        for prograde in [false, true] {
+            let keep: Vec<bool> = c
+                .candidates
+                .iter()
+                .map(|k| (k.proxy_along_track_dv_ms > 0.0) == prograde)
+                .collect();
+            let only = CampaignCandidates {
+                candidates: c
+                    .candidates
+                    .iter()
+                    .zip(&keep)
+                    .filter(|(_, &y)| y)
+                    .map(|(k, _)| *k)
+                    .collect(),
+                windows: c
+                    .windows
+                    .iter()
+                    .zip(&keep)
+                    .filter(|(_, &y)| y)
+                    .map(|(w, _)| *w)
+                    .collect(),
+                ..c.clone()
+            };
+            let (label, Some(p)) = describe(only.plan(1).expect("plan")) else {
+                continue;
+            };
+            let fl =
+                fly_campaign_plan(&scenario, &only, &p, 7, PLACEMENT_BAND_A_KM).expect("flight");
+            println!(
+                "1/yr {} only ({} of its windows flown): {label}, flown {:?}",
+                if prograde { "prograde  " } else { "retrograde" },
+                only.candidates.len(),
+                fl.flown
+            );
+        }
         // The rates where the rule changes the plan, flown whole.
         for rate in std::env::var("CAMPAIGN_FLY_RATES")
             .unwrap_or_else(|_| "1".into())
@@ -5654,28 +5729,51 @@ mod tests {
         // the two directions it is not - a retrograde launch moved the rock ~30% more
         // per unit of proxy than a prograde one on the shipping grid - which is why
         // the candidates are split by sign rather than ranked on one list.)
+        //
+        // **Strong windows only.** The proxy is the *along-track* part of the push
+        // times the lead; where that part is small the other components dominate
+        // what the rock does, and the ratio wanders off. The rolling cap flies such
+        // windows (a 1-in-12-months chain needs some date in every year, weak years
+        // included): measured 2026-10-01, three retrograde windows with keys 2.5-8 %
+        // of the direction's strongest moved the full-set spread from 24 % to 57 %.
+        // They are flown and counted on their flights, never on the proxy - so the
+        // claim pinned here is the one the ranking needs: among the windows strong
+        // enough to compete for "best" (key >= 10 % of the direction's strongest),
+        // the proxy orders them the way the flights do.
         for prograde in [true, false] {
-            let ratios: Vec<f64> = r
+            let pairs: Vec<(f64, f64)> = r
                 .candidates
                 .iter()
                 .filter(|c| (c.proxy_along_track_dv_ms > 0.0) == prograde)
                 .map(|c| {
                     let s = Vector2::new(c.shift_per_launch_m.0, c.shift_per_launch_m.1).norm();
-                    s / campaign_proxy(c.proxy_along_track_dv_ms, impact - c.arrival_tdb)
+                    let k = campaign_proxy(c.proxy_along_track_dv_ms, impact - c.arrival_tdb);
+                    (k, s / k)
                 })
                 .collect();
-            if ratios.is_empty() {
+            if pairs.is_empty() {
                 continue;
             }
-            let (lo, hi) = ratios
+            let spread = |rs: &mut dyn Iterator<Item = f64>| {
+                rs.fold((f64::INFINITY, 0.0_f64), |(l, h), x| (l.min(x), h.max(x)))
+            };
+            let (all_lo, all_hi) = spread(&mut pairs.iter().map(|p| p.1));
+            let strongest = pairs.iter().map(|p| p.0).fold(0.0_f64, f64::max);
+            let strong: Vec<f64> = pairs
                 .iter()
-                .fold((f64::INFINITY, 0.0_f64), |(l, h), &x| (l.min(x), h.max(x)));
+                .filter(|p| p.0 >= 0.1 * strongest)
+                .map(|p| p.1)
+                .collect();
+            let (lo, hi) = spread(&mut strong.iter().copied());
             println!(
-                "{} shift per (m/s x s) of proxy: {:.3e} .. {:.3e} (spread {:.1}%)",
+                "{} shift per (m/s x s) of proxy: {:.3e} .. {:.3e} (spread {:.1}%) over the {} strong windows; {:.1}% over all {}",
                 if prograde { "prograde  " } else { "retrograde" },
                 lo,
                 hi,
-                100.0 * (hi / lo - 1.0)
+                100.0 * (hi / lo - 1.0),
+                strong.len(),
+                100.0 * (all_hi / all_lo - 1.0),
+                pairs.len()
             );
             assert!(
                 hi / lo < 1.5,

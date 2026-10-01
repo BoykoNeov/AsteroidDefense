@@ -53,9 +53,15 @@
 //! offer. That keeps the planner exact: a per-period cap is a *partition*
 //! constraint, and for a fixed direction taking the largest amounts first is still
 //! the fewest launches (the brute-force test pins it with windows sharing periods).
-//! A rolling cap ("at most N in any 365 days") would be the more physical rule, but
-//! it is not a partition — a greedy fill can take one strong window that blocks two
-//! neighbours worth more together — so it would need a real search.
+//!
+//! # And a rolling cap, exactly
+//! "At most N in any 365 days" is the more physical rule, and it is not a partition
+//! — a greedy fill can take one strong window that blocks two neighbours worth
+//! more together. [`plan_campaign_rolling`] solves it exactly instead, by splitting
+//! the launches into N chains each a period apart (see its doc), and is pinned
+//! against brute force. The binding ships it; the per-period planner stays for
+//! comparison. A fixed period is itself one of the rolling windows, so the
+//! per-period count is a lower bound on the rolling one.
 //!
 //! # On mass: the impact mass, but no design margin — so not a floor
 //! Each launch pushes with the mass that **arrives**, not the mass the rocket
@@ -158,14 +164,30 @@ pub fn plan_campaign(
     windows: &[CampaignWindow],
     max_launches_per_period: u32,
 ) -> Result<CampaignOutcome, CampaignError> {
+    validate(nominal_b, target_b, windows, max_launches_per_period)?;
+    if nominal_b.norm() >= target_b {
+        return Ok(CampaignOutcome::AlreadyClear);
+    }
+    Ok(best_over_directions(nominal_b, windows, |u| {
+        fill_along(nominal_b, target_b, windows, max_launches_per_period, u)
+    }))
+}
+
+/// The checks both planners make on their input.
+fn validate(
+    nominal_b: Vector2<f64>,
+    target_b: f64,
+    windows: &[CampaignWindow],
+    cap: u32,
+) -> Result<(), CampaignError> {
     if !(target_b.is_finite() && target_b > 0.0) {
         return Err(CampaignError::InvalidInput(format!(
             "target impact parameter must be finite and > 0 (got {target_b})"
         )));
     }
-    if max_launches_per_period == 0 {
+    if cap == 0 {
         return Err(CampaignError::InvalidInput(
-            "max_launches_per_period must be at least 1".into(),
+            "the launch cap must be at least 1".into(),
         ));
     }
     if !(nominal_b.x.is_finite() && nominal_b.y.is_finite()) {
@@ -182,10 +204,17 @@ pub fn plan_campaign(
             )));
         }
     }
-    if nominal_b.norm() >= target_b {
-        return Ok(CampaignOutcome::AlreadyClear);
-    }
+    Ok(())
+}
 
+/// Run `plan_along` over every candidate push direction and keep the best: the
+/// fewest launches that reach (ties to the larger `|B|`), else the plan that got
+/// furthest.
+fn best_over_directions(
+    nominal_b: Vector2<f64>,
+    windows: &[CampaignWindow],
+    mut plan_along: impl FnMut(Vector2<f64>) -> (CampaignPlan, bool),
+) -> CampaignOutcome {
     // Candidate directions: each window's own and its opposite, and the nominal's
     // (a campaign that pushes the way the rock already misses starts ahead).
     let mut directions: Vec<Vector2<f64>> = Vec::with_capacity(2 * windows.len() + 1);
@@ -200,11 +229,22 @@ pub fn plan_campaign(
     if nominal_b.norm() > 0.0 {
         directions.push(nominal_b.normalize());
     }
+    // One direction once: a caller that scales one measured shift into many
+    // estimated windows hands in thousands of copies of a few directions, and each
+    // costs a full plan. Exact duplicates only (to rounding) — two directions that
+    // differ at all can plan differently.
+    let mut unique: Vec<Vector2<f64>> = Vec::with_capacity(directions.len());
+    for u in directions {
+        if !unique.iter().any(|q| q.dot(&u) > 1.0 - 1e-12) {
+            unique.push(u);
+        }
+    }
+    let directions = unique;
 
     let mut best_reached: Option<CampaignPlan> = None;
     let mut best_furthest: Option<CampaignPlan> = None;
     for u in directions {
-        let (plan, reached) = fill_along(nominal_b, target_b, windows, max_launches_per_period, u);
+        let (plan, reached) = plan_along(u);
         if reached {
             let better = match &best_reached {
                 None => true,
@@ -227,7 +267,7 @@ pub fn plan_campaign(
         }
     }
 
-    Ok(match (best_reached, best_furthest) {
+    match (best_reached, best_furthest) {
         (Some(p), _) => CampaignOutcome::Planned(p),
         (None, Some(p)) => CampaignOutcome::Unreachable(p),
         // No window moves the aim point at all.
@@ -236,7 +276,208 @@ pub fn plan_campaign(
             total_launches: 0,
             predicted_b: nominal_b,
         }),
-    })
+    }
+}
+
+/// The most launches inside any one rolling window of `window_s` seconds,
+/// counting each window as half-open `[t, t + window_s)` and starting one at
+/// every launch — from `(launch epoch as TDB seconds past J2000, launches)` pairs.
+pub fn busiest_rolling_count(launches: &[(f64, u32)], window_s: f64) -> u32 {
+    launches
+        .iter()
+        .map(|&(t0, _)| {
+            launches
+                .iter()
+                .filter(|&&(t, _)| t >= t0 && t < t0 + window_s)
+                .map(|&(_, n)| n)
+                .sum()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// Choose the fewest launches that move the aim point from `nominal_b` to at
+/// least `target_b`, with **at most `max_launches` inside any `window_s` seconds**
+/// — a rolling cap, counted exactly as [`busiest_rolling_count`] counts it. Each
+/// window's [`CampaignWindow::period`] is ignored; its launch epoch is what counts.
+///
+/// # Exact, by turning the cap into chains
+/// "At most `N` in any window of length `P`" is the same as "the launches split
+/// into `N` chains, each with consecutive launches at least `P` apart":
+/// - chains → cap: a half-open window of length `P` holds at most one launch of a
+///   chain, so at most `N` in all;
+/// - cap → chains: sort the launches and deal launch `i` to chain `i mod N`. The
+///   window `[tᵢ, tᵢ + P)` holds at most `N` launches, and `tᵢ … tᵢ₊ₙ₋₁` are already
+///   `N` of them, so `tᵢ₊ₙ ≥ tᵢ + P`.
+///
+/// The chains do not interact (two may even launch on the same date — that is
+/// two rockets at once, which the cap allows). So along a direction `û`, the best
+/// `L` launches are the best split of `L` across `N` copies of one problem — "the
+/// best chain of `m` launches at least `P` apart" — which is a small dynamic
+/// programme over the windows in date order. No greedy step: the fill the
+/// fixed-period planner uses is wrong here, because one strong window can block
+/// two neighbours worth more together (a brute-force test pins that case).
+///
+/// Directions, and the `|B|` stopping test, are exactly [`plan_campaign`]'s: for
+/// each `L` the arrangement with the largest shift along `û` is checked against
+/// the target with its true `|B|`.
+pub fn plan_campaign_rolling(
+    nominal_b: Vector2<f64>,
+    target_b: f64,
+    windows: &[CampaignWindow],
+    max_launches: u32,
+    window_s: f64,
+) -> Result<CampaignOutcome, CampaignError> {
+    validate(nominal_b, target_b, windows, max_launches)?;
+    if !(window_s.is_finite() && window_s > 0.0) {
+        return Err(CampaignError::InvalidInput(format!(
+            "the rolling window must be finite and > 0 s (got {window_s})"
+        )));
+    }
+    if nominal_b.norm() >= target_b {
+        return Ok(CampaignOutcome::AlreadyClear);
+    }
+    Ok(best_over_directions(nominal_b, windows, |u| {
+        chains_along(nominal_b, target_b, windows, max_launches, window_s, u)
+    }))
+}
+
+/// [`plan_campaign_rolling`] along one direction: the fewest launches whose best
+/// arrangement under the rolling cap clears `target_b`, else the furthest.
+fn chains_along(
+    nominal_b: Vector2<f64>,
+    target_b: f64,
+    windows: &[CampaignWindow],
+    cap: u32,
+    window_s: f64,
+    u: Vector2<f64>,
+) -> (CampaignPlan, bool) {
+    let empty = CampaignPlan {
+        launches: vec![0; windows.len()],
+        total_launches: 0,
+        predicted_b: nominal_b,
+    };
+    // The useful windows in date order, with their value along `u`.
+    let mut idx: Vec<usize> = (0..windows.len())
+        .filter(|&i| windows[i].shift_per_launch.dot(&u) > 0.0)
+        .collect();
+    let when = |i: usize| windows[i].launch_epoch.tdb_seconds_past_j2000();
+    idx.sort_by(|&a, &b| when(a).total_cmp(&when(b)));
+    let w = idx.len();
+    if w == 0 {
+        return (empty, false);
+    }
+    let t: Vec<f64> = idx.iter().map(|&i| when(i)).collect();
+    let v: Vec<f64> = idx
+        .iter()
+        .map(|&i| windows[i].shift_per_launch.dot(&u))
+        .collect();
+    // back[k]: every window before this position launches at least `window_s`
+    // before window k, so a chain can step from it to k.
+    let back: Vec<usize> = (0..w)
+        .map(|k| t.partition_point(|&tj| tj <= t[k] - window_s))
+        .collect();
+
+    // One chain. best[m-1][k]: the most value an m-launch chain ending at window k
+    // carries (-inf if none fits); from[m-1][k]: the window it steps back to;
+    // prefix[m-1][k]: (value, window) of the best m-chain ending at or before k.
+    let prefix_of = |row: &[f64]| -> Vec<(f64, usize)> {
+        let mut acc = (f64::NEG_INFINITY, 0);
+        row.iter()
+            .enumerate()
+            .map(|(k, &x)| {
+                if x > acc.0 {
+                    acc = (x, k);
+                }
+                acc
+            })
+            .collect()
+    };
+    let mut from: Vec<Vec<Option<usize>>> = vec![vec![None; w]];
+    let mut prefix = vec![prefix_of(&v)];
+    loop {
+        let prev = prefix.last().expect("one row at least");
+        let (row, link): (Vec<f64>, Vec<Option<usize>>) = (0..w)
+            .map(|k| match back[k] {
+                0 => (f64::NEG_INFINITY, None),
+                b => {
+                    let (val, j) = prev[b - 1];
+                    if val.is_finite() {
+                        (val + v[k], Some(j))
+                    } else {
+                        (f64::NEG_INFINITY, None)
+                    }
+                }
+            })
+            .unzip();
+        if !row.iter().any(|x| x.is_finite()) {
+            break;
+        }
+        prefix.push(prefix_of(&row));
+        from.push(link);
+    }
+    let longest = prefix.len(); // the most launches one chain can hold
+    let value = |m: usize| if m == 0 { 0.0 } else { prefix[m - 1][w - 1].0 };
+    // The windows (positions in `idx`) of the best m-launch chain.
+    let chain = |m: usize| -> Vec<usize> {
+        let mut k = prefix[m - 1][w - 1].1;
+        let mut out = vec![k];
+        for level in (1..m).rev() {
+            k = from[level][k].expect("a chain of more than one launch steps back");
+            out.push(k);
+        }
+        out
+    };
+
+    // L launches split across `cap` identical chains: split[c][l] is the most value
+    // c chains carry with l launches between them, and how many the last one took.
+    let cap = cap as usize;
+    let max_l = cap * longest;
+    let mut split = vec![vec![(f64::NEG_INFINITY, 0usize); max_l + 1]; cap + 1];
+    split[0][0] = (0.0, 0);
+    for c in 1..=cap {
+        for l in 0..=max_l {
+            for m in 0..=l.min(longest) {
+                let rest = split[c - 1][l - m].0;
+                if rest.is_finite() && rest + value(m) > split[c][l].0 {
+                    split[c][l] = (rest + value(m), m);
+                }
+            }
+        }
+    }
+    let plan_for = |l: usize| -> CampaignPlan {
+        let mut launches = vec![0u32; windows.len()];
+        let mut l = l;
+        for c in (1..=cap).rev() {
+            let m = split[c][l].1;
+            if m > 0 {
+                for k in chain(m) {
+                    launches[idx[k]] += 1;
+                }
+            }
+            l -= m;
+        }
+        let predicted_b = launches.iter().zip(windows).fold(nominal_b, |b, (&n, w)| {
+            b + f64::from(n) * w.shift_per_launch
+        });
+        CampaignPlan {
+            total_launches: launches.iter().sum(),
+            launches,
+            predicted_b,
+        }
+    };
+    let mut furthest = empty;
+    for (l, &(reach, _)) in split[cap].iter().enumerate().skip(1) {
+        if !reach.is_finite() {
+            continue;
+        }
+        let p = plan_for(l);
+        if p.predicted_impact_parameter() >= target_b {
+            return (p, true);
+        }
+        furthest = p;
+    }
+    (furthest, false)
 }
 
 /// Greedy fill along one direction: largest positive shift along `u` first, one
@@ -481,6 +722,119 @@ mod tests {
                         }
                     }
                     let got = plan_campaign(Vector2::new(0.0, b0), target, &w, cap).unwrap();
+                    match (brute, got) {
+                        (Some(0), CampaignOutcome::AlreadyClear) => {}
+                        (Some(n), CampaignOutcome::Planned(p)) => assert_eq!(
+                            p.total_launches, n,
+                            "cap={cap} b0={b0} target={target}: planner {} vs brute {n}",
+                            p.total_launches
+                        ),
+                        (None, CampaignOutcome::Unreachable(_)) => {}
+                        (brute, got) => {
+                            panic!("cap={cap} b0={b0} target={target}: brute {brute:?} vs {got:?}")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- The rolling cap -------------------------------------------------------
+
+    const DAY: f64 = 86_400.0;
+
+    /// Launches of a plan as `(epoch s, n)`, for [`busiest_rolling_count`].
+    fn launch_list(w: &[CampaignWindow], p: &CampaignPlan) -> Vec<(f64, u32)> {
+        w.iter()
+            .zip(&p.launches)
+            .filter(|(_, &n)| n > 0)
+            .map(|(w, &n)| (w.launch_epoch.tdb_seconds_past_j2000(), n))
+            .collect()
+    }
+
+    /// The case a greedy fill gets wrong: one strong window in the middle blocks
+    /// both neighbours, which together are worth more. With one launch per 100 days,
+    /// greedy takes the 1 000 and is done; the two 600s, 100 days apart, reach 1 100.
+    #[test]
+    fn the_rolling_planner_skips_a_strong_window_that_blocks_two() {
+        let w = [
+            window(0.0, (0.0, 600.0)),
+            window(50.0, (0.0, 1_000.0)),
+            window(100.0, (0.0, 600.0)),
+        ];
+        let p =
+            planned(plan_campaign_rolling(Vector2::zeros(), 1_100.0, &w, 1, 100.0 * DAY).unwrap());
+        assert_eq!(p.launches, vec![1, 0, 1]);
+        // Exactly one window length apart is allowed: the window is half-open.
+        assert_eq!(busiest_rolling_count(&launch_list(&w, &p), 100.0 * DAY), 1);
+        // And one second short of it is not.
+        let tight = [
+            window(0.0, (0.0, 600.0)),
+            window(100.0 - 1.0 / DAY, (0.0, 600.0)),
+        ];
+        match plan_campaign_rolling(Vector2::zeros(), 1_100.0, &tight, 1, 100.0 * DAY).unwrap() {
+            CampaignOutcome::Unreachable(best) => assert_eq!(best.total_launches, 1),
+            other => panic!("expected unreachable, got {other:?}"),
+        }
+    }
+
+    /// The cap stacks on one date: N launches the same day are N in that window.
+    #[test]
+    fn the_rolling_cap_allows_n_on_one_date() {
+        let w = [window(0.0, (0.0, 500.0))];
+        let p =
+            planned(plan_campaign_rolling(Vector2::zeros(), 1_400.0, &w, 3, 365.25 * DAY).unwrap());
+        assert_eq!(p.launches, vec![3]);
+        match plan_campaign_rolling(Vector2::zeros(), 1_600.0, &w, 3, 365.25 * DAY).unwrap() {
+            CampaignOutcome::Unreachable(best) => assert_eq!(best.launches, vec![3]),
+            other => panic!("expected unreachable, got {other:?}"),
+        }
+    }
+
+    /// Exact against brute force: six collinear windows of both signs at uneven
+    /// dates, every allocation of up to `cap` launches per window that keeps every
+    /// rolling 100-day window within `cap`, many targets. The planner's count must
+    /// be the smallest that reaches, and every plan it returns must obey the cap.
+    #[test]
+    fn the_rolling_planner_matches_brute_force() {
+        let spec: [(f64, f64); 6] = [
+            (0.0, 640.0),
+            (30.0, -910.0),
+            (70.0, 370.0),
+            (95.0, 820.0),
+            (160.0, -150.0),
+            (240.0, 450.0),
+        ];
+        let w: Vec<CampaignWindow> = spec.iter().map(|&(t, s)| window(t, (0.0, s))).collect();
+        let span = 100.0 * DAY;
+        for cap in [1u32, 2, 3] {
+            for b0 in [0.0, 400.0, -700.0] {
+                for target in [500.0, 1_300.0, 2_200.0, 2_900.0, 4_000.0, 6_000.0] {
+                    let r = cap + 1;
+                    let mut brute: Option<u32> = None;
+                    for code in 0..r.pow(6) {
+                        let n: Vec<u32> = (0..6).map(|k| (code / r.pow(k)) % r).collect();
+                        let list: Vec<(f64, u32)> = (0..6)
+                            .filter(|&k| n[k] > 0)
+                            .map(|k| (spec[k].0 * DAY, n[k]))
+                            .collect();
+                        if busiest_rolling_count(&list, span) > cap {
+                            continue;
+                        }
+                        let z = b0 + (0..6).map(|k| f64::from(n[k]) * spec[k].1).sum::<f64>();
+                        if z.abs() >= target {
+                            let t: u32 = n.iter().sum();
+                            brute = Some(brute.map_or(t, |m| m.min(t)));
+                        }
+                    }
+                    let got = plan_campaign_rolling(Vector2::new(0.0, b0), target, &w, cap, span)
+                        .unwrap();
+                    if let CampaignOutcome::Planned(p) | CampaignOutcome::Unreachable(p) = &got {
+                        assert!(
+                            busiest_rolling_count(&launch_list(&w, p), span) <= cap,
+                            "cap={cap} b0={b0} target={target}: plan breaks the cap: {p:?}"
+                        );
+                    }
                     match (brute, got) {
                         (Some(0), CampaignOutcome::AlreadyClear) => {}
                         (Some(n), CampaignOutcome::Planned(p)) => assert_eq!(

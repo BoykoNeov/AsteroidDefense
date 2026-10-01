@@ -400,15 +400,16 @@ func _draw_keys(pos: Vector2, dim: Color) -> void:
 # -------------------------------------------------------------- campaign ---
 #
 # [C] swaps the readout for the launch campaign: how many launches of this rocket,
-# through which windows, at the launch rate dialled on [Z]/[X]. The rate is per
-# YEAR, and the years are drawn on the map, because that is the whole definition —
-# the cap used to be per launch date, i.e. per grid row, and a finer grid quietly
-# allowed more launches a year.
+# through which windows, at the launch rate dialled on [Z]/[X]. The rate is "at most
+# N in ANY 12 months" - a rolling cap. It was per fixed calendar slot (and before
+# that per grid row, which let a finer map allow more), and a fixed slot let two
+# good dates either side of a boundary each take the full rate.
 
 
-## The years, every window flown, and the ones the plan uses with their counts.
-## Drawn only for a campaign measured for the selected launcher: another rocket's
-## windows on this rocket's map would be a picture of a different plan.
+## Every window flown, and the ones the plan uses with their counts. Drawn only
+## for a campaign measured for the selected launcher: another rocket's windows on
+## this rocket's map would be a picture of a different plan. No year lines: under a
+## rolling cap there are no slots to draw.
 func _draw_campaign_overlay(plot: Rect2, bright: Color, dim: Color, faint: Color) -> void:
 	var c: Dictionary = Sim.pork_campaign
 	if not Sim.pork_campaign_is_current_vehicle() or Sim.pork_rows < 2 or Sim.pork_cols < 2:
@@ -417,20 +418,6 @@ func _draw_campaign_overlay(plot: Rect2, bright: Color, dim: Color, faint: Color
 	var ch := plot.size.y / float(Sim.pork_rows)
 	var t0: float = Sim.pork_launch_tdb[0]
 	var dt: float = Sim.pork_launch_tdb[1] - t0
-	# Year boundaries, where a launch date crosses from one year's allowance into
-	# the next. A date sits at its row's centre, so a boundary between two dates
-	# lands between their rows.
-	for k in range(int(c.period_count) + 1):
-		var tb: float = float(c.period_origin_tdb) + k * float(c.period_s)
-		var y := plot.position.y + ((tb - t0) / dt + 0.5) * ch
-		if y < plot.position.y or y > plot.end.y:
-			continue
-		var x := plot.position.x
-		while x < plot.end.x:
-			draw_line(Vector2(x, y), Vector2(minf(x + 6.0, plot.end.x), y), faint, 1.0)
-			x += 12.0
-		if k < int(c.period_count):
-			_t(Vector2(plot.end.x - 40.0, y + 12.0), "YR %d" % (k + 1), dim, _fs - 4)
 	# A window sits at its own dates, found by a continuous search, and generally
 	# between the map's cells: placed by date as a fractional cell, never by the
 	# nearest cell's index, which would put it up to half a cell off.
@@ -455,21 +442,17 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 	var col2 := x + _font.get_string_size(
 		"LAUNCH CAMPAIGN  FALCON HEAVY (EXPENDABLE)  ", HORIZONTAL_ALIGNMENT_LEFT, -1, _fs).x
 	_t(Vector2(x, y), "LAUNCH CAMPAIGN  %s" % Sim.pork_vehicle_name(), bright)
-	# The years are fixed slots, so the label names where they start: "a year"
-	# alone reads as any twelve months, and the busiest twelve months of a plan can
-	# hold twice the rate (printed on the windows line).
-	var rate := "RATE  UP TO %d A YEAR" % Sim.pork_campaign_rate
-	if Sim.pork_rows > 0:
-		rate += ", YEARS FROM %s" % _date_of(Sim.pork_launch_tdb, 0).substr(0, 7)
-	_t(Vector2(col2, y), rate, bright)
+	# "In any 12 months", spelled out: "a year" alone reads as a calendar year, which
+	# is the rule this replaced.
+	_t(Vector2(col2, y), "RATE  UP TO %d IN ANY 12 MONTHS" % Sim.pork_campaign_rate, bright)
 	y += lh
 
 	var current := Sim.pork_campaign_is_current_vehicle()
 	if Sim.pork_campaign_solving:
-		_t(Vector2(x, y), "FLYING EACH YEAR'S BEST WINDOW IN THE FULL FIELD - A FEW MINUTES ...", mid)
+		_t(Vector2(x, y), "FLYING THE BEST WINDOWS IN THE FULL FIELD - A MINUTE OR TWO ...", mid)
 		y += lh
 	elif not current:
-		var msg := "[E] MEASURE: FLY EACH YEAR'S BEST WINDOW ONCE (A FEW MINUTES)"
+		var msg := "[E] MEASURE: FLY THE BEST WINDOWS ONCE (A MINUTE OR TWO)"
 		if not Sim.pork_campaign.is_empty():
 			msg = "[E] MEASURE (LAST CAMPAIGN WAS FOR ANOTHER LAUNCHER)"
 		_t(Vector2(x, y), msg, dim)
@@ -494,7 +477,7 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 		elif not planned:
 			fl = "NOTHING TO FLY AT THIS RATE - [X] RAISES IT"
 		elif not Sim.pork_campaign_flight().is_empty():
-			fl = "[E] FLY (LAST FLIGHT WAS AT %d/YR)" % int(
+			fl = "[E] FLY (LAST FLIGHT WAS AT %d PER 12 MO)" % int(
 				Sim.pork_campaign_flight().launches_per_year)
 		y += lh * 0.3
 		_t(Vector2(x, y), fl, fl_col)
@@ -508,10 +491,10 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 	_t(Vector2(x, y), "PUSHES USE MASS AT IMPACT (DART'S 3.6% PROPELLANT OFF) - NO DESIGN MARGIN HELD", faint,
 		_fs - 3)
 	y += lh - 3.0
-	_t(Vector2(x, y), "ONE WINDOW PER YEAR AND PUSH DIRECTION, AND A YEAR'S LAUNCHES ALL USE IT",
+	_t(Vector2(x, y), "WINDOWS: EACH YEAR'S BEST, PLUS ANY DATE THE 12-MONTH CAP NEEDS - ALL FLOWN",
 		faint, _fs - 3)
 	y += lh
-	_t(Vector2(x, y), "[Z]/[X] LAUNCHES PER YEAR  [E] MEASURE / FLY  [L] LAUNCHER  [C] WINDOW READOUT  [1] BACK",
+	_t(Vector2(x, y), "[Z]/[X] LAUNCHES PER 12 MO  [E] MEASURE / FLY  [L] LAUNCHER  [C] WINDOW READOUT  [1] BACK",
 		dim, _fs - 2)
 	_t(Vector2(x, y + _fs + 4.0),
 		"THE COUNT IS ARITHMETIC ON ONE FULL-FIELD FLIGHT PER WINDOW - THE FLIGHT LINE CHECKS IT",

@@ -27,6 +27,6 @@ on an [N]-designed rock; rolling-year cap removes the boundary.
 **"At the line":** `CAMPAIGN_AT_LINE_FRACTION = 0.01` in sim.gd (search vs 953 part 0.7 % in
 flown perigee at 1/yr). Margin-based, not rate-based.
 
-**How to apply:** quote 6 / 9 (at the line), not 7. Probes: `probe_campaign_continuous_search`
+**Superseded in part by [[campaign-rolling-cap]]** (same day): under the rolling cap 1/yr FALLS SHORT and uses prograde. **How to apply:** quote 6, not 7; 9-at-the-line was the fixed-year rule. Probes: `probe_campaign_continuous_search`
 (flown, ~6 min), `probe_campaign_search_seeds` (no flights). Next: rolling-year cap (user's
 item 2), then orbital assembly.

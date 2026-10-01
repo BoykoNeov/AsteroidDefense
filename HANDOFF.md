@@ -286,7 +286,10 @@ Read this table first, then the session that owns the layer you are touching.
    **Fixed 2026-10-01 by a continuous window search** (the user's pick): **6 launches
    at 2..10 a year, 9 at 1 a year (at the line, 0.8 % clear), all flown**, matching the
    953 map at every rate; prograde windows are a lower bound no plan uses. See *The
-   windows searched continuously*. Next: the rolling-year cap, then orbital assembly.
+   windows searched continuously*. **Rolling-year cap: DONE 2026-10-01** - at most N
+   in any 12 months, planned exactly (N chains a year apart); 2..12 unchanged at 6,
+   **1 in any 12 months falls short** (flown perigee 16 500-18 100 km depending on
+   search fineness). See *A launch cap in any 12 months*. Next: orbital assembly.
 
 ---
 
@@ -6101,3 +6104,55 @@ year carries the label; 2 a year (2.7 %) does not.
 Supersedes: "7 at 2-3 a year" (120 cells), "6 → 7 at 4 a year from the mass budget"
 (120 cells), "1 a year falls short" (120 cells). The headline is now **6 Falcon Heavy
 (expendable) launches at 2 to 10 a year, 9 at 1 a year (at the line)**.
+
+### A launch cap in any 12 months - 2026-10-01 session (Phase 3: the rolling-year rule)
+
+The open decision from *The campaign on the map*: the cap was "N per fixed year",
+so two good dates either side of a year boundary each took the full rate (the old
+2/yr plan put 4 launches inside seven months). Now the shipping rule is **at most
+N launches in any 365.25 days**.
+
+**The planner is exact, not greedy.** "At most N in any window of length P" is the
+same as "the launches split into N chains, each with launches at least P apart"
+(sort them and deal launch i to chain i mod N: the window starting at launch i
+holds at most N, so launch i+N is at least P later; and a chain contributes at
+most one launch to any window). The chains do not interact, so the best L launches
+along a push direction are the best split of L across N copies of one small
+dynamic programme over dates. `core::campaign::plan_campaign_rolling`, pinned
+against brute force over every allocation (with the case greedy gets wrong: one
+strong window blocking two neighbours worth more together), every output asserted
+within the cap by `busiest_rolling_count`. The fixed-year planner stays as
+`CampaignCandidates::plan_fixed_years`, for comparison.
+
+**Estimates choose, flights count.** The rolling cap needs dates other than each
+year's best (the next-best date of a year may be the one a year apart from the
+last). The pool is the search's per-date profile (~1 500 dates per direction),
+each with a shift *estimated* from the nearest flown window of the same direction
+and lap count, scaled by the ranking key. The key tracks the flown shift only to
+**24 %** across the nine retrograde windows (79 000-98 000 km per m/s·yr; prograde
+10 %) - the "flat to 4 %" in `campaign_proxy`'s doc was a six-window number and is
+corrected. So: plan on the pool, fly every pool window the plan uses, swap in the
+measured shift, replan, until the plan uses flown windows only - for every rate
+1..`CAMPAIGN_MAX_RATE` (12) at measure time, so the knob stays free. A plan that
+is best over the whole pool and uses flown windows only is also best over the
+flown ones, so `plan(rate)` afterwards is arithmetic on flown windows.
+
+**And the flights now run side by side** (one deflection scenario per thread):
+the measurement went from ~3.5 min to **50 s** with 24 windows flown (the 18
+per-year bests plus 6 the 1/yr plan needed).
+
+**Result, FH expendable (`probe_campaign_rolling_check`):** the fixed-year count
+is a lower bound on the rolling one (a fixed year is one of the rolling windows),
+and at **2..12 per 12 months** the fixed plans already kept every 365.25 days
+within the rate - **6 launches, unchanged, same plans** (2/yr flown: perigee
+20 533 km). **1 in any 12 months now falls short**: 9 launches exactly a year apart
+reach |B| 22 362 of 25 955 km, flown to perigee **16 542 km** (a miss, short of the
+20 000 km line). That plan is **prograde** - the direction the search has not
+converged - and at the finest seed tried (0.5 d x 477) it gets closer, |B| 23 950
+km, perigee **18 065 km**, still short. So "falls short" holds at both seeds; by
+how much (8-14 % of the target |B|) is seed-dependent. This retires "prograde is a
+lower bound no plan uses": under the rolling cap the 1/yr plan uses it.
+
+**Frontend.** "RATE UP TO N IN ANY 12 MONTHS"; the dashed fixed-year lines are
+gone from the map; the windows line prints "BUSIEST 12 MO" (at most the rate by
+construction); the harness counts every 365.25 days from the windows' own dates.

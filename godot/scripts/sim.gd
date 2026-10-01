@@ -471,8 +471,11 @@ var pork_mass_solving := false
 ## *intention* — what the operator dialled — so it survives a rebuild; the rest are
 ## results and go with the grid. See the campaign section below.
 ##
-## The rate is **launches per year**, years counted from the grid's first launch
-## date — not per launch date, which let a finer grid allow more launches a year.
+## The rate is **launches in any 12 months** (365.25 days, rolling) — not per
+## calendar slot, which let two dates either side of a boundary each take the full
+## rate, and not per launch date, which let a finer grid allow more. The top must
+## not exceed the core's `CAMPAIGN_MAX_RATE`: the windows each rate needs are
+## flown at measure time up to that rate and no further.
 const CAMPAIGN_RATE_MIN := 1
 const CAMPAIGN_RATE_MAX := 12
 ## How close to the target a campaign's predicted |B| must come, as a fraction of
@@ -2106,7 +2109,7 @@ func request_campaign_step() -> void:
 		if mission.begin_campaign(pork_vehicle):
 			pork_campaign_solving = true
 			pork_campaign = {}
-			event_logged.emit(_stamp(t) + "  CAMPAIGN: FLYING EACH YEAR'S BEST WINDOW - MINUTES")
+			event_logged.emit(_stamp(t) + "  CAMPAIGN: FLYING THE BEST WINDOWS - A MINUTE OR TWO")
 		else:
 			event_logged.emit("CAMPAIGN REFUSED - " + str(mission.last_error()))
 		return
@@ -2115,7 +2118,7 @@ func request_campaign_step() -> void:
 
 func _fly_campaign() -> void:
 	if str(pork_campaign.get("outcome", "")) != "planned":
-		event_logged.emit("NO CAMPAIGN REACHES THE TARGET AT %d/YR - NOTHING TO FLY" %
+		event_logged.emit("NO CAMPAIGN REACHES THE TARGET AT %d PER 12 MO - NOTHING TO FLY" %
 			pork_campaign_rate)
 		return
 	if pork_campaign_flight_is_current():
@@ -2205,17 +2208,17 @@ func campaign_count_label() -> String:
 		"already_clear":
 			return "NOMINAL ALREADY MISSES BY THE TARGET - NO LAUNCH NEEDED"
 		"planned":
-			return "%d LAUNCHES AT UP TO %d/YR - PREDICTED |B| %s OF %s KM%s" % [
+			return "%d LAUNCHES AT UP TO %d PER 12 MO - PREDICTED |B| %s OF %s KM%s" % [
 				int(c.total_launches), int(c.launches_per_year),
 				group_num(int(got)), group_num(int(tgt)), "  AT THE LINE" if at_line else ""]
 		"unreachable":
 			# An answer, not a failure: the best this rate can do, and how short.
 			# "Falls short", not "unreachable": how far short moves with the search.
 			if at_line:
-				return "AT THE LINE AT %d/YR - %d LAUNCHES GET |B| %s OF %s KM" % [
+				return "AT THE LINE AT %d PER 12 MO - %d LAUNCHES GET |B| %s OF %s KM" % [
 					int(c.launches_per_year), int(c.total_launches),
 					group_num(int(got)), group_num(int(tgt))]
-			return "FALLS SHORT AT %d/YR - %d LAUNCHES GET |B| %s OF %s KM" % [
+			return "FALLS SHORT AT %d PER 12 MO - %d LAUNCHES GET |B| %s OF %s KM" % [
 				int(c.launches_per_year), int(c.total_launches),
 				group_num(int(got)), group_num(int(tgt))]
 	return "UNKNOWN"
@@ -2242,11 +2245,9 @@ func campaign_windows_label() -> String:
 	# Direction first and one space between items: at 1/yr the plan uses every
 	# year, and the two-space form ran to the panel's right border (measured).
 	var dir := "RETRO PUSH:" if not bool(used[0].prograde) else "PRO PUSH:"
-	# The busiest rolling 12 months, because the cap is per FIXED year and two
-	# dates either side of a boundary each take the full cap: the shipping plan at
-	# 2/yr puts 4 launches inside seven months. Printed so the rate does not read
-	# tighter than it is.
-	return dir + " " + " ".join(parts) + "  PEAK 12 MO: %d" % int(
+	# The busiest 12 months of the plan: at most the rate, by construction - printed
+	# because a rate the plan does not fill (6 launches at "up to 12") is worth seeing.
+	return dir + " " + " ".join(parts) + "  BUSIEST 12 MO: %d" % int(
 		c.get("busiest_rolling_year", 0))
 
 

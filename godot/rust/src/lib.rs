@@ -1765,8 +1765,12 @@ impl Mission {
         }
     }
 
-    /// The campaign under a cap of `launches_per_year` — arithmetic on the held
-    /// measurement, free — or an **empty dictionary** when nothing is held.
+    /// The campaign under a cap of `launches_per_year` **in any 365.25 days** (a
+    /// rolling cap; the key keeps its old name) — arithmetic on the held
+    /// measurement, free — or an **empty dictionary** when nothing is held. Every
+    /// window it can use was flown at measure time for rates up to
+    /// `CAMPAIGN_MAX_RATE`; above that it still plans on flown windows only, but
+    /// may miss a date a higher rate would have flown.
     ///
     /// Keys: `vehicle` (which launcher it was measured for — compare it with the
     /// selected one), `launches_per_year`, `period_origin_tdb`, `period_s`,
@@ -1776,7 +1780,7 @@ impl Mission {
     /// `impact_mass_kg` (what of it hits the rock — the mass the flight used),
     /// `prograde`, `shift_km` — `|shift|` of one launch — and `launches`, how many
     /// the plan sends through it), `busiest_rolling_year` (the most launches inside
-    /// any 365.25 days - it can exceed the cap, which is per fixed year), and
+    /// any 365.25 days - at most the cap, by construction), and
     /// `outcome`, one of:
     ///
     /// - `"planned"` — plus `total_launches` and `predicted_b_km`.

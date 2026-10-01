@@ -8,10 +8,12 @@ extends Node
 ## with a real key event: project.godot action -> main.gd guard -> Sim -> core.
 ##
 ## What it pins, beyond "it drew":
-## - the cap is per YEAR: no year of the plan carries more launches than the rate;
+## - the cap is per ANY 12 MONTHS: no 365.25 days of the plan carry more launches
+##   than the rate (the core's own count, `busiest_rolling_year`);
 ## - the rate knob is free (no solve fires on [Z]/[X]) and greys the flight line;
-## - 1/yr is an answer, not a failure - and it sits within 1 % of the target, so
-##   it must print "AT THE LINE", never a bare yes or no;
+## - 1/yr is an answer, not a failure: under "1 in any 12 months" it FALLS SHORT
+##   (by 8-14 % of the target |B|, depending on how finely the search is seeded -
+##   the plan is prograde, the direction the search has not converged);
 ## - the window boxes sit at their own dates, between the map's cells (look at the
 ##   shot: the continuous search finds dates no cell has);
 ## - [L] makes the held campaign stale instead of showing it as this rocket's;
@@ -98,7 +100,7 @@ func _run() -> void:
 	assert(not Sim.pork_campaign_solving and not Sim.pork_campaign_flying, "[Z] fired a solve")
 	assert(not Sim.pork_campaign_flight_is_current(), "a flight at 2/yr shown as current at 1/yr")
 	print("CAMPSHOT  1/yr: %s" % Sim.campaign_count_label())
-	assert(Sim.campaign_count_label().contains("AT THE LINE"), "1/yr is within 1 % of the target")
+	assert(Sim.campaign_count_label().begins_with("FALLS SHORT"), "1 in any 12 months falls short")
 	_assert_per_year_cap()
 	await _settle(3)
 	await _shot("campaign_rate_1")
@@ -127,14 +129,24 @@ func _run() -> void:
 	get_tree().quit(0)
 
 
-## No year carries more launches than the dialled rate — the whole redefinition.
+## No 365.25 days carry more launches than the dialled rate — the whole rule.
+## Counted here from the windows' own launch dates, not read off the core's tally,
+## so a planner that broke the cap and a tally that hid it cannot agree by accident.
 func _assert_per_year_cap() -> void:
-	var per: Dictionary = {}
+	var dated: Array = []
 	for w: Dictionary in Sim.pork_campaign.windows:
-		per[int(w.period)] = int(per.get(int(w.period), 0)) + int(w.launches)
-	for p in per:
-		assert(int(per[p]) <= Sim.pork_campaign_rate,
-			"year %d carries %d launches at a cap of %d/yr" % [p, per[p], Sim.pork_campaign_rate])
+		if int(w.launches) > 0:
+			dated.append([float(w.launch_tdb), int(w.launches)])
+	var year_s := 365.25 * 86400.0
+	for a in dated:
+		var n := 0
+		for b in dated:
+			if float(b[0]) >= float(a[0]) and float(b[0]) < float(a[0]) + year_s:
+				n += int(b[1])
+		assert(n <= Sim.pork_campaign_rate,
+			"%d launches inside 12 months at a cap of %d" % [n, Sim.pork_campaign_rate])
+	assert(int(Sim.pork_campaign.get("busiest_rolling_year", 0)) <= Sim.pork_campaign_rate,
+		"the core's own busiest-12-months tally exceeds the rate")
 
 
 func _key(keycode: int) -> InputEventKey:

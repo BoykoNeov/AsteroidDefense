@@ -3420,7 +3420,9 @@ pub const CAMPAIGN_PERIOD_S: f64 = 365.25 * 86_400.0;
 /// One candidate window as the campaign measured it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CampaignCandidate {
-    /// Grid row (launch) and column (arrival) of the cell chosen for this period.
+    /// The map row (launch) and column (arrival) **nearest** this window. A
+    /// continuous window sits at its own dates, generally between cells; these say
+    /// which cell a selection on the map is "on" it, never where it is drawn.
     pub launch_index: usize,
     pub arrival_index: usize,
     /// The launch period (year) this window's launches count against, counted from
@@ -3432,6 +3434,11 @@ pub struct CampaignCandidate {
     /// Launch energy of the transfer, km²/s², and complete laps of the Sun it makes.
     pub c3_km2_s2: f64,
     pub revolutions: u32,
+    /// The transfer's arrival velocity relative to the rock, m/s — the impact
+    /// direction the flight used. Carried because the map cell nearest a continuous
+    /// window holds a *different* transfer: re-reading it from there would aim the
+    /// push somewhere this window does not.
+    pub v_rel_vec: Vector3<f64>,
     /// What one launch of the chosen vehicle delivers through this window, kg.
     pub payload_kg: f64,
     /// The part of `payload_kg` that hits the rock, kg — the mass the flight used.
@@ -3516,10 +3523,6 @@ pub struct LaunchCampaignReport {
     pub flight: Option<CampaignFlight>,
 }
 
-/// A grid cell as the campaign ranks it: `(launch row, arrival column, metrics,
-/// delivery, signed along-track Δv m/s)`.
-type RankedCell = (usize, usize, TransferMetrics, CellDelivery, f64);
-
 /// The campaign's free ranking key for one cell: `|along-track Δv| × lead`, in
 /// m/s·s. A launch's b-plane shift is proportional to it (measured flat to 4 %
 /// over six windows spanning 3.95 to 8.66 yr of lead on the shipping grid), so it
@@ -3556,25 +3559,376 @@ fn campaign_period(launch_tdb: f64, origin_tdb: f64) -> u32 {
         .max(0.0) as u32
 }
 
-/// Measure every period's best window for `vehicle` in `view`: one full-field
-/// flight each, so a worker-thread call, never an interactive one.
+/// How the continuous window search samples before it zooms in.
 ///
-/// **Cost:** one propagation per (period, push direction) that has a reachable
-/// cell — up to ~18 on the shipping grid, each 6–18 s depending on how early the
-/// arrival is.
+/// The map's own 120×120 grid is **not** fine enough to find the campaign's windows
+/// (HANDOFF *Is the 120×120 map fine enough? No*): each one sits just inside the
+/// edge where a lap family stops existing, on a shoulder a few days wide in arrival
+/// and 6–19 days wide in launch, against launch dates ~26 days apart. And refining
+/// either axis alone found nothing — both are needed. So the search is:
 ///
-/// Periods are [`CAMPAIGN_PERIOD_S`] long, starting at `period_origin_tdb` (pass
-/// the grid's first launch date; the probe shifts it to measure the choice). Each
-/// period contributes at most **one cell per push direction** — the one with the
-/// highest [`campaign_proxy`] over every launch date in the period and every
-/// arrival date. So under a cap of `N` a year, all of a year's launches go through
-/// that year's best window: the model is a launch *rate*, and it assumes the year's
-/// launches can all use its best date.
+/// 1. **Launch dates `launch_step_days` apart** — well under the narrowest launch
+///    window, so every window has a date on it.
+/// 2. **Per date, the arrival axis scanned at `arrival_samples` points**, and every
+///    local maximum of the ranking key (per push direction) zoomed in on
+///    continuously, within one scan step either side. A peak against a lap edge
+///    is a local maximum of the scan — the sample past the edge is lower — so its
+///    shoulder is always bracketed.
+/// 3. **Each year's best date polished in launch too**, between its two neighbours
+///    and inside its own year, re-zooming the arrival at every trial date.
+///
+/// The transfer at every point is the map's own cell
+/// ([`TransferEvaluator`](asteroid_core::mission::TransferEvaluator)): the lowest-`C3`
+/// transfer across every lap count, so a refined window is one the map would show
+/// at those dates, and beating the map is the sampling's doing, not a different
+/// rule's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowSearch {
+    pub launch_step_days: f64,
+    pub arrival_samples: usize,
+    /// Step 3 on or off. Off, the launch dates are only the stepped ones — the
+    /// probe's "continuous arrival on the map's own rows" control.
+    pub polish_launch: bool,
+}
+
+/// The shipping search. Measured against seeds twice as coarse and twice as fine
+/// by `probe_campaign_continuous_search`.
+pub const SHIPPING_WINDOW_SEARCH: WindowSearch = WindowSearch {
+    launch_step_days: 2.0,
+    arrival_samples: 120,
+    polish_launch: true,
+};
+
+/// Where each year's windows come from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WindowSource {
+    /// The best cell of the map the campaign is drawn on — the pre-2026-10-01
+    /// behaviour, kept so the two can be compared on one grid.
+    #[cfg_attr(not(test), allow(dead_code))]
+    GridCells,
+    /// The continuous search, independent of the map's resolution.
+    Continuous(WindowSearch),
+}
+
+/// How narrow the zoom goes, seconds — an hour, in both launch and arrival date.
+/// Far below the days-wide windows, and below anything an operator could hold.
+const WINDOW_ZOOM_TOL_S: f64 = 3_600.0;
+/// Points per zoom round. Odd, so the round's centre is a sample.
+const WINDOW_ZOOM_SAMPLES: usize = 9;
+/// Local maxima of one date's arrival scan zoomed per push direction. A date's
+/// scan has a handful of lap-family shoulders; the best few cover the winner.
+const WINDOW_PEAKS_PER_DATE: usize = 3;
+
+/// One window found by the search: a launch date, its arrival, and the transfer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FoundWindow {
+    pub launch_tdb: f64,
+    pub arrival_tdb: f64,
+    pub metrics: TransferMetrics,
+    pub delivery: CellDelivery,
+}
+
+/// One launch date and its best window per push direction (`[retrograde, prograde]`).
+type DateWindows = (f64, [Option<FoundWindow>; 2]);
+
+/// The campaign's continuous window search: per period and push direction, the best
+/// window at **any** dates inside the map's axes. See [`WindowSearch`] for how.
+///
+/// Worker-thread only: ~1 500 launch dates, each an arrival scan and a few zooms,
+/// spread over the machine's cores — a few seconds.
+pub fn search_campaign_windows(
+    scenario: &RealFieldScenario,
+    vehicle: &LaunchVehicle,
+    origin_tdb: f64,
+    search: WindowSearch,
+) -> Result<std::collections::BTreeMap<(u32, bool), FoundWindow>, ScenarioError> {
+    use asteroid_core::mission::{maximise_on_interval, TransferEvaluator};
+    let fail = |e: &dyn std::fmt::Display| {
+        ScenarioError::Integration(format!("launch campaign: window search: {e}"))
+    };
+    let t0 = scenario.epoch0().tdb_seconds_past_j2000();
+    let impact = scenario.impact_epoch().tdb_seconds_past_j2000();
+    let span = impact - t0;
+    let (l_lo, l_hi) = (t0, t0 + LAUNCH_AXIS_END_FRACTION * span);
+    let (a_lo, a_hi) = (
+        t0 + ARRIVAL_AXIS_START_FRACTION * span,
+        t0 + ARRIVAL_AXIS_END_FRACTION * span,
+    );
+    let n_a = search.arrival_samples.max(3);
+    let a_step = (a_hi - a_lo) / (n_a - 1) as f64;
+    // The `1e-9` keeps a step that divides the axis exactly (the map's own row
+    // spacing) from gaining a row to rounding.
+    let n_l = ((l_hi - l_lo) / (search.launch_step_days * 86_400.0) - 1e-9).ceil() as usize + 1;
+    let l_step = (l_hi - l_lo) / (n_l - 1) as f64;
+    let asteroid_mass = threat_mass_kg();
+
+    // A window's key, signed by push direction (`None` = no transfer or beyond the
+    // launcher). The sign picks the direction; `campaign_proxy` is the magnitude.
+    let window_at = |ev: &TransferEvaluator, tl: f64, ta: f64| -> Option<FoundWindow> {
+        let c = ev
+            .cell(
+                Epoch::from_tdb_seconds_past_j2000(tl),
+                Epoch::from_tdb_seconds_past_j2000(ta),
+            )
+            .ok()?;
+        let PorkchopCell::Transfer(m) = c else {
+            return None;
+        };
+        let d = cell_delivery(&m, vehicle, IMPACTOR_BETA, asteroid_mass);
+        d.feasible.then_some(FoundWindow {
+            launch_tdb: tl,
+            arrival_tdb: ta,
+            metrics: m,
+            delivery: d,
+        })
+    };
+    let key =
+        |w: &FoundWindow| campaign_proxy(w.delivery.along_track_dv_ms, impact - w.arrival_tdb);
+    let directed = |w: &FoundWindow, prograde: bool| {
+        (w.delivery.along_track_dv_ms > 0.0) == prograde && w.delivery.along_track_dv_ms != 0.0
+    };
+    // The best arrival in `[lo, hi]` for one launch date and direction, zoomed.
+    let zoom_arrival = |ev: &TransferEvaluator, tl: f64, lo: f64, hi: f64, prograde: bool| {
+        let (lo, hi) = (lo.max(a_lo), hi.min(a_hi));
+        if lo > hi {
+            return None;
+        }
+        let (ta, _) = maximise_on_interval(
+            |ta| {
+                window_at(ev, tl, ta)
+                    .filter(|w| directed(w, prograde))
+                    .map(|w| key(&w))
+            },
+            lo,
+            hi,
+            WINDOW_ZOOM_SAMPLES,
+            WINDOW_ZOOM_TOL_S,
+        )?;
+        window_at(ev, tl, ta)
+    };
+    // One launch date: scan the arrival axis, zoom each direction's best local maxima.
+    // One launch date, arrivals in `[lo, hi]`: scan at `n` points, then zoom on
+    //  - each direction's best few local maxima of the scan (interior peaks), and
+    //  - the inside of every lap-family edge, located by bisection to a minute
+    //    (edge peaks — the ones a scan only finds by luck).
+    let best_in =
+        |ev: &TransferEvaluator, tl: f64, lo: f64, hi: f64, n: usize| -> [Option<FoundWindow>; 2] {
+            let (lo, hi) = (lo.max(a_lo), hi.min(a_hi));
+            if lo >= hi {
+                return [None, None];
+            }
+            let step = (hi - lo) / (n - 1) as f64;
+            let at = |j: usize| lo + step * j as f64;
+            let scan: Vec<Option<FoundWindow>> = (0..n).map(|j| window_at(ev, tl, at(j))).collect();
+            let epoch = Epoch::from_tdb_seconds_past_j2000;
+            let exists =
+                |ta: f64, rev: u32| ev.family_exists(epoch(tl), epoch(ta), rev).unwrap_or(false);
+            // Every family edge between two scan points, as (inside arrival, outside
+            // arrival): the family exists at the first and not at the second.
+            let mut edges: Vec<(f64, f64)> = Vec::new();
+            for rev in 1..=ev.max_revolutions() {
+                let has: Vec<bool> = (0..n).map(|j| exists(at(j), rev)).collect();
+                for j in 0..n - 1 {
+                    if has[j] == has[j + 1] {
+                        continue;
+                    }
+                    let (mut inside, mut outside) = if has[j] {
+                        (at(j), at(j + 1))
+                    } else {
+                        (at(j + 1), at(j))
+                    };
+                    while (outside - inside).abs() > 60.0 {
+                        let mid = 0.5 * (inside + outside);
+                        if exists(mid, rev) {
+                            inside = mid;
+                        } else {
+                            outside = mid;
+                        }
+                    }
+                    edges.push((inside, outside));
+                }
+            }
+            [false, true].map(|prograde| {
+                let k = |j: usize| {
+                    scan[j]
+                        .filter(|w| directed(w, prograde))
+                        .map_or(f64::NEG_INFINITY, |w| key(&w))
+                };
+                let mut peaks: Vec<(usize, f64)> = (0..n)
+                    .filter(|&j| {
+                        let kj = k(j);
+                        kj.is_finite()
+                            && (j == 0 || kj >= k(j - 1))
+                            && (j + 1 == n || kj >= k(j + 1))
+                    })
+                    .map(|j| (j, k(j)))
+                    .collect();
+                peaks.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let interior = peaks
+                    .iter()
+                    .take(WINDOW_PEAKS_PER_DATE)
+                    .map(|&(j, _)| (at(j) - step, at(j) + step));
+                // An edge's inside: one scan step back from it, up to the last arrival
+                // at which the family still exists.
+                let at_edges = edges.iter().map(|&(inside, outside)| {
+                    if inside < outside {
+                        (inside - step, inside)
+                    } else {
+                        (inside, inside + step)
+                    }
+                });
+                interior
+                    .chain(at_edges)
+                    .filter_map(|(a, b)| zoom_arrival(ev, tl, a.max(lo), b.min(hi), prograde))
+                    .max_by(|a, b| key(a).total_cmp(&key(b)))
+            })
+        };
+    let date_best = |ev: &TransferEvaluator, tl: f64| best_in(ev, tl, a_lo, a_hi, n_a);
+
+    let dates: Vec<f64> = (0..n_l).map(|i| l_lo + l_step * i as f64).collect();
+    let dates = &dates;
+
+    // 1–2. The per-date profile, launch dates split across threads (each thread its
+    // own evaluator: the evaluator borrows the scenario and is not shared).
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(1, 16);
+    let profile: Vec<DateWindows> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..threads)
+            .map(|w| {
+                s.spawn(move || -> Result<Vec<DateWindows>, ScenarioError> {
+                    let ev = TransferEvaluator::new(
+                        scenario,
+                        MIN_TOF_DAYS * 86_400.0,
+                        true,
+                        DEFAULT_MAX_REVOLUTIONS,
+                    )
+                    .map_err(|e| fail(&e))?;
+                    Ok(dates
+                        .iter()
+                        .skip(w)
+                        .step_by(threads)
+                        .map(|&tl| (tl, date_best(&ev, tl)))
+                        .collect())
+                })
+            })
+            .collect();
+        let mut all = Vec::with_capacity(dates.len());
+        for h in handles {
+            all.extend(h.join().expect("window search thread")?);
+        }
+        Ok::<_, ScenarioError>(all)
+    })?;
+    let mut profile = profile;
+    profile.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    // 3. Each period's best date per direction, polished in launch date between its
+    // neighbours and inside its own period; the arrival re-zoomed per trial date
+    // around the arrivals the neighbours found.
+    let mut seeds: std::collections::BTreeMap<(u32, bool), usize> =
+        std::collections::BTreeMap::new();
+    for (i, (tl, best)) in profile.iter().enumerate() {
+        let period = campaign_period(*tl, origin_tdb);
+        for (d, prograde) in [false, true].into_iter().enumerate() {
+            let Some(w) = best[d] else { continue };
+            let slot = seeds.entry((period, prograde)).or_insert(i);
+            if profile[*slot].1[d].is_none_or(|b| key(&w) > key(&b)) {
+                *slot = i;
+            }
+        }
+    }
+    let ev = TransferEvaluator::new(
+        scenario,
+        MIN_TOF_DAYS * 86_400.0,
+        true,
+        DEFAULT_MAX_REVOLUTIONS,
+    )
+    .map_err(|e| fail(&e))?;
+    let mut out = std::collections::BTreeMap::new();
+    for ((period, prograde), i) in seeds {
+        let d = prograde as usize;
+        let seed = profile[i].1[d].expect("a seed has a window");
+        if !search.polish_launch {
+            out.insert((period, prograde), seed);
+            continue;
+        }
+        let p_lo = origin_tdb + period as f64 * CAMPAIGN_PERIOD_S;
+        let p_hi = p_lo + CAMPAIGN_PERIOD_S - 1.0;
+        let lo = (seed.launch_tdb - l_step).max(l_lo).max(p_lo);
+        let hi = (seed.launch_tdb + l_step).min(l_hi).min(p_hi);
+        // The arrival bracket: one scan step either side of the seed's. A lap edge
+        // moves days per day of launch, and the polish moves the launch by at most
+        // one launch step, so the seed's own shoulder stays inside it.
+        let (ta_lo, ta_hi) = (seed.arrival_tdb - a_step, seed.arrival_tdb + a_step);
+        // Per trial date, the same edge-aware search as the profile, over the
+        // bracket: a plain zoom here would lose the edge ridges again.
+        let inner = |tl: f64| best_in(&ev, tl, ta_lo, ta_hi, WINDOW_ZOOM_SAMPLES)[d];
+        let polished = maximise_on_interval(
+            |tl| inner(tl).map(|w| key(&w)),
+            lo,
+            hi,
+            WINDOW_ZOOM_SAMPLES,
+            WINDOW_ZOOM_TOL_S,
+        )
+        .and_then(|(tl, _)| inner(tl));
+        // The polish searches a superset of the seed's own date, so it can only
+        // match or beat it — unless the re-zoom lost the seed's peak, in which case
+        // the seed stands rather than a worse window.
+        let best = match polished {
+            Some(p) if key(&p) >= key(&seed) => p,
+            _ => seed,
+        };
+        out.insert((period, prograde), best);
+    }
+    Ok(out)
+}
+
+/// Measure every period's best window for `vehicle`: one full-field flight each, so
+/// a worker-thread call, never an interactive one. The shipping source,
+/// [`SHIPPING_WINDOW_SEARCH`] — see [`measure_campaign_candidates_from`].
 pub fn measure_campaign_candidates(
     scenario: &RealFieldScenario,
     view: &PorkchopView,
     vehicle: &LaunchVehicle,
     period_origin_tdb: f64,
+) -> Result<CampaignCandidates, ScenarioError> {
+    measure_campaign_candidates_from(
+        scenario,
+        view,
+        vehicle,
+        period_origin_tdb,
+        WindowSource::Continuous(SHIPPING_WINDOW_SEARCH),
+    )
+}
+
+/// Measure every period's best window for `vehicle`, found by `source`: one
+/// full-field flight each, so a worker-thread call, never an interactive one.
+///
+/// **Cost:** one propagation per (period, push direction) that has a reachable
+/// window — up to ~18, each 6–18 s depending on how early the arrival is — plus,
+/// for [`WindowSource::Continuous`], the search itself (seconds).
+///
+/// Periods are [`CAMPAIGN_PERIOD_S`] long, starting at `period_origin_tdb` (pass
+/// the grid's first launch date; the probe shifts it to measure the choice). Each
+/// period contributes at most **one window per push direction** — the one with the
+/// highest [`campaign_proxy`] over every launch date in the period and every
+/// arrival date. So under a cap of `N` a year, all of a year's launches go through
+/// that year's best window: the model is a launch *rate*, and it assumes the year's
+/// launches can all use its best date. And a year is a **fixed** slot: a window
+/// whose best date lies just across a year boundary is clipped to the boundary
+/// (most prograde winners are - see [`WindowSearch`]), so the per-year best is the
+/// best *inside* the slot, not the best nearby.
+///
+/// `view` is the map the windows are reported against: a continuous window's
+/// `launch_index` / `arrival_index` is the **nearest** cell of it, which the map
+/// uses to say which cell the selection is on — never to place the window, which
+/// sits at its own dates, generally between cells.
+pub fn measure_campaign_candidates_from(
+    scenario: &RealFieldScenario,
+    view: &PorkchopView,
+    vehicle: &LaunchVehicle,
+    period_origin_tdb: f64,
+    source: WindowSource,
 ) -> Result<CampaignCandidates, ScenarioError> {
     let fail = |what: &str, e: &dyn std::fmt::Display| {
         ScenarioError::Integration(format!("launch campaign: {what}: {e}"))
@@ -3607,39 +3961,64 @@ pub fn measure_campaign_candidates(
     let impact_tdb = scenario.impact_epoch().tdb_seconds_past_j2000();
     let arrival_axis = view.arrival_tdb();
     let launch_axis = view.launch_tdb();
-    let key = |c: &RankedCell| campaign_proxy(c.4, impact_tdb - arrival_axis[c.1]);
-    let mut best: std::collections::BTreeMap<(u32, bool), RankedCell> =
-        std::collections::BTreeMap::new();
-    for i in 0..view.launch_count() {
-        let period = campaign_period(launch_axis[i], period_origin_tdb);
-        for j in 0..view.arrival_count() {
-            let Some(m) = view.metrics_at(i, j) else {
-                continue;
-            };
-            let d = cell_delivery(&m, vehicle, IMPACTOR_BETA, asteroid_mass);
-            if !d.feasible {
-                continue;
-            }
-            let cell = (i, j, m, d, d.along_track_dv_ms);
-            let slot = best
-                .entry((period, d.along_track_dv_ms > 0.0))
-                .or_insert(cell);
-            if key(&cell) > key(slot) {
-                *slot = cell;
-            }
+    let key =
+        |w: &FoundWindow| campaign_proxy(w.delivery.along_track_dv_ms, impact_tdb - w.arrival_tdb);
+    let best: std::collections::BTreeMap<(u32, bool), FoundWindow> = match source {
+        WindowSource::Continuous(search) => {
+            search_campaign_windows(scenario, vehicle, period_origin_tdb, search)?
         }
-    }
-    let mut ranked: Vec<(u32, RankedCell)> = best.into_iter().map(|((p, _), c)| (p, c)).collect();
+        WindowSource::GridCells => {
+            let mut best = std::collections::BTreeMap::new();
+            for (i, &t_launch) in launch_axis.iter().enumerate() {
+                let period = campaign_period(t_launch, period_origin_tdb);
+                for (j, &t_arrival) in arrival_axis.iter().enumerate() {
+                    let Some(m) = view.metrics_at(i, j) else {
+                        continue;
+                    };
+                    let d = cell_delivery(&m, vehicle, IMPACTOR_BETA, asteroid_mass);
+                    if !d.feasible {
+                        continue;
+                    }
+                    let w = FoundWindow {
+                        launch_tdb: t_launch,
+                        arrival_tdb: t_arrival,
+                        metrics: m,
+                        delivery: d,
+                    };
+                    let slot = best.entry((period, d.along_track_dv_ms > 0.0)).or_insert(w);
+                    if key(&w) > key(slot) {
+                        *slot = w;
+                    }
+                }
+            }
+            best
+        }
+    };
+    let mut ranked: Vec<(u32, FoundWindow)> = best.into_iter().map(|((p, _), w)| (p, w)).collect();
     ranked.sort_by(|a, b| key(&b.1).total_cmp(&key(&a.1)));
     let period_count = launch_axis
         .last()
         .map_or(0, |&t| campaign_period(t, period_origin_tdb) + 1);
+    // The map cell nearest an epoch, on an evenly spaced axis.
+    let nearest = |axis: &[f64], t: f64| -> usize {
+        let n = axis.len();
+        if n < 2 {
+            return 0;
+        }
+        let k = ((t - axis[0]) / (axis[1] - axis[0])).round();
+        k.clamp(0.0, (n - 1) as f64) as usize
+    };
 
     // One flight per candidate: what one launch actually does on the b-plane.
     let mut candidates = Vec::with_capacity(ranked.len());
     let mut windows = Vec::with_capacity(ranked.len());
-    for (period, (i, j, m, d, proxy)) in ranked {
-        let arrival = Epoch::from_tdb_seconds_past_j2000(arrival_axis[j]);
+    for (period, w) in ranked {
+        let (m, d, proxy) = (w.metrics, w.delivery, w.delivery.along_track_dv_ms);
+        let (i, j) = (
+            nearest(&launch_axis, w.launch_tdb),
+            nearest(&arrival_axis, w.arrival_tdb),
+        );
+        let arrival = Epoch::from_tdb_seconds_past_j2000(w.arrival_tdb);
         // The mass that arrives, not the mass that launched.
         let impulse = impact_impulse(m.v_rel_vec, IMPACTOR_BETA, d.impact_mass_kg, asteroid_mass);
         // A single launch that already escapes the scan gate, or dives to a bound
@@ -3656,17 +4035,18 @@ pub fn measure_campaign_candidates(
             launch_index: i,
             arrival_index: j,
             period,
-            launch_tdb: launch_axis[i],
-            arrival_tdb: arrival_axis[j],
+            launch_tdb: w.launch_tdb,
+            arrival_tdb: w.arrival_tdb,
             c3_km2_s2: m.c3_km2_s2,
             revolutions: m.revolutions,
+            v_rel_vec: m.v_rel_vec,
             payload_kg: d.payload_kg,
             impact_mass_kg: d.impact_mass_kg,
             proxy_along_track_dv_ms: proxy,
             shift_per_launch_m: (shift.x, shift.y),
         });
         windows.push(CampaignWindow {
-            launch_epoch: Epoch::from_tdb_seconds_past_j2000(launch_axis[i]),
+            launch_epoch: Epoch::from_tdb_seconds_past_j2000(w.launch_tdb),
             period,
             arrival_epoch: arrival,
             impulse_per_launch: impulse,
@@ -3776,8 +4156,11 @@ pub fn fly_campaign_plan(
 ///
 /// **The count is optimistic on margin** — each launch pushes with its mass at
 /// impact (DART's flown propellant loss off), but no design margin is held back
-/// from the rocket's capability — **and pessimistic on search** (only one window
-/// per year and direction is considered). It is not a floor.
+/// from the rocket's capability. On search it is **settled for the direction the
+/// plans use** (retrograde, on the shipping rock: every seeding of the continuous
+/// search finds the same windows) and a **lower bound on the other** (prograde
+/// windows are not converged, and only one window per year and direction is
+/// considered). It is not a floor either way.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn plan_launch_campaign(
     scenario: &RealFieldScenario,
@@ -4564,6 +4947,333 @@ mod tests {
         }
     }
 
+    /// Probe, run by hand (`--ignored --nocapture`): does the continuous window
+    /// search find what the finest grid found, independent of how it is seeded?
+    ///
+    /// Runs, all side by side, each flown once per (year, push direction):
+    /// - `CAMPAIGN_SEARCHES` (default `2x120,1x239,4x60,rows120`): continuous
+    ///   searches as `<launch step days>x<arrival scan samples>`. `rows120` is the
+    ///   control - continuous arrival on the 120 map's own launch dates, no launch
+    ///   polish - which the grid study says should still need 7 at 2/yr.
+    /// - `CAMPAIGN_GRID_SIZES` (default `953x953`): the old best-map-cell source on
+    ///   those grids, the reference the bar is measured against.
+    ///
+    /// **Pre-registered bar (2026-10-01).** Seeded from the shipping `2x120`: every
+    /// (year, direction) flown shift >= the 953 grid's, within 0.5 %; the counts at
+    /// 1..=10 a year equal the 953 grid's; `1x239` and `4x60` land on the same
+    /// windows (shift within 0.5 %); and the 2/yr and 1/yr plans flown whole
+    /// (`CAMPAIGN_FLY_RATES`, default `1,2`).
+    ///
+    /// Per window it also prints how far the arrival sits from the edge of its lap
+    /// family (first step later at which the cell's lap count changes or its `C3`
+    /// jumps), so a window decided by the Lambert solver's own sampled edge shows
+    /// as one, and the best key **any** lap family offers at the same dates (the map
+    /// keeps the lowest-`C3` transfer; this says what that rule leaves on the table).
+    #[test]
+    #[ignore]
+    fn probe_campaign_continuous_search() {
+        if !have_kernels() {
+            return;
+        }
+        use asteroid_core::lambert::MultiRevBranch;
+        use asteroid_core::launch_vehicle::FALCON_HEAVY_EXPENDABLE;
+        use asteroid_core::mission::{transfer_metrics_for_revolutions, TransferEvaluator};
+        use std::time::Instant;
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+        let impact = mc.impact_tdb_seconds();
+        let v = &FALCON_HEAVY_EXPENDABLE;
+        let yr = 3.155_76e7;
+        let day = 86_400.0;
+        let view120 = PorkchopView::build(&scenario, 120, 120).expect("grid");
+        let origin = view120.launch_tdb()[0];
+        let row120_days = (view120.launch_tdb()[1] - origin) / day;
+
+        let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+        let mut runs: Vec<(String, Option<WindowSearch>, usize)> = Vec::new();
+        for s in env("CAMPAIGN_SEARCHES", "2x120,1x239,4x60,rows120").split(',') {
+            let s = s.trim();
+            if s.is_empty() {
+                continue;
+            }
+            let search = if s == "rows120" {
+                WindowSearch {
+                    launch_step_days: row120_days,
+                    arrival_samples: 120,
+                    polish_launch: false,
+                }
+            } else {
+                let (a, b) = s.split_once('x').expect("searches like 2x120");
+                WindowSearch {
+                    launch_step_days: a.parse().unwrap(),
+                    arrival_samples: b.parse().unwrap(),
+                    polish_launch: true,
+                }
+            };
+            runs.push((format!("search {s}"), Some(search), 120));
+        }
+        for s in env("CAMPAIGN_GRID_SIZES", "953x953").split(',') {
+            let s = s.trim();
+            if s.is_empty() {
+                continue;
+            }
+            let (a, b) = s.split_once('x').expect("sizes like 953x953");
+            let (nl, na): (usize, usize) = (a.parse().unwrap(), b.parse().unwrap());
+            assert_eq!(nl, na, "square grids only");
+            runs.push((format!("grid {s}"), None, nl));
+        }
+
+        let results: Vec<(String, f64, CampaignCandidates)> = std::thread::scope(|sc| {
+            let handles: Vec<_> = runs
+                .iter()
+                .map(|(label, search, n)| {
+                    let scenario = Arc::clone(&scenario);
+                    let view120 = &view120;
+                    sc.spawn(move || {
+                        let t0 = Instant::now();
+                        let c = match search {
+                            Some(s) => measure_campaign_candidates_from(
+                                &scenario,
+                                view120,
+                                v,
+                                origin,
+                                WindowSource::Continuous(*s),
+                            ),
+                            None => {
+                                let view = PorkchopView::build(&scenario, *n, *n).expect("grid");
+                                measure_campaign_candidates_from(
+                                    &scenario,
+                                    &view,
+                                    v,
+                                    origin,
+                                    WindowSource::GridCells,
+                                )
+                            }
+                        }
+                        .expect("candidates");
+                        let secs = t0.elapsed().as_secs_f64();
+                        println!("{label}: measured in {secs:.0} s");
+                        (label.clone(), secs, c)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        let ev =
+            TransferEvaluator::new(&scenario, MIN_TOF_DAYS * day, true, DEFAULT_MAX_REVOLUTIONS)
+                .expect("evaluator");
+        let eph = scenario.ephemeris();
+        let mu_sun = eph.sun_gm_m3_s2().expect("sun GM");
+        let key = |k: &CampaignCandidate| {
+            campaign_proxy(k.proxy_along_track_dv_ms, impact - k.arrival_tdb)
+        };
+        let shift_km = |k: &CampaignCandidate| {
+            Vector2::new(k.shift_per_launch_m.0, k.shift_per_launch_m.1).norm() / 1e3
+        };
+        // Days later at which the cell stops being this window's transfer.
+        let edge_days = |k: &CampaignCandidate| -> String {
+            let tl = Epoch::from_tdb_seconds_past_j2000(k.launch_tdb);
+            for dd in [1.0 / 24.0, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0] {
+                let ta = Epoch::from_tdb_seconds_past_j2000(k.arrival_tdb + dd * day);
+                match ev.cell(tl, ta).expect("cell") {
+                    PorkchopCell::Transfer(m)
+                        if m.revolutions == k.revolutions
+                            && (m.c3_km2_s2 / k.c3_km2_s2 - 1.0).abs() < 0.2 => {}
+                    _ => return format!("<{dd:.3} d"),
+                }
+            }
+            ">16 d".into()
+        };
+        // The best key at the same dates over every lap family and branch.
+        let any_family = |k: &CampaignCandidate| -> f64 {
+            let tl = Epoch::from_tdb_seconds_past_j2000(k.launch_tdb);
+            let ta = Epoch::from_tdb_seconds_past_j2000(k.arrival_tdb);
+            let e = ev.earth_helio(tl).unwrap();
+            let a = ev.asteroid_helio(ta).unwrap().unwrap();
+            let mut best = 0.0_f64;
+            for n in 0..=DEFAULT_MAX_REVOLUTIONS {
+                for br in [MultiRevBranch::LowZ, MultiRevBranch::HighZ] {
+                    if let Ok(Some(m)) = transfer_metrics_for_revolutions(
+                        e,
+                        a,
+                        k.arrival_tdb - k.launch_tdb,
+                        mu_sun,
+                        true,
+                        n,
+                        br,
+                    ) {
+                        let d = cell_delivery(&m, v, IMPACTOR_BETA, threat_mass_kg());
+                        if d.feasible
+                            && (d.along_track_dv_ms > 0.0) == (k.proxy_along_track_dv_ms > 0.0)
+                        {
+                            best = best
+                                .max(campaign_proxy(d.along_track_dv_ms, impact - k.arrival_tdb));
+                        }
+                    }
+                }
+            }
+            best
+        };
+
+        let rates: Vec<u32> = env("CAMPAIGN_FLY_RATES", "1,2")
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        for (label, secs, c) in &results {
+            println!("\n{label}: {} candidates, {secs:.0} s", c.candidates.len());
+            let mut line = String::new();
+            for cap in 1u32..=10 {
+                let s = match c.plan(cap).expect("plan") {
+                    CampaignOutcome::Planned(p) => format!("{}", p.total_launches),
+                    CampaignOutcome::Unreachable(p) => format!(
+                        "short({:.0}/{:.0} km)",
+                        p.predicted_impact_parameter() / 1e3,
+                        c.target_b_m / 1e3
+                    ),
+                    CampaignOutcome::AlreadyClear => "clear".into(),
+                };
+                line.push_str(&format!("  {cap}/yr: {s}"));
+            }
+            println!("  launches needed ->{line}");
+        }
+
+        // Per (year, direction), every run side by side.
+        let mut slots: Vec<(u32, bool)> = results
+            .iter()
+            .flat_map(|r| {
+                r.2.candidates
+                    .iter()
+                    .map(|k| (k.period, k.proxy_along_track_dv_ms > 0.0))
+            })
+            .collect();
+        slots.sort();
+        slots.dedup();
+        println!("\nper year: launch / arrive (yr before impact), key m/s*yr, flown |shift| km, laps, C3, edge, any-family key");
+        for (period, prograde) in slots {
+            println!("  yr {period:2} {}", if prograde { "pro " } else { "retr" });
+            for (label, _, c) in &results {
+                match c
+                    .candidates
+                    .iter()
+                    .find(|k| k.period == period && (k.proxy_along_track_dv_ms > 0.0) == prograde)
+                {
+                    Some(k) => println!(
+                        "    {label:16} {:6.3} / {:6.3}  key {:7.4}  shift {:7.1}  laps {}  C3 {:6.2}  edge {:>8}  any {:7.4}",
+                        (impact - k.launch_tdb) / yr,
+                        (impact - k.arrival_tdb) / yr,
+                        key(k) / yr,
+                        shift_km(k),
+                        k.revolutions,
+                        k.c3_km2_s2,
+                        edge_days(k),
+                        any_family(k) / yr
+                    ),
+                    None => println!("    {label:16} -"),
+                }
+            }
+        }
+
+        // The plans flown whole, every run in parallel.
+        for &rate in &rates {
+            let flown: Vec<(String, String)> = std::thread::scope(|sc| {
+                let handles: Vec<_> = results
+                    .iter()
+                    .map(|(label, _, c)| {
+                        let scenario = Arc::clone(&scenario);
+                        sc.spawn(move || {
+                            let CampaignOutcome::Planned(p) = c.plan(rate).expect("plan") else {
+                                return (label.clone(), "no plan to fly".to_string());
+                            };
+                            let f = fly_campaign_plan(&scenario, c, &p, 7, PLACEMENT_BAND_A_KM)
+                                .expect("campaign flight");
+                            let perigee = match f.flown {
+                                CellVerdict::Encounter { perigee_m, .. } => {
+                                    format!("perigee {:.0} km", perigee_m / 1e3)
+                                }
+                                other => format!("{other:?}"),
+                            };
+                            (
+                                label.clone(),
+                                format!(
+                                    "{} launches, {perigee} (line {:.0} km), nonlinearity {:.1e}, keyhole {}",
+                                    p.total_launches,
+                                    SAFE_PERIGEE_TARGET_M / 1e3,
+                                    f.nonlinearity.unwrap_or(f64::NAN),
+                                    f.keyhole_at_risk.map_or("-".into(), |k| format!(
+                                        "{}:{} exposure {:.0} km",
+                                        k.h, k.k, k.exposure_km
+                                    ))
+                                ),
+                            )
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            println!("\nflown at {rate}/yr:");
+            for (label, s) in flown {
+                println!("  {label:16} {s}");
+            }
+        }
+    }
+
+    /// Probe, run by hand (`--ignored --nocapture`): the window search alone, no
+    /// flights — how long each seeding takes, and the ranking key it finds per
+    /// (year, direction). Seeds as `CAMPAIGN_SEARCHES` (`<step days>x<samples>`),
+    /// run one after another so the timings are not sharing cores.
+    #[test]
+    #[ignore]
+    fn probe_campaign_search_seeds() {
+        if !have_kernels() {
+            return;
+        }
+        use asteroid_core::launch_vehicle::FALCON_HEAVY_EXPENDABLE;
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+        let impact = mc.impact_tdb_seconds();
+        let yr = 3.155_76e7;
+        let origin = scenario.epoch0().tdb_seconds_past_j2000();
+        let seeds = std::env::var("CAMPAIGN_SEARCHES")
+            .unwrap_or_else(|_| "2x120,1x239,2x239,1x477,0.5x477".into());
+        let mut all = Vec::new();
+        for s in seeds.split(',') {
+            let (a, b) = s.trim().split_once('x').expect("seeds like 2x120");
+            let search = WindowSearch {
+                launch_step_days: a.parse().unwrap(),
+                arrival_samples: b.parse().unwrap(),
+                polish_launch: true,
+            };
+            let t = std::time::Instant::now();
+            let found =
+                search_campaign_windows(&scenario, &FALCON_HEAVY_EXPENDABLE, origin, search)
+                    .expect("search");
+            println!("{s}: {:.1} s", t.elapsed().as_secs_f64());
+            all.push((s.trim().to_string(), found));
+        }
+        let slots: std::collections::BTreeSet<(u32, bool)> =
+            all.iter().flat_map(|(_, f)| f.keys().copied()).collect();
+        for slot in slots {
+            let mut row = format!("yr {:2} {}", slot.0, if slot.1 { "pro " } else { "retr" });
+            for (s, f) in &all {
+                match f.get(&slot) {
+                    Some(w) => row.push_str(&format!(
+                        " | {s}: {:.4} @ {:.3}/{:.3}",
+                        campaign_proxy(w.delivery.along_track_dv_ms, impact - w.arrival_tdb) / yr,
+                        (impact - w.launch_tdb) / yr,
+                        (impact - w.arrival_tdb) / yr
+                    )),
+                    None => row.push_str(&format!(" | {s}: -")),
+                }
+            }
+            println!("{row}");
+        }
+    }
+
     /// A multi-launch campaign on the real field, end to end: rank, fly the
     /// candidates, plan, fly the plan whole, and read it back.
     ///
@@ -4592,8 +5302,9 @@ mod tests {
         mc.build_scenario(&ImpactorConfig::default())
             .expect("scenario builds");
         let scenario = mc.scenario_arc().expect("a built scenario");
-        // The shipping resolution: the count depends on it (24x24 needed 10 launches
-        // where 120x120 needs 6), so the test measures the grid the map draws.
+        // The map the frontend draws. The windows no longer come from its cells (the
+        // continuous search finds them at any dates), so this only fixes which cell
+        // each window is reported nearest.
         let view = PorkchopView::build(&scenario, 120, 120).expect("grid builds");
 
         // A rate low enough that no single year can carry the campaign, so the
@@ -4753,22 +5464,17 @@ mod tests {
         let windows: Vec<CampaignWindow> = r
             .candidates
             .iter()
-            .map(|c| {
-                let m = view
-                    .metrics_at(c.launch_index, c.arrival_index)
-                    .expect("metrics");
-                CampaignWindow {
-                    launch_epoch: Epoch::from_tdb_seconds_past_j2000(c.launch_tdb),
-                    period: c.period,
-                    arrival_epoch: Epoch::from_tdb_seconds_past_j2000(c.arrival_tdb),
-                    impulse_per_launch: impact_impulse(
-                        m.v_rel_vec,
-                        IMPACTOR_BETA,
-                        c.impact_mass_kg,
-                        threat_mass_kg(),
-                    ),
-                    shift_per_launch: shift(0),
-                }
+            .map(|c| CampaignWindow {
+                launch_epoch: Epoch::from_tdb_seconds_past_j2000(c.launch_tdb),
+                period: c.period,
+                arrival_epoch: Epoch::from_tdb_seconds_past_j2000(c.arrival_tdb),
+                impulse_per_launch: impact_impulse(
+                    c.v_rel_vec,
+                    IMPACTOR_BETA,
+                    c.impact_mass_kg,
+                    threat_mass_kg(),
+                ),
+                shift_per_launch: shift(0),
             })
             .collect();
         let one_each: Vec<u32> = (0..windows.len())
@@ -4820,16 +5526,14 @@ mod tests {
             let drift = (clk.state_at(at).unwrap().position
                 - ds.nominal().state_at(at).unwrap().position)
                 .norm();
-            let m = view
-                .metrics_at(r.candidates[k].launch_index, r.candidates[k].arrival_index)
-                .unwrap();
+            let v_rel = r.candidates[k].v_rel_vec.norm();
             let tof = r.candidates[k].arrival_tdb - r.candidates[k].launch_tdb;
             println!(
                 "  impactor arriving {:.2} yr before impact: rock {:.1} km off its nominal after {n} earlier launch(es); ~{:.2e} m/s of re-aim against v_rel {:.0} m/s",
                 (impact - r.candidates[k].arrival_tdb) / 3.155_76e7,
                 drift / 1e3,
                 drift / tof,
-                m.arrival_v_rel_ms
+                v_rel
             );
         }
     }

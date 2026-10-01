@@ -61,15 +61,19 @@
 //! Each launch pushes with the mass that **arrives**, not the mass the rocket
 //! lifts ([`crate::impactor_mass`]): DART's flown 3.6 % propellant loss comes off,
 //! and nothing else does — the bus hits the rock, and the launch adapter is already
-//! out of the tables. Measured on the shipping grid at every rate from 1 to 10 a
-//! year, that moves the Falcon Heavy count only at 4 a year, from 6 to 7 (that plan
-//! cleared the line by 1.1 %). 5 a year stays 6, but clears by only 0.4 %.
+//! out of the tables. Measured on the 120×120 map's cells at every rate from 1 to
+//! 10 a year, that moved the Falcon Heavy count only at 4 a year, from 6 to 7 (that
+//! plan cleared the line by 1.1 %). 5 a year stayed 6, but cleared by only 0.4 %.
+//! (Those windows were the map's cells; the continuous search since finds 6 at
+//! every rate from 2 to 10 a year with the impact mass.)
 //!
 //! What is still optimistic: the whole separated mass is assumed to be a buildable
 //! impactor, with no design margin held back from the rocket's capability. But the
 //! count is **not** a lower bound either: the planner only sees the windows its
 //! caller flew, and a better window it was never shown would lower the count.
-//! Optimistic on margin, pessimistic on search — a count, not a bound either way.
+//! Optimistic on margin, and only as good as the caller's search — a count, not a
+//! bound either way. (The binding's continuous window search is settled for the
+//! push direction its plans use; its other direction is a lower bound.)
 
 use nalgebra::{Vector2, Vector3};
 

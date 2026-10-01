@@ -475,6 +475,12 @@ var pork_mass_solving := false
 ## date — not per launch date, which let a finer grid allow more launches a year.
 const CAMPAIGN_RATE_MIN := 1
 const CAMPAIGN_RATE_MAX := 12
+## How close to the target a campaign's predicted |B| must come, as a fraction of
+## it either side, before its count is printed "AT THE LINE" rather than as a clear
+## yes or no. Set by how far two honest searches disagree near the line: the window
+## search and the 953x953 map, flown at 1 a year, part by ~0.7 % in perigee
+## (HANDOFF *The windows searched continuously*).
+const CAMPAIGN_AT_LINE_FRACTION := 0.01
 var pork_campaign_rate := 2
 var pork_campaign_open := false          # the panel shows the campaign, not the cell
 var pork_campaign_solving := false       # every year's best window flying (minutes)
@@ -2191,20 +2197,27 @@ func campaign_count_label() -> String:
 	if c.is_empty():
 		return "NOT SOLVED"
 	var tgt := float(c.target_b_km)
+	var got := float(c.predicted_b_km)
+	# Within the window search's own measured reach of the target, either side, a
+	# count is not a clear yes or no and is not printed as one.
+	var at_line := tgt > 0.0 and absf(got / tgt - 1.0) <= CAMPAIGN_AT_LINE_FRACTION
 	match str(c.outcome):
 		"already_clear":
 			return "NOMINAL ALREADY MISSES BY THE TARGET - NO LAUNCH NEEDED"
 		"planned":
-			return "%d LAUNCHES AT UP TO %d/YR - PREDICTED |B| %s OF %s KM" % [
+			return "%d LAUNCHES AT UP TO %d/YR - PREDICTED |B| %s OF %s KM%s" % [
 				int(c.total_launches), int(c.launches_per_year),
-				group_num(int(c.predicted_b_km)), group_num(int(tgt))]
+				group_num(int(got)), group_num(int(tgt)), "  AT THE LINE" if at_line else ""]
 		"unreachable":
 			# An answer, not a failure: the best this rate can do, and how short.
-			# "Falls short", not "unreachable": how far short moves with where the
-			# years start (2 041 km short at the shipping start, 437 km at -6 months).
+			# "Falls short", not "unreachable": how far short moves with the search.
+			if at_line:
+				return "AT THE LINE AT %d/YR - %d LAUNCHES GET |B| %s OF %s KM" % [
+					int(c.launches_per_year), int(c.total_launches),
+					group_num(int(got)), group_num(int(tgt))]
 			return "FALLS SHORT AT %d/YR - %d LAUNCHES GET |B| %s OF %s KM" % [
 				int(c.launches_per_year), int(c.total_launches),
-				group_num(int(c.predicted_b_km)), group_num(int(tgt))]
+				group_num(int(got)), group_num(int(tgt))]
 	return "UNKNOWN"
 
 

@@ -322,6 +322,217 @@ fn helio(sun_ssb: StateVector, body_ssb: StateVector) -> StateVector {
     )
 }
 
+/// One porkchop cell at **any** (launch, arrival) pair, not only the grid's — the
+/// continuous form of [`porkchop_grid`], and the code that grid itself runs.
+///
+/// # Why it exists
+/// A grid samples. The campaign's best windows turned out to sit **just inside the
+/// edge where a lap family stops existing** (one arrival step later the solver
+/// reports "this many laps do not fit"), on a steep shoulder only a few days wide —
+/// so a sampled grid misses them systematically, by roughly how far its last sample
+/// before the edge falls short. Searching the dates continuously needs a cell at
+/// any pair of epochs, which is this.
+///
+/// # Same cell, same code
+/// [`porkchop_grid`] fills every cell through [`cell_from_states`](Self::cell_from_states)
+/// on states looked up through [`earth_helio`](Self::earth_helio) and
+/// [`asteroid_helio`](Self::asteroid_helio), so [`cell`](Self::cell) at a grid's own
+/// epochs *is* that grid's cell, bit for bit — the selection rule (lowest `C3`
+/// across the direct arc and every lapping branch, [`best_transfer_metrics`])
+/// included. A continuous search that quietly ranked transfers by a different rule
+/// would beat the grid at the very same dates, and the gain would be the rule's,
+/// not the search's.
+pub struct TransferEvaluator<'a> {
+    sun: EphemerisPerturber,
+    earth: EphemerisPerturber,
+    deflection: DeflectionScenario<'a>,
+    mu_sun: f64,
+    min_tof_seconds: f64,
+    prograde: bool,
+    max_revolutions: u32,
+}
+
+impl<'a> TransferEvaluator<'a> {
+    /// The evaluator [`porkchop_grid`] builds with the same arguments.
+    pub fn new(
+        scenario: &'a RealFieldScenario,
+        min_tof_seconds: f64,
+        prograde: bool,
+        max_revolutions: u32,
+    ) -> Result<Self, MissionError> {
+        let eph = scenario.ephemeris();
+        let mu_sun = eph
+            .sun_gm_m3_s2()
+            .map_err(|e| MissionError::Ephemeris(e.to_string()))?;
+        Ok(Self {
+            sun: EphemerisPerturber::new(Arc::clone(eph), SUN_J2000),
+            earth: EphemerisPerturber::new(Arc::clone(eph), EARTH_J2000),
+            deflection: scenario.deflection()?,
+            mu_sun,
+            min_tof_seconds,
+            prograde,
+            max_revolutions,
+        })
+    }
+
+    /// Earth's heliocentric state at `t`.
+    pub fn earth_helio(&self, t: Epoch) -> Result<StateVector, MissionError> {
+        let sun_ssb = self
+            .sun
+            .state_at(t)
+            .map_err(|e| MissionError::Ephemeris(e.to_string()))?;
+        let earth_ssb = self
+            .earth
+            .state_at(t)
+            .map_err(|e| MissionError::Ephemeris(e.to_string()))?;
+        Ok(helio(sun_ssb, earth_ssb))
+    }
+
+    /// The (undeflected) asteroid's heliocentric state at `t`, or `None` outside
+    /// the propagated span — there is no asteroid to intercept there.
+    pub fn asteroid_helio(&self, t: Epoch) -> Result<Option<StateVector>, MissionError> {
+        let sun_ssb = self
+            .sun
+            .state_at(t)
+            .map_err(|e| MissionError::Ephemeris(e.to_string()))?;
+        Ok(self
+            .deflection
+            .nominal()
+            .state_at(t)
+            .ok()
+            .map(|s| helio(sun_ssb, s)))
+    }
+
+    /// The cell for a launch at `t_launch` and arrival at `t_arrival`.
+    pub fn cell(&self, t_launch: Epoch, t_arrival: Epoch) -> Result<PorkchopCell, MissionError> {
+        let earth = self.earth_helio(t_launch)?;
+        let ast = self.asteroid_helio(t_arrival)?;
+        Ok(self.cell_from_states(earth, ast, t_launch, t_arrival))
+    }
+
+    /// Whether a transfer making exactly `revolutions` laps exists for this pair —
+    /// by the solver's own test, so the edge this locates is the edge the cells
+    /// switch family at.
+    ///
+    /// The continuous search bisects on it. The campaign's best windows sit **just
+    /// inside** the arrival where a lap family stops fitting (within an hour, for
+    /// most prograde ones), on ridges narrower than any affordable scan step, so
+    /// sampling finds them only by luck of where the samples fall; locating the
+    /// edge itself does not depend on that luck.
+    pub fn family_exists(
+        &self,
+        t_launch: Epoch,
+        t_arrival: Epoch,
+        revolutions: u32,
+    ) -> Result<bool, MissionError> {
+        let tof = t_arrival.tdb_seconds_past_j2000() - t_launch.tdb_seconds_past_j2000();
+        if tof < self.min_tof_seconds {
+            return Ok(false);
+        }
+        let Some(ast) = self.asteroid_helio(t_arrival)? else {
+            return Ok(false);
+        };
+        let earth = self.earth_helio(t_launch)?;
+        Ok(matches!(
+            transfer_metrics_for_revolutions(
+                earth,
+                ast,
+                tof,
+                self.mu_sun,
+                self.prograde,
+                revolutions,
+                MultiRevBranch::LowZ,
+            ),
+            Ok(Some(_))
+        ))
+    }
+
+    /// The most laps the cells consider (the grid's `max_revolutions`).
+    pub fn max_revolutions(&self) -> u32 {
+        self.max_revolutions
+    }
+
+    /// The cell from already-looked-up endpoint states — the half [`porkchop_grid`]
+    /// calls per cell, after looking each epoch's state up once.
+    pub fn cell_from_states(
+        &self,
+        earth_helio: StateVector,
+        asteroid_helio: Option<StateVector>,
+        t_launch: Epoch,
+        t_arrival: Epoch,
+    ) -> PorkchopCell {
+        let tof = t_arrival.tdb_seconds_past_j2000() - t_launch.tdb_seconds_past_j2000();
+        match (asteroid_helio, tof >= self.min_tof_seconds) {
+            (Some(ast), true) => match best_transfer_metrics(
+                earth_helio,
+                ast,
+                tof,
+                self.mu_sun,
+                self.prograde,
+                self.max_revolutions,
+            ) {
+                Ok(Some(m)) => PorkchopCell::Transfer(m),
+                // Lambert gap or (guarded by `tof ≥ min_tof`) invalid input.
+                Ok(None) | Err(_) => PorkchopCell::NoTransfer,
+            },
+            _ => PorkchopCell::NoTransfer,
+        }
+    }
+}
+
+/// The largest value of `f` on `[lo, hi]`, found by zooming: sample `samples`
+/// evenly spaced points, keep the best one and its two neighbours as the next
+/// interval, repeat until it is narrower than `tol`. `f` returns `None` where it has
+/// no value (no transfer, an infeasible launch); `None` overall if no sample ever
+/// had one.
+///
+/// # Why not golden section
+/// The functions this is for are **not unimodal**. A campaign window's ranking key
+/// rises toward the edge of a lap family and then *drops* — past the edge the cell
+/// switches to another family with its own, unrelated slope. Golden section keeps
+/// one of two interior points by comparing them, and when both land past the edge
+/// that comparison is about the wrong family: it can throw away the side holding
+/// the peak. Sampling the whole interval each round never compares two points it
+/// cannot see between; it can still lose a peak narrower than one sample spacing
+/// on the **first** round, which is why the caller sizes `samples` against how
+/// narrow the peaks it is after are.
+///
+/// Each round shrinks the interval by `samples / 2` (the best sample and one
+/// spacing either side); `samples ≥ 3` is required for that to shrink at all.
+pub fn maximise_on_interval(
+    mut f: impl FnMut(f64) -> Option<f64>,
+    lo: f64,
+    hi: f64,
+    samples: usize,
+    tol: f64,
+) -> Option<(f64, f64)> {
+    assert!(
+        samples >= 3,
+        "maximise_on_interval needs at least 3 samples"
+    );
+    let (mut lo, mut hi) = (lo.min(hi), lo.max(hi));
+    let mut best: Option<(f64, f64)> = None;
+    loop {
+        let step = (hi - lo) / (samples - 1) as f64;
+        for k in 0..samples {
+            let x = lo + step * k as f64;
+            if let Some(v) = f(x) {
+                if best.is_none_or(|(_, b)| v > b) {
+                    best = Some((x, v));
+                }
+            }
+        }
+        // The best seen anywhere so far, not only this round: a later round can only
+        // look inside the earlier winner's neighbourhood, so it never loses it.
+        let (x_best, _) = best?;
+        if step <= tol {
+            return best;
+        }
+        lo = (x_best - step).max(lo);
+        hi = (x_best + step).min(hi);
+    }
+}
+
 /// The **cheapest** transfer for one launch window across the direct arc and every
 /// lapping alternative up to `max_revolutions` — the selection the porkchop grid
 /// makes per cell.
@@ -436,67 +647,26 @@ pub fn porkchop_grid(
         ));
     }
 
-    let eph = scenario.ephemeris();
-    let mu_sun = eph
-        .sun_gm_m3_s2()
-        .map_err(|e| MissionError::Ephemeris(e.to_string()))?;
+    let ev = TransferEvaluator::new(scenario, min_tof_seconds, prograde, max_revolutions)?;
 
-    let sun = EphemerisPerturber::new(Arc::clone(eph), SUN_J2000);
-    let earth = EphemerisPerturber::new(Arc::clone(eph), EARTH_J2000);
-
-    // Precompute Earth heliocentric states at each launch epoch.
-    let mut earth_helio = Vec::with_capacity(launch_epochs.len());
-    for &t in launch_epochs {
-        let sun_ssb = sun
-            .state_at(t)
-            .map_err(|e| MissionError::Ephemeris(e.to_string()))?;
-        let earth_ssb = earth
-            .state_at(t)
-            .map_err(|e| MissionError::Ephemeris(e.to_string()))?;
-        earth_helio.push(helio(sun_ssb, earth_ssb));
-    }
-
-    // Precompute asteroid heliocentric states at each arrival epoch, from the
-    // cached nominal trajectory. `deflection()` propagates the nominal once and
-    // reuses it (§ scenario), so this does not re-fly the cruise.
-    let ds = scenario.deflection()?;
-    let mut ast_helio = Vec::with_capacity(arrival_epochs.len());
-    for &t in arrival_epochs {
-        let sun_ssb = sun
-            .state_at(t)
-            .map_err(|e| MissionError::Ephemeris(e.to_string()))?;
-        // Outside the propagated span there is no asteroid to intercept: leave a
-        // sentinel that makes every cell at this arrival a NoTransfer.
-        let ast = match ds.nominal().state_at(t) {
-            Ok(s) => Some(helio(sun_ssb, s)),
-            Err(_) => None,
-        };
-        ast_helio.push(ast);
-    }
+    // Precompute Earth heliocentric states at each launch epoch, and the asteroid's
+    // at each arrival epoch (from the cached nominal — `deflection()` propagates it
+    // once and reuses it, so this does not re-fly the cruise). An arrival outside
+    // the propagated span is a `None` that makes its whole column a NoTransfer.
+    let earth_helio = launch_epochs
+        .iter()
+        .map(|&t| ev.earth_helio(t))
+        .collect::<Result<Vec<_>, _>>()?;
+    let ast_helio = arrival_epochs
+        .iter()
+        .map(|&t| ev.asteroid_helio(t))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut cells = Vec::with_capacity(launch_epochs.len());
     for (i, &t_l) in launch_epochs.iter().enumerate() {
         let mut row = Vec::with_capacity(arrival_epochs.len());
         for (j, &t_a) in arrival_epochs.iter().enumerate() {
-            let tof = t_a.tdb_seconds_past_j2000() - t_l.tdb_seconds_past_j2000();
-            let cell = match (&ast_helio[j], tof >= min_tof_seconds) {
-                (Some(ast), true) => {
-                    match best_transfer_metrics(
-                        earth_helio[i],
-                        *ast,
-                        tof,
-                        mu_sun,
-                        prograde,
-                        max_revolutions,
-                    ) {
-                        Ok(Some(m)) => PorkchopCell::Transfer(m),
-                        // Lambert gap or (guarded above) invalid input → no cell.
-                        Ok(None) | Err(_) => PorkchopCell::NoTransfer,
-                    }
-                }
-                _ => PorkchopCell::NoTransfer,
-            };
-            row.push(cell);
+            row.push(ev.cell_from_states(earth_helio[i], ast_helio[j], t_l, t_a));
         }
         cells.push(row);
     }
@@ -1178,6 +1348,81 @@ mod tests {
             p_big > capture,
             "a delivered {m_big:.2e} kg impactor should turn the hit into a miss: \
              perigee {p_big} vs capture {capture}"
+        );
+    }
+
+    // --- The continuous search -------------------------------------------------
+
+    /// The shape the campaign's windows have: a key rising to a cliff at `edge`,
+    /// then another family's slope that **rises again** on the far side (to a lower
+    /// level). Golden section seeded across the cliff compares two points past it,
+    /// sees the right one higher, and discards the peak; the zoom must not.
+    #[test]
+    fn the_zoom_finds_a_peak_against_a_cliff() {
+        let edge = 3.7;
+        let f = |x: f64| -> Option<f64> {
+            if x < 0.5 {
+                None // no transfer at all down here
+            } else if x <= edge {
+                Some(x) // rising toward the edge: the peak is AT the edge
+            } else {
+                Some(0.5 * x - 1.0) // the next family: lower, but rising
+            }
+        };
+        let (x, v) = maximise_on_interval(f, 0.0, 6.0, 9, 1e-9).expect("a peak");
+        assert!(
+            (x - edge).abs() < 1e-8 && (v - edge).abs() < 1e-8,
+            "got ({x}, {v})"
+        );
+        // Every sample blank is "no answer", not a zero.
+        assert!(maximise_on_interval(|_| None, 0.0, 1.0, 5, 1e-6).is_none());
+        // A degenerate interval is its own answer.
+        assert_eq!(
+            maximise_on_interval(|x| Some(-x * x), 2.0, 2.0, 5, 1e-6),
+            Some((2.0, -4.0))
+        );
+    }
+
+    /// The evaluator at the grid's own epochs **is** the grid — every cell, bit for
+    /// bit, including the blanks and which lap family won. A continuous search
+    /// that is only "close to" the map would make every refined-vs-grid comparison
+    /// a comparison of two rules.
+    #[test]
+    fn the_evaluator_at_grid_epochs_reproduces_the_grid() {
+        use crate::scenario::{ImpactorConfig, RealFieldScenario};
+        if crate::kernels::resolve_for_test("the_evaluator_at_grid_epochs_reproduces_the_grid")
+            .is_none()
+        {
+            return;
+        }
+        let sc = RealFieldScenario::build(&ImpactorConfig::default()).expect("scenario builds");
+        let t0 = sc.epoch0().tdb_seconds_past_j2000();
+        let span = sc.impact_epoch().tdb_seconds_past_j2000() - t0;
+        let day = 86_400.0;
+        let launches: Vec<Epoch> = (0..6)
+            .map(|i| Epoch::from_tdb_seconds_past_j2000(t0 + 0.1 * span + i as f64 * 77.0 * day))
+            .collect();
+        // Spanning past the end of the propagated nominal, so a blank column is
+        // compared too.
+        let arrivals: Vec<Epoch> = (0..8)
+            .map(|j| Epoch::from_tdb_seconds_past_j2000(t0 + 0.3 * span + j as f64 * 0.11 * span))
+            .collect();
+        let pork = porkchop_grid(&sc, &launches, &arrivals, 90.0 * day, true, 2).expect("grid");
+        let ev = TransferEvaluator::new(&sc, 90.0 * day, true, 2).expect("evaluator");
+        let (mut transfers, mut blanks) = (0, 0);
+        for (i, &tl) in launches.iter().enumerate() {
+            for (j, &ta) in arrivals.iter().enumerate() {
+                let c = ev.cell(tl, ta).expect("cell");
+                assert_eq!(c, pork.cells[i][j], "cell ({i},{j})");
+                match c {
+                    PorkchopCell::Transfer(_) => transfers += 1,
+                    PorkchopCell::NoTransfer => blanks += 1,
+                }
+            }
+        }
+        assert!(
+            transfers > 0 && blanks > 0,
+            "{transfers} transfers, {blanks} blanks"
         );
     }
 }

@@ -24,7 +24,7 @@ Harness `godot/tests/_campaign_shot.gd`.
 the launches/yr of 24 rows. Rolling window rejected: not a partition, greedy breaks.
 Anchor phase measured: 0/3/6/9 months -> 7/7/6/7 at 2/yr (within one, accepted).
 Leftover grid dependence is window QUALITY (best retro shift/launch 4 094 / 3 160 /
-2 218 km at 120/60/24 rows), so 24x24 still says 14 at 2/yr. 120 not proven converged.
+2 218 km at 120/60/24 rows), so 24x24 still says 14 at 2/yr. **120 is NOT converged** (2026-10-01): see [[campaign-grid-convergence]] - 477 gives 6 at 2-4/yr. **Superseded 2026-10-01 by [[campaign-continuous-search]]: 6 at 2..10/yr, 9 at 1/yr (at the line).**
 
 **Numbers (FH-exp):** 7 launches at 2/yr, flown perigee 21 497 km, 0.02% off the
 arithmetic, keyhole 7:11 646 km outside its band. 1/yr falls short at every year-start tried

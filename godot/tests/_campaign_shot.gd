@@ -10,7 +10,10 @@ extends Node
 ## What it pins, beyond "it drew":
 ## - the cap is per YEAR: no year of the plan carries more launches than the rate;
 ## - the rate knob is free (no solve fires on [Z]/[X]) and greys the flight line;
-## - 1/yr is an answer ("FALLS SHORT"), not a failure;
+## - 1/yr is an answer, not a failure - and it sits within 1 % of the target, so
+##   it must print "AT THE LINE", never a bare yes or no;
+## - the window boxes sit at their own dates, between the map's cells (look at the
+##   shot: the continuous search finds dates no cell has);
 ## - [L] makes the held campaign stale instead of showing it as this rocket's;
 ## - [M] does not open the planner or start a mass solve while the panel is up.
 
@@ -95,6 +98,7 @@ func _run() -> void:
 	assert(not Sim.pork_campaign_solving and not Sim.pork_campaign_flying, "[Z] fired a solve")
 	assert(not Sim.pork_campaign_flight_is_current(), "a flight at 2/yr shown as current at 1/yr")
 	print("CAMPSHOT  1/yr: %s" % Sim.campaign_count_label())
+	assert(Sim.campaign_count_label().contains("AT THE LINE"), "1/yr is within 1 % of the target")
 	_assert_per_year_cap()
 	await _settle(3)
 	await _shot("campaign_rate_1")

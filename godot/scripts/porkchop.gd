@@ -411,7 +411,7 @@ func _draw_keys(pos: Vector2, dim: Color) -> void:
 ## windows on this rocket's map would be a picture of a different plan.
 func _draw_campaign_overlay(plot: Rect2, bright: Color, dim: Color, faint: Color) -> void:
 	var c: Dictionary = Sim.pork_campaign
-	if not Sim.pork_campaign_is_current_vehicle() or Sim.pork_rows < 2:
+	if not Sim.pork_campaign_is_current_vehicle() or Sim.pork_rows < 2 or Sim.pork_cols < 2:
 		return
 	var cw := plot.size.x / float(Sim.pork_cols)
 	var ch := plot.size.y / float(Sim.pork_rows)
@@ -431,8 +431,14 @@ func _draw_campaign_overlay(plot: Rect2, bright: Color, dim: Color, faint: Color
 			x += 12.0
 		if k < int(c.period_count):
 			_t(Vector2(plot.end.x - 40.0, y + 12.0), "YR %d" % (k + 1), dim, _fs - 4)
+	# A window sits at its own dates, found by a continuous search, and generally
+	# between the map's cells: placed by date as a fractional cell, never by the
+	# nearest cell's index, which would put it up to half a cell off.
+	var a0: float = Sim.pork_arrival_tdb[0]
+	var da: float = Sim.pork_arrival_tdb[1] - a0
 	for w: Dictionary in c.windows:
-		var p := plot.position + Vector2(int(w.arrival_index) * cw, int(w.launch_index) * ch)
+		var p := plot.position + Vector2(
+			(float(w.arrival_tdb) - a0) / da * cw, (float(w.launch_tdb) - t0) / dt * ch)
 		var r := Rect2(p - Vector2(2, 2), Vector2(cw + 4.0, ch + 4.0))
 		var n := int(w.launches)
 		if n <= 0:

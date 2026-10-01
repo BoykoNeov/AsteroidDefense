@@ -282,8 +282,11 @@ Read this table first, then the session that owns the layer you are touching.
    which moves the count only at 4 a year, 6 → 7 (every rate 1..10 measured; 5 a
    year stays 6 by 0.4 %). See *What actually hits the rock*. **Grid convergence:
    measured 2026-10-01 - the 120×120 map is NOT converged**: at 477×477 (holding at
-   953 for 2..10 a year) 2-4 a year need **6**, not 7 (flown), and 1 a year is at the line. Which
-   fix ships is open - see *Is the 120×120 map fine enough?*. Next: orbital assembly.
+   953 for 2..10 a year) 2-4 a year need **6**, not 7 (flown), and 1 a year is at the line.
+   **Fixed 2026-10-01 by a continuous window search** (the user's pick): **6 launches
+   at 2..10 a year, 9 at 1 a year (at the line, 0.8 % clear), all flown**, matching the
+   953 map at every rate; prograde windows are a lower bound no plan uses. See *The
+   windows searched continuously*. Next: the rolling-year cap, then orbital assembly.
 
 ---
 
@@ -6032,3 +6035,69 @@ Two consequences:
   keeps the 120 map, but more code, and the launch axis still needs refining
   (both axes were needed above).
 - Whichever ships, **1 a year is labelled "at the line"**, not short or clear.
+
+**Decided 2026-10-01: the third option** - see *The windows searched continuously*.
+
+### The windows searched continuously - 2026-10-01 session (Phase 3: the grid-convergence decision, shipped)
+
+The user chose "search each launch date's arrival continuously, up to the edge".
+Built as the user picked it, and - because the study above showed both axes were
+needed - with the launch date refined too.
+
+**What ships.** `search_campaign_windows` (`godot/rust/src/mission_core.rs`)
+replaces "best map cell per year" as the source of the campaign's windows:
+
+1. Launch dates **2 days apart** (`SHIPPING_WINDOW_SEARCH`) - under the narrowest
+   launch window measured (6 d), against the map's 26 d rows.
+2. Per date, the arrival axis scanned at 120 points; then a continuous zoom
+   (`core::mission::maximise_on_interval`, to an hour) on each push direction's best
+   three local maxima **and** on the inside of every lap-family edge, each edge
+   located by bisection to a minute (`TransferEvaluator::family_exists`).
+3. Each year's best date polished in launch date (± one step, clipped to its
+   year), re-running step 2's search in a bracket at every trial date.
+
+Every point is evaluated by `core::mission::TransferEvaluator`, which **is** the
+map's cell (`porkchop_grid` now runs through it; a kernel test pins the two equal
+cell for cell). So a refined window is a transfer the map would show at those
+dates, and beating the map is the sampling's doing - the "best of any lap family"
+key at the same dates (printed by the probe) differs from the map's
+lowest-`C3` rule in one minor prograde slot only. Search cost: **~17 s** on 16
+threads, on top of the ~3.5 min of candidate flights. The old source survives as
+`WindowSource::GridCells` for comparison only. The map draws each window's box at
+its own dates (fractional cells), not at the nearest cell.
+
+**The bar, written before running, reported as written** (`probe_campaign_continuous_search`,
+FH expendable, flown):
+
+| clause | result |
+|---|---|
+| every (year, direction) flown shift ≥ the 953 map's, within 0.5 % | **pass** - all 18, e.g. year 1 retro 4 510 vs 4 492 km/launch |
+| counts at 1..10 a year = the 953 map's | **pass** - 9, then 6 at every rate 2..10 |
+| seeds 4x60 .. 0.5x477 land on the same windows | **retrograde pass** (identical at all six seeds, 15-83 s); **prograde FAIL** |
+| 1 and 2 a year flown whole | 2/yr: **6 launches, perigee 20 533 km** (line 20 000, 2.7 % clear); 1/yr: **9 launches, 20 163 km** (0.8 % clear); flight vs arithmetic 2e-4 |
+
+The control did what the grid study predicted: continuous arrival on the 120
+map's own launch dates (no launch refinement) still needs **7** at 2 a year.
+
+**Prograde is not converged, and it is left that way on purpose.** Prograde
+winners hug a lap-family edge (most within an hour of it) and sit near the start
+of their fixed year, and which one a seed finds moves with the seed: year 0
+prograde reads 0.063 to 0.079 m/s·yr across seeds, year 4 0.041 to 0.049. Two
+bounded attempts changed nothing at the shipping seed: edge bisection (kept - it
+is the literal form of the option chosen, ~9 s) and sampling each year's first and
+last day explicitly (reverted - identical numbers). Why it does not reach a count:
+every plan at every rate 1..10 is retrograde on this rock (the nominal already
+sits ~2 300 km on that side), and retrograde is identical at every seed. So the
+prograde slots are a **lower bound no shipping plan uses**. It could matter on a
+rock built with `[N]` whose nominal sits on the other side; the fixed-year
+boundary it presses against goes away with a rolling-year cap (next).
+
+**"At the line" is a margin, not a rate.** `CAMPAIGN_AT_LINE_FRACTION = 0.01` in
+`sim.gd`: a count whose predicted |B| is within 1 % of the target, either side,
+prints "AT THE LINE". Set by how far two honest searches part near the line - the
+search and the 953 map, flown at 1 a year, differ by 132 km of perigee (0.7 %). 1 a
+year carries the label; 2 a year (2.7 %) does not.
+
+Supersedes: "7 at 2-3 a year" (120 cells), "6 → 7 at 4 a year from the mass budget"
+(120 cells), "1 a year falls short" (120 cells). The headline is now **6 Falcon Heavy
+(expendable) launches at 2 to 10 a year, 9 at 1 a year (at the line)**.

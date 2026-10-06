@@ -73,18 +73,24 @@
 //! burn is smaller (about 45 m/s less from 400 km at `C3 = 10`), and a stack waiting
 //! a year would in practice sit higher, because a 185 km orbit decays in weeks.
 //!
-//! # What this does not model
+//! # What this does not model - and two of it favour parking
 //! - **The parking orbit's plane.** The departure asymptote has to lie in (or be
-//!   reached from) the parking orbit's plane on the departure date. The NASA `C3`
-//!   tables the direct launches use assume the same away, so the two modes are
-//!   compared on the same footing; neither is charged for it.
-//! - **Gravity losses.** The burn is impulsive. A 30 kN storable engine pushing a
-//!   26.5 t stack burns for many minutes, which costs a little more Δv than this.
-//! - **Rendezvous and docking.** Two parked launches leaving on the same date are
-//!   counted as joined at no mass cost; by linearity they could equally leave as two
-//!   stacks on the same date, so this is only a statement that both can wait.
+//!   reached from) the parking orbit's plane on the departure date. A direct launch
+//!   gets that by choosing its launch time on the day; a parked stack's plane is
+//!   fixed at launch and regresses with Earth's oblateness (a ~50-day cycle at
+//!   185 km), so it can need a plane change or a date off the window's best. Not
+//!   charged here - a bias toward parking.
+//! - **Gravity losses.** The burn is impulsive. A 26.7 kN storable engine pushing a
+//!   26.5 t stack burns for ~40 minutes at `C3` ~43 - past the OMS-E's rated
+//!   1 030 s maximum, so at least three perigee burns - and a burn that long costs
+//!   real Δv, plausibly tens of m/s. Also a bias toward parking.
+//! - **Orbit decay at 185 km** (a real stack would wait higher, which needs *less*
+//!   burn) and **rendezvous and docking** (two parked launches leaving the same date
+//!   are counted as joined at no mass cost; by linearity they could equally leave as
+//!   two stacks on that date).
 
 use crate::impactor_mass::{impact_mass_kg, propellant_fraction};
+use crate::launch_vehicle::{LaunchVehicle, FALCON_HEAVY_EXPENDABLE};
 
 /// The largest published single-payload mass for a Falcon launch, kg — the 3,117-mm
 /// strut PAF, extended fairing only: "Total Mass: up to 26,500 kg". *Falcon User's
@@ -186,6 +192,23 @@ pub const SHIPPING_PARKED_DELIVERY: ParkedDelivery = ParkedDelivery {
     parking_altitude_m: PARKING_ALTITUDE_M,
 };
 
+/// The parked delivery `vehicle` can fly, or `None` where nothing sourced says
+/// what one payload of it may weigh in a parking orbit.
+///
+/// A parked stack needs two sourced halves: a **single-payload limit** (the most
+/// one payload may weigh) and evidence the rocket **lifts that much to low orbit**.
+/// Only Falcon Heavy expendable has both - the Falcon guide's 26 500 kg, and
+/// SpaceX's advertised 63.8 t to low orbit, well above it. Falcon Heavy *reusable*
+/// shares the guide's adapter limit but has no published low-orbit figure; Atlas V,
+/// Vulcan and Delta IV Heavy have neither here. Giving any of them the Falcon stack
+/// would invent a gain (a 26.5 t stack is far more than an Atlas V carries), so they
+/// fly straight to the rock only.
+///
+/// Matched by name, not by address: a `const` has no stable address to compare.
+pub fn parked_delivery_for(vehicle: &LaunchVehicle) -> Option<ParkedDelivery> {
+    (vehicle.name == FALCON_HEAVY_EXPENDABLE.name).then_some(SHIPPING_PARKED_DELIVERY)
+}
+
 /// The labelled *what ifs*: a hydrogen engine that does not boil off, the
 /// advertised low-orbit figure as one payload, and both. Reported next to the
 /// shipping answer, never in place of it.
@@ -255,6 +278,23 @@ mod tests {
             );
         }
         assert_eq!(d.separated_mass_kg(f64::NAN), 0.0);
+    }
+
+    /// Parking is offered only where both halves are sourced: Falcon Heavy
+    /// expendable, and no other launcher on the table.
+    #[test]
+    fn only_falcon_heavy_expendable_parks() {
+        use crate::launch_vehicle::LAUNCH_VEHICLES;
+        let parks: Vec<&str> = LAUNCH_VEHICLES
+            .iter()
+            .filter(|v| parked_delivery_for(v).is_some())
+            .map(|v| v.name)
+            .collect();
+        assert_eq!(parks, vec![FALCON_HEAVY_EXPENDABLE.name]);
+        assert_eq!(
+            parked_delivery_for(&FALCON_HEAVY_EXPENDABLE),
+            Some(SHIPPING_PARKED_DELIVERY)
+        );
     }
 
     /// The shipping stack is the published adapter limit with a storable engine, and

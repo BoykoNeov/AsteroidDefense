@@ -294,7 +294,9 @@ Read this table first, then the session that owns the layer you are touching.
    joined stack pushes exactly as its parts would): a launch may go up to a parking
    orbit and leave on a later, better date with its own storable departure stage, at
    Falcon's published 26.5 t single-payload limit. **1 in any 12 months goes from
-   short to at the line** (9 launches, flown perigee 19 790 km, seed-independent);
+   short to at the line** (9 launches, flown perigee 19 790 km, seed-independent) -
+   on an idealised burn, 44 km inside the line's 1 % band, which ~7.5 m/s of real
+   burn losses per parked launch would erase;
    **2..12 stay at 6**. Hydrogen / the advertised 63.8 t are labelled what-ifs (4-5 /
    3 / 2). See *Orbital assembly: it is parking, not joining*.
 
@@ -6290,7 +6292,8 @@ Launches (predicted |B| km; target 25 955), every rate 1..12 planned:
 | 2 | 6 | **6** | 4 | 3 | 2 |
 | 3..12 | 6 | **6** | 4 | 3 | 2 |
 
-- **1 in any 12 months is now AT THE LINE** (0.83 % short of the target |B|), flown
+- **1 in any 12 months is now AT THE LINE** (0.83 % short of the target |B|; read the
+  bias section below - an idealised burn), flown
   whole: perigee **19 790 km** against the 20 000 km line, 0.021 % off the arithmetic.
   At the finest search seed (0.5 d x 477): 25 757, flown **19 808 km** - the answer no
   longer moves with the seed, because the parked plan is *retrograde*, the direction
@@ -6302,13 +6305,41 @@ Launches (predicted |B| km; target 25 955), every rate 1..12 planned:
 - **What ifs:** a hydrogen engine (if it kept) takes 2-12 a year to 4 and 1 a year to
   5; the advertised 63.8 t as one payload takes everything to 3, or 2 with hydrogen.
 
-#### What this does not model
+#### What this does not model - and two of it lean toward parking
 
-The parking orbit's plane against the departure asymptote (the NASA `C3` tables the
-direct launches use assume it away too, so the two compare on equal footing);
-gravity losses on a long storable burn (the burn is impulsive); orbit decay at 185 km
-(a real stack would wait higher, which needs *less* burn); rendezvous and docking
-(free - by linearity two stacks leaving the same day would do the same).
+**The 1-a-year verdict carries an optimistic bias of known sign, and its margin is
+smaller than the bias is likely to be.** "At the line" means within 1 % of the target
+|B| (>= 25 695 km); the plan predicts 25 739 km, **44 km** inside. The seven parked
+launches carry ~18 050 km of the push, so 44 km is 0.24 % of their mass - about
+**7.5 m/s** of extra escape burn per parked launch (1 % of mass ~ 31 m/s at 315 s).
+Two unmodelled costs land on the parked launches only, and either is plausibly larger:
+
+- **Gravity losses.** The burn is impulsive here, but at `C3` ~43 it burns ~21 t of a
+  26.5 t stack through a 26.7 kN engine: ~2 450 s, about 40 minutes at ~0.1 g - and
+  the engine's own rated **max burn duration is 1 030 s** (Belair et al., Table 2), so
+  it is at least three perigee burns. Losses on a burn like that are typically tens of
+  m/s or more; not measured here.
+- **The parking orbit's plane.** *Not* equal footing with a direct launch (an earlier
+  draft of this section said it was): a direct launch picks its plane by its launch
+  time on the day, while a parked stack's plane is fixed at launch and regresses with
+  Earth's oblateness (a ~50-day cycle at 185 km, 28.5 deg). The departure asymptote
+  can need a plane change or a date a few days off the window's best, inside windows
+  6-19 days wide.
+
+So: **at the line on an idealised burn, most likely just short once the burn is
+real** - still far closer than the 8-14 % short of direct-only. At 2 or more a year
+parking does not change the count at all. Also not modelled, both in parking's
+*disfavour* or neutral: orbit decay at 185 km (a real stack would wait higher, which
+needs *less* burn) and rendezvous and docking (free - by linearity two stacks leaving
+the same day would do the same).
+
+**Only Falcon Heavy expendable parks** (`parked_delivery_for`): a parked stack needs
+a published single-payload limit *and* evidence the rocket lifts it to low orbit, and
+only that launcher has both. A first cut applied the Falcon stack to every launcher -
+an Atlas V would have been credited with 26.5 t stacks it cannot lift - and the
+checks missed it because they only ever measured Falcon Heavy expendable (caught in
+review). Vulcan, measured: no parked launch, every rate's plan identical to
+direct-only (`ASSEMBLY_VEHICLE=2 probe_orbital_assembly`).
 
 #### The frontend
 

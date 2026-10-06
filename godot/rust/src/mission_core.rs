@@ -58,7 +58,7 @@ use asteroid_core::mission::{
     cell_delivery, impact_impulse, porkchop_grid, required_impactor_mass, verify_cell,
     CellDelivery, MassSolveOutcome, Porkchop, PorkchopCell, TransferMetrics,
 };
-use asteroid_core::orbital_assembly::{ParkedDelivery, SHIPPING_PARKED_DELIVERY};
+use asteroid_core::orbital_assembly::{parked_delivery_for, ParkedDelivery};
 use asteroid_core::scenario::{
     DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError, SrpParams,
     Tier2Config, ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES, SAFE_PERIGEE_TARGET_M,
@@ -4366,18 +4366,19 @@ pub fn measure_campaign_candidates_from(
     // passed over. So rank what is left of the pool by the key at the shipping parked
     // mass, and fly each (year, direction)'s best where it beats every flown window
     // there by that same key - the way each year's best direct window was chosen.
-    let parked_ratio = |c3: f64, impact_kg: f64| {
-        if impact_kg > 0.0 {
-            SHIPPING_PARKED_DELIVERY.impact_mass_kg(c3) / impact_kg
-        } else {
-            0.0
-        }
+    //
+    // Only for a launcher with a sourced parked stack (`parked_delivery_for`) - for
+    // the rest there is nothing to rank by and nothing to park.
+    let parking = parked_delivery_for(vehicle);
+    let parked_ratio = |c3: f64, impact_kg: f64| match parking {
+        Some(p) if impact_kg > 0.0 => p.impact_mass_kg(c3) / impact_kg,
+        _ => 0.0,
     };
     let parked_key_pool =
         |w: &FoundWindow| key(w) * parked_ratio(w.metrics.c3_km2_s2, w.delivery.impact_mass_kg);
     let mut parked_best: std::collections::BTreeMap<(u32, bool), (f64, usize)> =
         std::collections::BTreeMap::new();
-    for (i, w) in pool.iter().enumerate() {
+    for (i, w) in pool.iter().enumerate().filter(|_| parking.is_some()) {
         let slot = (
             campaign_period(w.launch_tdb, period_origin_tdb),
             w.delivery.along_track_dv_ms > 0.0,
@@ -4409,13 +4410,14 @@ pub fn measure_campaign_candidates_from(
     }
 
     // Every launch can also go up to a parking orbit and leave later on a better
-    // date: the shipping parked delivery (the published single-payload limit, a
-    // storable departure engine) on the windows just flown - arithmetic, no flight.
+    // date, where the launcher has a sourced parked stack: the published
+    // single-payload limit and a storable departure engine, on the windows just
+    // flown - arithmetic, no flight.
     let span = (
         launch_axis.first().copied().unwrap_or(period_origin_tdb),
         launch_axis.last().copied().unwrap_or(period_origin_tdb),
     );
-    CampaignCandidates {
+    let direct = CampaignCandidates {
         period_origin_tdb,
         period_count,
         target_b_m: target_b,
@@ -4424,8 +4426,11 @@ pub fn measure_campaign_candidates_from(
         windows,
         launch_span_tdb: span,
         parked_delivery: None,
+    };
+    match parking {
+        Some(p) => direct.with_parking(&p),
+        None => Ok(direct),
     }
-    .with_parking(&SHIPPING_PARKED_DELIVERY)
 }
 
 /// Fly a planned campaign whole — chained through every impulse in arrival order —
@@ -5793,6 +5798,14 @@ mod tests {
         }
         use asteroid_core::launch_vehicle::FALCON_HEAVY_EXPENDABLE;
         use asteroid_core::orbital_assembly::WHAT_IF_PARKED_DELIVERIES;
+        // `ASSEMBLY_VEHICLE=<index into LAUNCH_VEHICLES>` measures another launcher -
+        // one with no sourced parked stack must come back with no parked launch.
+        let vehicle = std::env::var("ASSEMBLY_VEHICLE")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .and_then(|i| LAUNCH_VEHICLES.get(i))
+            .unwrap_or(&FALCON_HEAVY_EXPENDABLE);
+        println!("launcher {}", vehicle.name);
         let mut mc = MissionCore::load().expect("kernels load");
         mc.build_scenario(&ImpactorConfig::default())
             .expect("scenario builds");
@@ -5817,12 +5830,23 @@ mod tests {
         let c = measure_campaign_candidates_from(
             &scenario,
             &view,
-            &FALCON_HEAVY_EXPENDABLE,
+            vehicle,
             view.launch_tdb()[0],
             WindowSource::Continuous(search),
         )
         .expect("candidates");
         let parked = c.candidates.iter().filter(|k| k.parked).count();
+        if parked_delivery_for(vehicle).is_none() {
+            assert_eq!(parked, 0, "{} has no sourced parked stack", vehicle.name);
+            assert!(c.parked_delivery.is_none());
+            for rate in 1..=CAMPAIGN_MAX_RATE {
+                assert_eq!(c.plan(rate).unwrap(), c.direct_only().plan(rate).unwrap());
+            }
+            println!(
+                "{}: no parking offered, plans identical to direct-only",
+                vehicle.name
+            );
+        }
         println!(
             "measured in {:.0} s: {} windows flown, {} parked launches offered ({}), launches {:.3}..{:.3} yr before impact",
             t0.elapsed().as_secs_f64(),
@@ -5835,14 +5859,21 @@ mod tests {
         let mut variants: Vec<(String, CampaignCandidates)> = vec![
             ("direct only".into(), c.direct_only()),
             (
-                format!("SHIPPING {}", SHIPPING_PARKED_DELIVERY.name),
+                format!(
+                    "SHIPPING {}",
+                    c.parked_delivery.map_or("(no parking)", |d| d.name)
+                ),
                 c.clone(),
             ),
         ];
-        for d in WHAT_IF_PARKED_DELIVERIES {
+        // A launcher with no sourced parked stack gets no parked column at all.
+        for d in WHAT_IF_PARKED_DELIVERIES
+            .iter()
+            .filter(|_| c.parked_delivery.is_some())
+        {
             variants.push((
                 format!("what if {}", d.name),
-                c.with_parking(&d).expect("parking"),
+                c.with_parking(d).expect("parking"),
             ));
         }
         let describe = |o: CampaignOutcome, target: f64| -> String {
@@ -5880,6 +5911,7 @@ mod tests {
             .unwrap_or_else(|_| "1,2".into())
             .split(',')
             .filter_map(|s| s.trim().parse::<u32>().ok())
+            .filter(|&r| r > 0)
         {
             let (CampaignOutcome::Planned(p) | CampaignOutcome::Unreachable(p)) =
                 c.plan(rate).expect("plan")

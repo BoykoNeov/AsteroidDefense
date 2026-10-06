@@ -22,4 +22,8 @@ Follows [[campaign-rolling-cap]], [[launch-campaign]], [[impactor-mass-budget]].
 
 **Result (FH exp):** 1/yr AT THE LINE, 9 launches (7 parked), |B| 25 739/25 955, flown perigee 19 790 km (fine seed 19 808 - retrograde, converged); 2..12 = 6. What-ifs: hydrogen 5 / 4, 63.8 t storable 3, both 2.
 
-**How to apply:** quote "with parking, 1 in any 12 months is at the line (9 launches); 2+ stays 6". Open: second-best date of a year not offered to parked launches; what-ifs reuse shipping-chosen windows. Phase 3 remaining: standing defence systems.
+**Bias of known sign (review catch):** the 1/yr "at the line" is 44 km inside the 1 % band = ~7.5 m/s of extra escape burn per parked launch. Unmodelled and plausibly bigger: gravity losses (~40 min burn at 0.1 g; OMS-E max burn 1 030 s -> >= 3 burns) and the parking-orbit plane (fixed at launch, J2-regressing ~50 d cycle - NOT equal footing with direct). So: at the line on an idealised burn, likely just short in reality.
+
+**Launcher gate (review catch):** `parked_delivery_for` - only FH expendable parks (needs a published single-payload limit AND evidence it lifts it to LEO). First cut parked every launcher; checks only ever measured FH exp. Vulcan verified: no parking, plans == direct-only.
+
+**How to apply:** quote "with parking, 1 in any 12 months is at the line on an idealised burn (9 launches), likely just short with real burn losses; 2+ stays 6; FH expendable only". Open: second-best date of a year not offered to parked launches; what-ifs reuse shipping-chosen windows. Phase 3 remaining: standing defence systems.

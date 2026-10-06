@@ -1867,12 +1867,16 @@ impl Mission {
         // The labelled alternatives, at this rate: arithmetic on the same flown
         // windows, so they cost a replan each and nothing more.
         let mut what_if = VarArray::new();
+        // Only for a measurement that offers parking: a launcher with no sourced
+        // parked stack has no parked alternative to price.
+        let parks = c.parked_delivery.is_some();
         let alternatives = std::iter::once(("straight to the rock only", Ok(c.direct_only())))
             .chain(
                 asteroid_core::orbital_assembly::WHAT_IF_PARKED_DELIVERIES
                     .iter()
                     .map(|p| (p.name, c.with_parking(p))),
-            );
+            )
+            .filter(|_| parks);
         for (name, alt) in alternatives {
             let Ok(Ok(o)) = alt.map(|a| a.plan(cap)) else {
                 continue;

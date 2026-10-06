@@ -522,10 +522,12 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 	_t(Vector2(x, y), "MASS AT IMPACT, NO DESIGN MARGIN - EACH YEAR'S BEST WINDOWS + ANY THE CAP NEEDS, ONE FULL-FIELD FLIGHT EACH; THE FLIGHT LINE CHECKS THE SUM",
 		faint, _fs - 3)
 	y += lh - 3.0
+	# The what-if row; or, measured for a launcher with no sourced parked stack, why
+	# it has none; or, before a measurement, which launcher parks at all.
 	var wi := Sim.campaign_what_if_label() if current else ""
-	_t(Vector2(x, y), wi if not wi.is_empty() else
-		"PARKED STACKS: FALCON'S PUBLISHED 26.5 T PAYLOAD LIMIT, A STORABLE DEPARTURE ENGINE",
-		faint, _fs - 3)
+	if wi.is_empty():
+		wi = "NO PARKED LAUNCHES FOR THIS ROCKET - NOTHING PUBLISHED SAYS WHAT ONE PAYLOAD MAY WEIGH" 			if current else 			"PARKING: FALCON HEAVY (EXPENDABLE) ONLY - ITS PUBLISHED 26.5 T PAYLOAD LIMIT, A STORABLE ENGINE"
+	_t(Vector2(x, y), wi, faint, _fs - 3)
 	y += lh
 	_t(Vector2(x, y), "[Z]/[X] LAUNCHES PER 12 MO  [E] MEASURE / FLY  [L] LAUNCHER  [C] WINDOW READOUT  [1] BACK",
 		dim, _fs - 2)

@@ -11,9 +11,10 @@ extends Node
 ## - the cap is per ANY 12 MONTHS: no 365.25 days of the plan carry more launches
 ##   than the rate (the core's own count, `busiest_rolling_year`);
 ## - the rate knob is free (no solve fires on [Z]/[X]) and greys the flight line;
-## - 1/yr is an answer, not a failure: under "1 in any 12 months" it FALLS SHORT
-##   (by 8-14 % of the target |B|, depending on how finely the search is seeded -
-##   the plan is prograde, the direction the search has not converged);
+## - 1/yr is an answer, not a failure: under "1 in any 12 months" it is AT THE LINE
+##   (within 1 % of the target |B|) once launches may park in orbit and leave on a
+##   later date - and the what-if row says it FALLS SHORT with no parking;
+## - the parking line names the stack and the engine, and the plan really parks;
 ## - the window boxes sit at their own dates, between the map's cells (look at the
 ##   shot: the continuous search finds dates no cell has);
 ## - [L] makes the held campaign stale instead of showing it as this rocket's;
@@ -100,7 +101,14 @@ func _run() -> void:
 	assert(not Sim.pork_campaign_solving and not Sim.pork_campaign_flying, "[Z] fired a solve")
 	assert(not Sim.pork_campaign_flight_is_current(), "a flight at 2/yr shown as current at 1/yr")
 	print("CAMPSHOT  1/yr: %s" % Sim.campaign_count_label())
-	assert(Sim.campaign_count_label().begins_with("FALLS SHORT"), "1 in any 12 months falls short")
+	print("CAMPSHOT  %s" % Sim.campaign_windows_label())
+	print("CAMPSHOT  %s" % Sim.campaign_parking_label())
+	print("CAMPSHOT  %s" % Sim.campaign_what_if_label())
+	assert(Sim.campaign_count_label().begins_with("AT THE LINE"),
+		"1 in any 12 months is at the line with parking")
+	assert(Sim.campaign_what_if_label().contains("NO PARKING SHORT"),
+		"with no parking, 1 in any 12 months falls short")
+	assert(Sim.campaign_parking_label().contains("LONGEST WAIT"), "the 1/yr plan parks")
 	_assert_per_year_cap()
 	await _settle(3)
 	await _shot("campaign_rate_1")
@@ -132,6 +140,9 @@ func _run() -> void:
 ## No 365.25 days carry more launches than the dialled rate — the whole rule.
 ## Counted here from the windows' own launch dates, not read off the core's tally,
 ## so a planner that broke the cap and a tally that hid it cannot agree by accident.
+## Parked launches go up whole periods apart, which floating point only rounds to,
+## so a launch within 1 ms of a window's far end counts as outside it - the core's
+## own `ROLLING_SLACK_S`, restated.
 func _assert_per_year_cap() -> void:
 	var dated: Array = []
 	for w: Dictionary in Sim.pork_campaign.windows:
@@ -141,7 +152,7 @@ func _assert_per_year_cap() -> void:
 	for a in dated:
 		var n := 0
 		for b in dated:
-			if float(b[0]) >= float(a[0]) and float(b[0]) < float(a[0]) + year_s:
+			if float(b[0]) >= float(a[0]) and float(b[0]) < float(a[0]) + year_s - 1.0e-3:
 				n += int(b[1])
 		assert(n <= Sim.pork_campaign_rate,
 			"%d launches inside 12 months at a cap of %d" % [n, Sim.pork_campaign_rate])

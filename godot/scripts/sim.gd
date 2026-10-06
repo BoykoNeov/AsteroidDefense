@@ -2228,7 +2228,9 @@ func campaign_count_label() -> String:
 	return "UNKNOWN"
 
 
-## Which windows the plan uses, as "2031-04 2X RETRO" items, in launch order.
+## Which windows the plan uses, as "2031-04 2X" items in launch order - "1P" for a
+## launch that goes up to a parking orbit that month and leaves on a later date
+## (the map marks it on the date it leaves).
 func campaign_windows_label() -> String:
 	var c := pork_campaign
 	if c.is_empty():
@@ -2241,9 +2243,9 @@ func campaign_windows_label() -> String:
 		return float(a.launch_tdb) < float(b.launch_tdb))
 	var parts: PackedStringArray = []
 	for w: Dictionary in used:
-		parts.append("%s %dX" % [
+		parts.append("%s %d%s" % [
 			date_string((float(w.launch_tdb) - EPOCH0_TDB) / DAY_S).substr(0, 7),
-			int(w.launches)])
+			int(w.launches), "P" if bool(w.get("parked", false)) else "X"])
 	if parts.is_empty():
 		return ""
 	# Direction first and one space between items: at 1/yr the plan uses every
@@ -2253,6 +2255,44 @@ func campaign_windows_label() -> String:
 	# because a rate the plan does not fill (6 launches at "up to 12") is worth seeing.
 	return dir + " " + " ".join(parts) + "  BUSIEST 12 MO: %d" % int(
 		c.get("busiest_rolling_year", 0))
+
+
+## How parked launches fly, and the longest any of this plan's waits in orbit - or
+## "" when the measurement offers no parking.
+func campaign_parking_label() -> String:
+	var c := pork_campaign
+	var p: Dictionary = c.get("parking", {})
+	if c.is_empty() or p.is_empty():
+		return ""
+	var wait_d := 0.0
+	for w: Dictionary in c.windows:
+		if int(w.launches) > 0 and bool(w.get("parked", false)):
+			wait_d = maxf(wait_d, (float(w.departure_tdb) - float(w.launch_tdb)) / DAY_S)
+	var s := "nP = PARKED IN ORBIT: %.1f T STACK, %s %d S" % [
+		float(p.stack_kg) / 1000.0, str(p.engine).to_upper(), int(round(float(p.isp_s)))]
+	if wait_d > 0.0:
+		s += "  LONGEST WAIT %d D" % int(round(wait_d))
+	return s
+
+
+## The labelled alternatives at this rate in one line - what the count would be
+## with no parking, and under each parked "what if" the core carries.
+func campaign_what_if_label() -> String:
+	var c := pork_campaign
+	var rows: Array = c.get("what_if", [])
+	if c.is_empty() or rows.is_empty():
+		return ""
+	var parts: PackedStringArray = []
+	for r: Dictionary in rows:
+		var n := str(r.name).to_upper().replace("STRAIGHT TO THE ROCK ONLY", "NO PARKING")
+		match str(r.outcome):
+			"planned":
+				parts.append("%s %d" % [n, int(r.total_launches)])
+			"unreachable":
+				parts.append("%s SHORT" % n)
+			_:
+				parts.append("%s CLEAR" % n)
+	return "WHAT IF  " + "  ".join(parts)
 
 
 ## The full-field flight in one line: the verdict, then how far the flight sits

@@ -25,4 +25,4 @@ both seeds (flown perigee retro 15 862 / 16 197, PRO 16 542 / 18 065 km at 2x120
 best = prograde. Counts are flown counts for windows chosen BY KEY - another date could push harder. The "prograde is a lower bound no plan uses" claim is retired - 1/yr uses it.
 
 **How to apply:** quote "6 at 2..12 in any 12 months; 1 in any 12 months falls short
-(by a seed-dependent 8-14 %)". Converging prograde would firm up the 1/yr gap. Next: orbital assembly.
+(by a seed-dependent 8-14 %)". Converging prograde would firm up the 1/yr gap. **Superseded for the shipping count by [[orbital-assembly]] (2026-10-07): with parking, 1/yr is AT THE LINE (retrograde, seed-independent); these are now the direct-only numbers.**

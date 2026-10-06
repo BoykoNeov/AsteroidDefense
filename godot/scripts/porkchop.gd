@@ -410,6 +410,11 @@ func _draw_keys(pos: Vector2, dim: Color) -> void:
 ## for a campaign measured for the selected launcher: another rocket's windows on
 ## this rocket's map would be a picture of a different plan. No year lines: under a
 ## rolling cap there are no slots to draw.
+##
+## A parked launch is drawn on the transfer it leaves on - the map is a map of
+## transfers, and the day it went up to orbit has none - as "1P" beside any direct
+## launches through the same window ("2X+1P"). Parked launches the plan does not use
+## are not drawn: they are copies of flown windows, hundreds of them.
 func _draw_campaign_overlay(plot: Rect2, bright: Color, dim: Color, faint: Color) -> void:
 	var c: Dictionary = Sim.pork_campaign
 	if not Sim.pork_campaign_is_current_vehicle() or Sim.pork_rows < 2 or Sim.pork_cols < 2:
@@ -423,16 +428,36 @@ func _draw_campaign_overlay(plot: Rect2, bright: Color, dim: Color, faint: Color
 	# nearest cell's index, which would put it up to half a cell off.
 	var a0: float = Sim.pork_arrival_tdb[0]
 	var da: float = Sim.pork_arrival_tdb[1] - a0
+	# Launches per map cell of the transfer, [departure, arrival, direct, parked] -
+	# by cell, not by exact dates: two transfers days apart (a parked pair leaving
+	# ten days before a direct pair, at 2/yr) drew two labels on top of each other.
+	# A parked launch carries its departure window's cell indices.
+	var on: Dictionary = {}
 	for w: Dictionary in c.windows:
-		var p := plot.position + Vector2(
-			(float(w.arrival_tdb) - a0) / da * cw, (float(w.launch_tdb) - t0) / dt * ch)
-		var r := Rect2(p - Vector2(2, 2), Vector2(cw + 4.0, ch + 4.0))
+		var parked := bool(w.get("parked", false))
 		var n := int(w.launches)
-		if n <= 0:
+		if parked and n <= 0:
+			continue
+		var dep := float(w.get("departure_tdb", w.launch_tdb))
+		var key := "%d|%d" % [int(w.launch_index), int(w.arrival_index)]
+		var tally: Array = on.get(key, [dep, float(w.arrival_tdb), 0, 0])
+		tally[3 if parked else 2] += n
+		on[key] = tally
+	for key: String in on:
+		var tally: Array = on[key]
+		var p := plot.position + Vector2(
+			(float(tally[1]) - a0) / da * cw, (float(tally[0]) - t0) / dt * ch)
+		var r := Rect2(p - Vector2(2, 2), Vector2(cw + 4.0, ch + 4.0))
+		if int(tally[2]) + int(tally[3]) <= 0:
 			draw_rect(r, dim, false, 1.0)
 			continue
+		var label: PackedStringArray = []
+		if int(tally[2]) > 0:
+			label.append("%dX" % int(tally[2]))
+		if int(tally[3]) > 0:
+			label.append("%dP" % int(tally[3]))
 		draw_rect(r.grow(1.0), bright, false, 2.0)
-		_t(Vector2(r.end.x + 4.0, r.position.y + ch + 2.0), "%dX" % n, bright, _fs - 2)
+		_t(Vector2(r.end.x + 4.0, r.position.y + ch + 2.0), "+".join(label), bright, _fs - 2)
 
 
 func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color, faint: Color) -> void:
@@ -463,6 +488,10 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 		y += lh
 		_t(Vector2(x, y), Sim.campaign_windows_label(), mid, _fs - 1)
 		y += lh
+		var pk := Sim.campaign_parking_label()
+		if not pk.is_empty():
+			_t(Vector2(x, y), pk, dim, _fs - 2)
+			y += lh - 2.0
 		# The flight line. The count above is arithmetic on one flight per window;
 		# this is the plan flown whole, and it is greyed the moment the rate or the
 		# launcher moves off the plan it flew.
@@ -488,17 +517,18 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 			y += lh
 
 	y += lh * 0.3
-	_t(Vector2(x, y), "PUSHES USE MASS AT IMPACT (DART'S 3.6% PROPELLANT OFF) - NO DESIGN MARGIN HELD", faint,
-		_fs - 3)
+	# One fine-print line for what the count rests on (it was two, and the parking
+	# line above pushed the panel into the key bar - measured on the 2/yr shot).
+	_t(Vector2(x, y), "MASS AT IMPACT, NO DESIGN MARGIN - EACH YEAR'S BEST WINDOWS + ANY THE CAP NEEDS, ONE FULL-FIELD FLIGHT EACH; THE FLIGHT LINE CHECKS THE SUM",
+		faint, _fs - 3)
 	y += lh - 3.0
-	_t(Vector2(x, y), "WINDOWS: EACH YEAR'S BEST, PLUS ANY DATE THE 12-MONTH CAP NEEDS - ALL FLOWN",
+	var wi := Sim.campaign_what_if_label() if current else ""
+	_t(Vector2(x, y), wi if not wi.is_empty() else
+		"PARKED STACKS: FALCON'S PUBLISHED 26.5 T PAYLOAD LIMIT, A STORABLE DEPARTURE ENGINE",
 		faint, _fs - 3)
 	y += lh
 	_t(Vector2(x, y), "[Z]/[X] LAUNCHES PER 12 MO  [E] MEASURE / FLY  [L] LAUNCHER  [C] WINDOW READOUT  [1] BACK",
 		dim, _fs - 2)
-	_t(Vector2(x, y + _fs + 4.0),
-		"THE COUNT IS ARITHMETIC ON ONE FULL-FIELD FLIGHT PER WINDOW - THE FLIGHT LINE CHECKS IT",
-		Color(0.30, 0.30, 0.30), _fs - 3)
 
 
 func _date_of(axis: PackedFloat64Array, idx: int) -> String:

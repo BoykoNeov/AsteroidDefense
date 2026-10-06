@@ -1778,9 +1778,16 @@ impl Mission {
     /// `windows` (an array, one dictionary per window flown: `launch_index`,
     /// `arrival_index`, `period`, `launch_tdb`, `arrival_tdb`, `payload_kg`,
     /// `impact_mass_kg` (what of it hits the rock — the mass the flight used),
-    /// `prograde`, `shift_km` — `|shift|` of one launch — and `launches`, how many
-    /// the plan sends through it), `busiest_rolling_year` (the most launches inside
-    /// any 365.25 days - at most the cap, by construction), and
+    /// `prograde`, `shift_km` — `|shift|` of one launch — `launches`, how many
+    /// the plan sends through it, `parked` (the launch goes up to a parking orbit
+    /// on `launch_tdb` and leaves on `departure_tdb`; for a direct launch the two
+    /// are the same date), and `departure_tdb`), `busiest_rolling_year` (the most
+    /// launches inside any 365.25 days - at most the cap, by construction),
+    /// `parking` (how parked launches fly: `name`, `stack_kg`, `engine`, `isp_s`,
+    /// `storable` - empty when the measurement offers none), `what_if` (an array,
+    /// one dictionary per labelled alternative at this rate: `name`, `outcome`,
+    /// `total_launches`, `predicted_b_km` - straight to the rock only, then each of
+    /// the core's parked *what ifs*; arithmetic on the same flown windows), and
     /// `outcome`, one of:
     ///
     /// - `"planned"` — plus `total_launches` and `predicted_b_km`.
@@ -1836,6 +1843,8 @@ impl Mission {
                 k.shift_per_launch_m.0.hypot(k.shift_per_launch_m.1) / 1e3,
             );
             w.set("launches", n as i64);
+            w.set("parked", k.parked);
+            w.set("departure_tdb", k.departure_tdb);
             arr.push(&w.to_variant());
         }
         d.set("windows", &arr);
@@ -1846,6 +1855,42 @@ impl Mission {
             .map(|(k, &n)| (k.launch_tdb, n))
             .collect();
         d.set("busiest_rolling_year", busiest_rolling_year(&dated) as i64);
+        let mut parking = VarDictionary::new();
+        if let Some(p) = c.parked_delivery {
+            parking.set("name", p.name);
+            parking.set("stack_kg", p.stack_kg);
+            parking.set("engine", p.engine.name);
+            parking.set("isp_s", p.engine.isp_s);
+            parking.set("storable", p.engine.storable);
+        }
+        d.set("parking", &parking);
+        // The labelled alternatives, at this rate: arithmetic on the same flown
+        // windows, so they cost a replan each and nothing more.
+        let mut what_if = VarArray::new();
+        let alternatives = std::iter::once(("straight to the rock only", Ok(c.direct_only())))
+            .chain(
+                asteroid_core::orbital_assembly::WHAT_IF_PARKED_DELIVERIES
+                    .iter()
+                    .map(|p| (p.name, c.with_parking(p))),
+            );
+        for (name, alt) in alternatives {
+            let Ok(Ok(o)) = alt.map(|a| a.plan(cap)) else {
+                continue;
+            };
+            let mut row = VarDictionary::new();
+            row.set("name", name);
+            match &o {
+                CampaignOutcome::AlreadyClear => row.set("outcome", "already_clear"),
+                CampaignOutcome::Planned(p) | CampaignOutcome::Unreachable(p) => {
+                    let planned = matches!(o, CampaignOutcome::Planned(_));
+                    row.set("outcome", if planned { "planned" } else { "unreachable" });
+                    row.set("total_launches", p.total_launches as i64);
+                    row.set("predicted_b_km", p.predicted_impact_parameter() / 1e3);
+                }
+            }
+            what_if.push(&row.to_variant());
+        }
+        d.set("what_if", &what_if);
         d
     }
 

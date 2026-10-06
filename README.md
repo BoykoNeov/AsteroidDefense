@@ -204,9 +204,9 @@ workspace/
   gravity-tractor methods; Lambert/porkchop mission design; Tier-3 uncertainty,
   keyholes, keyhole targeting, and real JPL orbit covariances. Remaining inside
   Phase 2: the Tier-3 ellipse on screen.
-- **Phase 3** — launch vehicles & payload budgets (the vehicles and mass solves
-  exist; the budgets and orbital assembly do not), standing defense systems,
-  multi-mission campaigns.
+- **Phase 3** — ✅ launch vehicles & payload budgets, multi-mission campaigns
+  under a launch-rate cap, and orbital assembly (launches parked in orbit that
+  leave on a better date). Remaining: standing defense systems.
 
 See [`HANDOFF.md`](HANDOFF.md) for the complete spec, the locked decisions, the
 known hard problems, and the dated record of every batch; [`DEVELOPING.md`](DEVELOPING.md)

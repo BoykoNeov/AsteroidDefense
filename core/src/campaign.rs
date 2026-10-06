@@ -73,6 +73,14 @@
 //! (Those windows were the map's cells; the continuous search since finds 6 at
 //! every rate from 2 to 10 a year with the impact mass.)
 //!
+//! # Through a parking orbit, too
+//! A launch can also go up to a parking orbit and leave later, on a better date,
+//! with a departure stage of its own ([`crate::orbital_assembly`] prices the mass
+//! that costs). [`parked_launches`] lists every such launch a plan could need and
+//! [`parked_window`] turns one into a window the rolling planner takes like any
+//! other — its launch date is what the cap counts, its departure window is where it
+//! pushes — so [`plan_campaign_rolling`] stays exact over both ways of flying.
+//!
 //! What is still optimistic: the whole separated mass is assumed to be a buildable
 //! impactor, with no design margin held back from the rocket's capability. But the
 //! count is **not** a lower bound either: the planner only sees the windows its
@@ -279,16 +287,24 @@ fn best_over_directions(
     }
 }
 
+/// How far short of a whole rolling window two launches may be and still count as
+/// a window apart, s. Dates built as `t + k·P` land a whole number of periods apart
+/// only to rounding (~1e-7 s at these epochs), so both the cap count and the
+/// planner read "a period apart" with this slack — the same slack, so the two can
+/// never disagree. A millisecond is nothing to a launch rule measured in days.
+pub const ROLLING_SLACK_S: f64 = 1.0e-3;
+
 /// The most launches inside any one rolling window of `window_s` seconds,
 /// counting each window as half-open `[t, t + window_s)` and starting one at
 /// every launch — from `(launch epoch as TDB seconds past J2000, launches)` pairs.
+/// Launches within [`ROLLING_SLACK_S`] of a window's far end count as outside it.
 pub fn busiest_rolling_count(launches: &[(f64, u32)], window_s: f64) -> u32 {
     launches
         .iter()
         .map(|&(t0, _)| {
             launches
                 .iter()
-                .filter(|&&(t, _)| t >= t0 && t < t0 + window_s)
+                .filter(|&&(t, _)| t >= t0 && t < t0 + window_s - ROLLING_SLACK_S)
                 .map(|&(_, n)| n)
                 .sum()
         })
@@ -373,9 +389,9 @@ fn chains_along(
         .map(|&i| windows[i].shift_per_launch.dot(&u))
         .collect();
     // back[k]: every window before this position launches at least `window_s`
-    // before window k, so a chain can step from it to k.
+    // before window k (to `ROLLING_SLACK_S`), so a chain can step from it to k.
     let back: Vec<usize> = (0..w)
-        .map(|k| t.partition_point(|&tj| tj <= t[k] - window_s))
+        .map(|k| t.partition_point(|&tj| tj <= t[k] - window_s + ROLLING_SLACK_S))
         .collect();
 
     // One chain. best[m-1][k]: the most value an m-launch chain ending at window k
@@ -466,6 +482,10 @@ fn chains_along(
             predicted_b,
         }
     };
+    // Short of the target, the plan that gets furthest — which need not be the one
+    // with the most launches: under the cap, one more launch can force the whole
+    // arrangement onto weaker dates (three weak dates can sum to less than two
+    // strong ones a period apart).
     let mut furthest = empty;
     for (l, &(reach, _)) in split[cap].iter().enumerate().skip(1) {
         if !reach.is_finite() {
@@ -475,7 +495,9 @@ fn chains_along(
         if p.predicted_impact_parameter() >= target_b {
             return (p, true);
         }
-        furthest = p;
+        if p.predicted_impact_parameter() > furthest.predicted_impact_parameter() {
+            furthest = p;
+        }
     }
     (furthest, false)
 }
@@ -529,6 +551,186 @@ fn fill_along(
         },
         false,
     )
+}
+
+// --- Through a parking orbit ---------------------------------------------------
+
+/// One launch flown through a parking orbit: up on `launch_epoch`, out on window
+/// `departs_with`'s launch date, through that window's transfer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParkedLaunch {
+    /// When the rocket lifts the stack to the parking orbit — the date the launch
+    /// cap counts.
+    pub launch_epoch: Epoch,
+    /// Index into the `windows` the choices were made from: the transfer the stack
+    /// leaves on, and the date it leaves.
+    pub departs_with: usize,
+}
+
+/// Every parked launch a plan under a rolling cap could need, given the windows a
+/// launch could leave through — so that [`plan_campaign_rolling`], handed the
+/// direct windows **and** these (as [`parked_window`]s), plans exactly over both
+/// ways of flying a launch.
+///
+/// `scale[i]` is what a parked launch leaving through window `i` pushes, as a
+/// fraction of what a direct launch through it pushes (the two masses' ratio — the
+/// push is linear in mass); `0` means no parked launch leaves through it. Parked
+/// launches go up no earlier than `earliest` and no later than `latest`.
+///
+/// # Why these dates are enough
+/// A parked launch's worth along any push direction can only fall as its launch
+/// date moves later — later, fewer departures are still ahead of it. So in a best
+/// arrangement every parked launch sits as early as its chain allows (see
+/// [`plan_campaign_rolling`]): either at `earliest`, or exactly one period after
+/// the launch before it in its chain. Chasing that back, every parked date is
+/// `earliest` or a direct window's date plus a whole number of periods — and those
+/// are the dates generated. Each sits a whole number of periods after its base only
+/// to rounding, which [`ROLLING_SLACK_S`] absorbs on both sides of it.
+///
+/// # Why these departures are enough
+/// At one date the planner wants, along its push direction `û`, the departure with
+/// the largest shift along `û`. Over every `û` those are exactly the vertices of the
+/// convex hull of the candidate shifts (with the origin), so only hull vertices are
+/// kept — usually a few per date, where every later window would be dozens.
+pub fn parked_launches(
+    windows: &[CampaignWindow],
+    scale: &[f64],
+    earliest: Epoch,
+    latest: Epoch,
+    period_s: f64,
+) -> Result<Vec<ParkedLaunch>, CampaignError> {
+    if scale.len() != windows.len() {
+        return Err(CampaignError::InvalidInput(format!(
+            "{} scales for {} windows",
+            scale.len(),
+            windows.len()
+        )));
+    }
+    if !(period_s.is_finite() && period_s > 0.0) {
+        return Err(CampaignError::InvalidInput(format!(
+            "the period must be finite and > 0 s (got {period_s})"
+        )));
+    }
+    if let Some(i) = scale.iter().position(|s| !(s.is_finite() && *s >= 0.0)) {
+        return Err(CampaignError::InvalidInput(format!(
+            "window {i}'s parked scale must be finite and >= 0 (got {})",
+            scale[i]
+        )));
+    }
+    let (t_lo, t_hi) = (
+        earliest.tdb_seconds_past_j2000(),
+        latest.tdb_seconds_past_j2000(),
+    );
+    let when = |i: usize| windows[i].launch_epoch.tdb_seconds_past_j2000();
+    let departures: Vec<usize> = (0..windows.len())
+        .filter(|&i| scale[i] > 0.0 && windows[i].shift_per_launch.norm() > 0.0)
+        .collect();
+    let Some(last_out) = departures.iter().map(|&i| when(i)).reduce(f64::max) else {
+        return Ok(Vec::new());
+    };
+    let stop = t_hi.min(last_out);
+
+    // Every date a parked launch can need: `earliest` and each direct window's date,
+    // plus whole periods (the window dates themselves are direct launches, so a
+    // parked launch starts one period after them).
+    let mut dates: Vec<f64> = Vec::new();
+    let mut from = |base: f64, first: u32| {
+        let mut k = first;
+        loop {
+            let t = base + f64::from(k) * period_s;
+            if t > stop {
+                break;
+            }
+            if t >= t_lo {
+                dates.push(t);
+            }
+            k += 1;
+        }
+    };
+    from(t_lo, 0);
+    for i in 0..windows.len() {
+        from(when(i), 1);
+    }
+    dates.sort_by(f64::total_cmp);
+    dates.dedup();
+
+    let mut out = Vec::new();
+    for t in dates {
+        let ahead: Vec<usize> = departures
+            .iter()
+            .copied()
+            .filter(|&i| when(i) >= t)
+            .collect();
+        let shifts: Vec<Vector2<f64>> = ahead
+            .iter()
+            .map(|&i| scale[i] * windows[i].shift_per_launch)
+            .collect();
+        for k in hull_vertices(&shifts) {
+            out.push(ParkedLaunch {
+                launch_epoch: Epoch::from_tdb_seconds_past_j2000(t),
+                departs_with: ahead[k],
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The planner's view of one parked launch: launched on its own date (which the cap
+/// counts), arriving with its departure window, pushing `scale ×` that window's
+/// per-launch push. `period` is the caller's label, as for any window.
+pub fn parked_window(
+    departure: &CampaignWindow,
+    scale: f64,
+    launch_epoch: Epoch,
+    period: u32,
+) -> CampaignWindow {
+    CampaignWindow {
+        launch_epoch,
+        period,
+        arrival_epoch: departure.arrival_epoch,
+        impulse_per_launch: scale * departure.impulse_per_launch,
+        shift_per_launch: scale * departure.shift_per_launch,
+    }
+}
+
+/// Indices of the points that are vertices of the convex hull of `points` and the
+/// origin — the points that are the furthest along *some* direction. Points on a
+/// hull edge, inside it, at the origin, or repeated are dropped (a repeat keeps its
+/// first index).
+fn hull_vertices(points: &[Vector2<f64>]) -> Vec<usize> {
+    // Origin first, then the points, sorted by (x, y) for Andrew's monotone chain.
+    let mut all: Vec<(Vector2<f64>, Option<usize>)> = vec![(Vector2::zeros(), None)];
+    all.extend(points.iter().enumerate().map(|(i, &p)| (p, Some(i))));
+    all.sort_by(|a, b| a.0.x.total_cmp(&b.0.x).then(a.0.y.total_cmp(&b.0.y)));
+    all.dedup_by(|b, a| a.0 == b.0);
+    if all.len() < 2 {
+        return Vec::new();
+    }
+    let cross = |o: Vector2<f64>, a: Vector2<f64>, b: Vector2<f64>| {
+        (a - o).x * (b - o).y - (a - o).y * (b - o).x
+    };
+    // Lower hull left to right, then upper hull back; `<= 0` drops points on an edge.
+    let mut hull: Vec<(Vector2<f64>, Option<usize>)> = Vec::with_capacity(2 * all.len());
+    for &p in &all {
+        while hull.len() >= 2 && cross(hull[hull.len() - 2].0, hull[hull.len() - 1].0, p.0) <= 0.0 {
+            hull.pop();
+        }
+        hull.push(p);
+    }
+    let lower = hull.len() + 1;
+    for &p in all.iter().rev().skip(1) {
+        while hull.len() >= lower
+            && cross(hull[hull.len() - 2].0, hull[hull.len() - 1].0, p.0) <= 0.0
+        {
+            hull.pop();
+        }
+        hull.push(p);
+    }
+    hull.pop();
+    let mut out: Vec<usize> = hull.into_iter().filter_map(|(_, i)| i).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// The impulses a plan applies, in the order
@@ -840,6 +1042,263 @@ mod tests {
                         (Some(n), CampaignOutcome::Planned(p)) => assert_eq!(
                             p.total_launches, n,
                             "cap={cap} b0={b0} target={target}: planner {} vs brute {n}",
+                            p.total_launches
+                        ),
+                        (None, CampaignOutcome::Unreachable(_)) => {}
+                        (brute, got) => {
+                            panic!("cap={cap} b0={b0} target={target}: brute {brute:?} vs {got:?}")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Through a parking orbit -----------------------------------------------
+
+    /// The direct windows plus every parked launch, as one list for the planner.
+    fn with_parked(
+        w: &[CampaignWindow],
+        scale: &[f64],
+        earliest_days: f64,
+        latest_days: f64,
+        period: f64,
+    ) -> Vec<CampaignWindow> {
+        let parked = parked_launches(
+            w,
+            scale,
+            Epoch::from_tdb_seconds_past_j2000(earliest_days * DAY),
+            Epoch::from_tdb_seconds_past_j2000(latest_days * DAY),
+            period,
+        )
+        .unwrap();
+        let mut all = w.to_vec();
+        all.extend(
+            parked.iter().map(|p| {
+                parked_window(&w[p.departs_with], scale[p.departs_with], p.launch_epoch, 0)
+            }),
+        );
+        all
+    }
+
+    /// Only the points furthest along some direction survive: an interior point, a
+    /// point on an edge, a repeat and a zero shift are all dropped.
+    #[test]
+    fn the_hull_keeps_only_points_that_win_some_direction() {
+        let p = [
+            Vector2::new(0.0, 100.0),  // 0: vertex
+            Vector2::new(0.0, 50.0),   // 1: on the edge from the origin to 0
+            Vector2::new(80.0, 40.0),  // 2: vertex
+            Vector2::new(10.0, 20.0),  // 3: inside
+            Vector2::new(0.0, 100.0),  // 4: repeat of 0
+            Vector2::new(0.0, -300.0), // 5: vertex, the other side
+            Vector2::zeros(),          // 6: no push
+        ];
+        assert_eq!(hull_vertices(&p), vec![0, 2, 5]);
+        // Along a ray from the origin only the longest survives.
+        assert_eq!(
+            hull_vertices(&[Vector2::new(0.0, 1.0), Vector2::new(0.0, 3.0)]),
+            vec![1]
+        );
+        assert!(hull_vertices(&[]).is_empty());
+        // Every direction's best is one of the kept points.
+        for k in 0..72 {
+            let a = f64::from(k) * 5.0_f64.to_radians();
+            let u = Vector2::new(a.cos(), a.sin());
+            let best = p
+                .iter()
+                .map(|q| q.dot(&u))
+                .fold(f64::NEG_INFINITY, f64::max);
+            if best > 0.0 {
+                let kept = hull_vertices(&p)
+                    .iter()
+                    .map(|&i| p[i].dot(&u))
+                    .fold(f64::NEG_INFINITY, f64::max);
+                assert!((kept - best).abs() < 1e-9, "direction {k}");
+            }
+        }
+    }
+
+    /// The dates: `earliest` plus whole periods, and each window's date plus whole
+    /// periods, up to the last departure — and only departures still ahead.
+    #[test]
+    fn parked_launches_start_on_the_right_dates() {
+        let w = [window(0.0, (0.0, 500.0)), window(250.0, (0.0, 300.0))];
+        let p = parked_launches(
+            &w,
+            &[0.5, 0.5],
+            Epoch::from_tdb_seconds_past_j2000(-40.0 * DAY),
+            Epoch::from_tdb_seconds_past_j2000(1_000.0 * DAY),
+            100.0 * DAY,
+        )
+        .unwrap();
+        let days: Vec<(i64, usize)> = p
+            .iter()
+            .map(|q| {
+                (
+                    (q.launch_epoch.tdb_seconds_past_j2000() / DAY).round() as i64,
+                    q.departs_with,
+                )
+            })
+            .collect();
+        // -40 can leave through either window (the stronger is the only hull vertex
+        // along +ζ), 60/160 from -40, 100/200 from day 0 — all only through day 250.
+        assert_eq!(days, vec![(-40, 0), (60, 1), (100, 1), (160, 1), (200, 1)]);
+        assert!(parked_launches(
+            &w,
+            &[0.5],
+            Epoch::from_tdb_seconds_past_j2000(0.0),
+            Epoch::from_tdb_seconds_past_j2000(1.0),
+            DAY
+        )
+        .is_err());
+        assert!(parked_launches(
+            &w,
+            &[0.5, -1.0],
+            Epoch::from_tdb_seconds_past_j2000(0.0),
+            Epoch::from_tdb_seconds_past_j2000(1.0),
+            DAY
+        )
+        .is_err());
+    }
+
+    /// Why parking exists: under one launch per 100 days the strong window at day
+    /// 150 takes one direct launch, and the weak ones around it are all that is
+    /// left — 1 100 at most. Parked on day 0 and leaving on day 150 at 60 % of the
+    /// push, a second launch makes it 1 600.
+    #[test]
+    fn a_parked_launch_takes_a_strong_date_the_cap_would_waste() {
+        let w = [
+            window(0.0, (0.0, 100.0)),
+            window(100.0, (0.0, 100.0)),
+            window(150.0, (0.0, 1_000.0)),
+            window(200.0, (0.0, 100.0)),
+        ];
+        let span = 100.0 * DAY;
+        match plan_campaign_rolling(Vector2::zeros(), 1_500.0, &w, 1, span).unwrap() {
+            CampaignOutcome::Unreachable(best) => {
+                assert!((best.predicted_b.y - 1_100.0).abs() < 1e-9, "{best:?}")
+            }
+            other => panic!("direct only should fall short, got {other:?}"),
+        }
+        let all = with_parked(&w, &[0.6; 4], 0.0, 300.0, span);
+        let p = planned(plan_campaign_rolling(Vector2::zeros(), 1_500.0, &all, 1, span).unwrap());
+        assert_eq!(p.total_launches, 2);
+        assert!((p.predicted_b.y - 1_600.0).abs() < 1e-9, "{p:?}");
+        assert_eq!(p.launches[2], 1, "the direct launch is the strong date");
+        assert!(busiest_rolling_count(&launch_list(&all, &p), span) <= 1);
+    }
+
+    /// The dates one period after a **direct** launch are needed, not just those
+    /// counted from `earliest`: with one launch per 100 days and launches opening on
+    /// day 20, the only way to put three launches on the two strong windows is
+    /// direct on day 50, parked on day 150 waiting for day 250, and direct on day
+    /// 250 — and day 150 is 50 + 100, not 20 + a multiple of 100. Counted from day
+    /// 20 alone, the best is 2 200 and the target is out of reach.
+    #[test]
+    fn a_parked_launch_can_follow_a_direct_one() {
+        let w = [window(50.0, (0.0, 1_000.0)), window(250.0, (0.0, 1_000.0))];
+        let span = 100.0 * DAY;
+        let all = with_parked(&w, &[0.6, 0.6], 20.0, 400.0, span);
+        let p = planned(plan_campaign_rolling(Vector2::zeros(), 2_500.0, &all, 1, span).unwrap());
+        assert_eq!(p.total_launches, 3);
+        assert!((p.predicted_b.y - 2_600.0).abs() < 1e-9, "{p:?}");
+        assert_eq!(&p.launches[..2], &[1, 1], "both direct launches fly");
+        assert!(busiest_rolling_count(&launch_list(&all, &p), span) <= 1);
+    }
+
+    /// Exact against brute force: collinear windows of both signs, a parked scale
+    /// per window, and every arrangement of up to four launches on a 10-day grid —
+    /// each launch either direct on a window's own date or parked on any grid date
+    /// and leaving through any window still ahead — that keeps every rolling
+    /// 100-day window within the cap. The grid holds every date the generator
+    /// proposes and many it does not, so a missing date would show as a brute-force
+    /// count below the planner's.
+    #[test]
+    fn the_parked_planner_matches_brute_force() {
+        let spec: [(f64, f64, f64); 6] = [
+            (0.0, 640.0, 0.6),
+            (30.0, -910.0, 0.5),
+            (70.0, 370.0, 0.7),
+            (90.0, 820.0, 0.55),
+            (160.0, -150.0, 0.9),
+            (240.0, 450.0, 0.6),
+        ];
+        let w: Vec<CampaignWindow> = spec.iter().map(|&(t, s, _)| window(t, (0.0, s))).collect();
+        let scale: Vec<f64> = spec.iter().map(|s| s.2).collect();
+        let span = 100.0 * DAY;
+        let all = with_parked(&w, &scale, 0.0, 300.0, span);
+        // Per grid date, the most positive and most negative push one launch can make.
+        let grid: Vec<f64> = (0..=30).map(|k| f64::from(k) * 10.0).collect();
+        let options = |d: f64| -> (f64, f64) {
+            let mut v: Vec<f64> = spec
+                .iter()
+                .filter(|s| s.0 >= d)
+                .map(|s| s.1 * s.2)
+                .collect();
+            v.extend(spec.iter().filter(|s| s.0 == d).map(|s| s.1));
+            (
+                v.iter().copied().fold(0.0, f64::max),
+                v.iter().copied().fold(0.0, f64::min),
+            )
+        };
+        let best: Vec<(f64, f64)> = grid.iter().map(|&d| options(d)).collect();
+        for cap in [1u32, 2] {
+            for b0 in [0.0_f64, 400.0, -700.0] {
+                for target in [500.0, 1_300.0, 2_200.0, 2_900.0, 3_600.0] {
+                    // Collinear: |b0 + Σ| clears the target iff the all-positive or the
+                    // all-negative choice does, so two sums per arrangement suffice.
+                    let mut brute: Option<u32> = if b0.abs() >= target { Some(0) } else { None };
+                    'k: for k in 1..=4usize {
+                        if brute.is_some() {
+                            break;
+                        }
+                        let mut idx = vec![0usize; k];
+                        loop {
+                            let list: Vec<(f64, u32)> =
+                                idx.iter().map(|&i| (grid[i] * DAY, 1)).collect();
+                            if busiest_rolling_count(&list, span) <= cap {
+                                let up: f64 = idx.iter().map(|&i| best[i].0).sum();
+                                let down: f64 = idx.iter().map(|&i| best[i].1).sum();
+                                if b0 + up >= target || b0 + down <= -target {
+                                    brute = Some(k as u32);
+                                    break 'k;
+                                }
+                            }
+                            // Next non-decreasing index tuple (a multiset of dates).
+                            let mut j = k;
+                            while j > 0 && idx[j - 1] == grid.len() - 1 {
+                                j -= 1;
+                            }
+                            if j == 0 {
+                                break;
+                            }
+                            idx[j - 1] += 1;
+                            for m in j..k {
+                                idx[m] = idx[j - 1];
+                            }
+                        }
+                    }
+                    let got = plan_campaign_rolling(Vector2::new(0.0, b0), target, &all, cap, span)
+                        .unwrap();
+                    if let CampaignOutcome::Planned(p) | CampaignOutcome::Unreachable(p) = &got {
+                        assert!(
+                            busiest_rolling_count(&launch_list(&all, p), span) <= cap,
+                            "cap={cap} b0={b0} target={target}: plan breaks the cap"
+                        );
+                    }
+                    match (brute, got) {
+                        (Some(0), CampaignOutcome::AlreadyClear) => {}
+                        (Some(n), CampaignOutcome::Planned(p)) => assert_eq!(
+                            p.total_launches, n,
+                            "cap={cap} b0={b0} target={target}: planner {} vs brute {n}",
+                            p.total_launches
+                        ),
+                        // Brute force stops at four launches; past that only a planner
+                        // count above four is consistent.
+                        (None, CampaignOutcome::Planned(p)) => assert!(
+                            p.total_launches > 4,
+                            "cap={cap} b0={b0} target={target}: planner {} unseen by brute",
                             p.total_launches
                         ),
                         (None, CampaignOutcome::Unreachable(_)) => {}

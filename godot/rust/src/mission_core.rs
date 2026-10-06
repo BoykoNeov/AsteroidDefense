@@ -45,8 +45,8 @@ use godot::global::godot_warn;
 use nalgebra::{Matrix2, Vector2, Vector3};
 
 use asteroid_core::campaign::{
-    campaign_impulses, plan_campaign, plan_campaign_rolling, CampaignOutcome, CampaignPlan,
-    CampaignWindow,
+    campaign_impulses, parked_launches, parked_window, plan_campaign, plan_campaign_rolling,
+    CampaignOutcome, CampaignPlan, CampaignWindow,
 };
 use asteroid_core::deflection::DeflectionError;
 use asteroid_core::ephemeris::Ephemeris;
@@ -58,6 +58,7 @@ use asteroid_core::mission::{
     cell_delivery, impact_impulse, porkchop_grid, required_impactor_mass, verify_cell,
     CellDelivery, MassSolveOutcome, Porkchop, PorkchopCell, TransferMetrics,
 };
+use asteroid_core::orbital_assembly::{ParkedDelivery, SHIPPING_PARKED_DELIVERY};
 use asteroid_core::scenario::{
     DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError, SrpParams,
     Tier2Config, ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES, SAFE_PERIGEE_TARGET_M,
@@ -3454,6 +3455,16 @@ pub struct CampaignCandidate {
     pub proxy_along_track_dv_ms: f64,
     /// The measured b-plane shift of **one** launch, `(ξ, ζ)` metres.
     pub shift_per_launch_m: (f64, f64),
+    /// Whether this launch goes up to a parking orbit and leaves later
+    /// ([`asteroid_core::orbital_assembly`]) instead of straight to the rock. For a
+    /// parked launch, `launch_tdb` and `period` are the rocket's launch (the date
+    /// the cap counts); the transfer - `departure_tdb`, `arrival_tdb`, `c3_km2_s2`,
+    /// `revolutions`, `v_rel_vec` and the map indices - is its departure window's;
+    /// the masses are the parked stack's; and the shift is the departure window's
+    /// **flown** shift scaled by the two masses' ratio, not a flight of its own.
+    pub parked: bool,
+    /// When the transfer leaves Earth, TDB s - `launch_tdb` for a direct launch.
+    pub departure_tdb: f64,
 }
 
 /// The expensive, **cap-independent** half of a campaign: every period's best
@@ -3480,6 +3491,12 @@ pub struct CampaignCandidates {
     pub candidates: Vec<CampaignCandidate>,
     /// The planner's view of `candidates`, parallel to it.
     pub windows: Vec<CampaignWindow>,
+    /// The first and last date a rocket can launch, TDB s - the map's launch axis.
+    /// A parked launch goes up inside it.
+    pub launch_span_tdb: (f64, f64),
+    /// How parked launches are flown, or `None` for straight-to-the-rock only. The
+    /// parked entries come after every direct one in `candidates`.
+    pub parked_delivery: Option<ParkedDelivery>,
 }
 
 impl CampaignCandidates {
@@ -3513,6 +3530,87 @@ impl CampaignCandidates {
             launches_per_period,
         )
         .map_err(|e| ScenarioError::Integration(format!("launch campaign: planner: {e}")))
+    }
+
+    /// The direct launches only - every candidate that was flown, none parked.
+    pub fn direct_only(&self) -> CampaignCandidates {
+        let keep: Vec<bool> = self.candidates.iter().map(|k| !k.parked).collect();
+        CampaignCandidates {
+            candidates: self
+                .candidates
+                .iter()
+                .zip(&keep)
+                .filter(|(_, &y)| y)
+                .map(|(k, _)| *k)
+                .collect(),
+            windows: self
+                .windows
+                .iter()
+                .zip(&keep)
+                .filter(|(_, &y)| y)
+                .map(|(w, _)| *w)
+                .collect(),
+            parked_delivery: None,
+            ..self.clone()
+        }
+    }
+
+    /// The same flown windows, plus every parked launch `delivery` could fly
+    /// through them (replacing any parked launches held). Arithmetic, no flight:
+    /// a parked launch leaving through a window pushes that window's flown shift
+    /// times the ratio of the two impact masses - the push is linear in mass, the
+    /// claim every campaign count already rests on and [`fly_campaign_plan`]
+    /// measures.
+    ///
+    /// Parked launches leave only through **flown** windows. A date the direct
+    /// ranking never chose - a higher-`C3` window, where parking loses less mass
+    /// than going direct - is not offered, so a parked count is for the windows
+    /// flown, like every other count here.
+    pub fn with_parking(
+        &self,
+        delivery: &ParkedDelivery,
+    ) -> Result<CampaignCandidates, ScenarioError> {
+        let mut out = self.direct_only();
+        let scale: Vec<f64> = out
+            .candidates
+            .iter()
+            .map(|k| {
+                if k.impact_mass_kg > 0.0 {
+                    delivery.impact_mass_kg(k.c3_km2_s2) / k.impact_mass_kg
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let choices = parked_launches(
+            &out.windows,
+            &scale,
+            Epoch::from_tdb_seconds_past_j2000(self.launch_span_tdb.0),
+            Epoch::from_tdb_seconds_past_j2000(self.launch_span_tdb.1),
+            CAMPAIGN_PERIOD_S,
+        )
+        .map_err(|e| ScenarioError::Integration(format!("launch campaign: parking: {e}")))?;
+        for ch in choices {
+            let i = ch.departs_with;
+            let (k, w, s) = (out.candidates[i], out.windows[i], scale[i]);
+            let t = ch.launch_epoch.tdb_seconds_past_j2000();
+            let period = campaign_period(t, self.period_origin_tdb);
+            out.candidates.push(CampaignCandidate {
+                period,
+                launch_tdb: t,
+                payload_kg: delivery.separated_mass_kg(k.c3_km2_s2),
+                impact_mass_kg: delivery.impact_mass_kg(k.c3_km2_s2),
+                proxy_along_track_dv_ms: s * k.proxy_along_track_dv_ms,
+                shift_per_launch_m: (s * k.shift_per_launch_m.0, s * k.shift_per_launch_m.1),
+                parked: true,
+                departure_tdb: k.launch_tdb,
+                ..k
+            });
+            out.windows
+                .push(parked_window(&w, s, ch.launch_epoch, period));
+        }
+        out.parked_delivery = Some(*delivery);
+        Ok(out)
     }
 }
 
@@ -4126,6 +4224,8 @@ pub fn measure_campaign_candidates_from(
                 impact_mass_kg: d.impact_mass_kg,
                 proxy_along_track_dv_ms: d.along_track_dv_ms,
                 shift_per_launch_m: (shift.x, shift.y),
+                parked: false,
+                departure_tdb: w.launch_tdb,
             },
             CampaignWindow {
                 launch_epoch: Epoch::from_tdb_seconds_past_j2000(w.launch_tdb),
@@ -4259,14 +4359,73 @@ pub fn measure_campaign_candidates_from(
         }
     }
 
-    Ok(CampaignCandidates {
+    // A parked launch leaves only through a flown window, and the windows above were
+    // chosen for *direct* launches. Parking loses less mass than a direct launch at
+    // high C3 (the direct curve falls steeply toward the rocket's energy limit), so a
+    // year's best departure for a parked launch can be a window the direct ranking
+    // passed over. So rank what is left of the pool by the key at the shipping parked
+    // mass, and fly each (year, direction)'s best where it beats every flown window
+    // there by that same key - the way each year's best direct window was chosen.
+    let parked_ratio = |c3: f64, impact_kg: f64| {
+        if impact_kg > 0.0 {
+            SHIPPING_PARKED_DELIVERY.impact_mass_kg(c3) / impact_kg
+        } else {
+            0.0
+        }
+    };
+    let parked_key_pool =
+        |w: &FoundWindow| key(w) * parked_ratio(w.metrics.c3_km2_s2, w.delivery.impact_mass_kg);
+    let mut parked_best: std::collections::BTreeMap<(u32, bool), (f64, usize)> =
+        std::collections::BTreeMap::new();
+    for (i, w) in pool.iter().enumerate() {
+        let slot = (
+            campaign_period(w.launch_tdb, period_origin_tdb),
+            w.delivery.along_track_dv_ms > 0.0,
+        );
+        let k = parked_key_pool(w);
+        if parked_best.get(&slot).is_none_or(|b| k > b.0) {
+            parked_best.insert(slot, (k, i));
+        }
+    }
+    let to_fly: Vec<FoundWindow> = parked_best
+        .iter()
+        .filter(|((period, prograde), (k, _))| {
+            !candidates.iter().any(|c| {
+                c.period == *period
+                    && (c.proxy_along_track_dv_ms > 0.0) == *prograde
+                    && campaign_proxy(c.proxy_along_track_dv_ms, impact_tdb - c.arrival_tdb)
+                        * parked_ratio(c.c3_km2_s2, c.impact_mass_kg)
+                        >= *k
+            })
+        })
+        .map(|(_, (_, i))| pool[*i])
+        .collect();
+    for (w, shift) in to_fly.iter().zip(fly_all(&to_fly)?) {
+        if let Some(shift) = shift {
+            let (c, cw) = record(w, shift);
+            candidates.push(c);
+            windows.push(cw);
+        }
+    }
+
+    // Every launch can also go up to a parking orbit and leave later on a better
+    // date: the shipping parked delivery (the published single-payload limit, a
+    // storable departure engine) on the windows just flown - arithmetic, no flight.
+    let span = (
+        launch_axis.first().copied().unwrap_or(period_origin_tdb),
+        launch_axis.last().copied().unwrap_or(period_origin_tdb),
+    );
+    CampaignCandidates {
         period_origin_tdb,
         period_count,
         target_b_m: target_b,
         nominal_b_m: (nominal_b.x, nominal_b.y),
         candidates,
         windows,
-    })
+        launch_span_tdb: span,
+        parked_delivery: None,
+    }
+    .with_parking(&SHIPPING_PARKED_DELIVERY)
 }
 
 /// Fly a planned campaign whole — chained through every impulse in arrival order —
@@ -4684,7 +4843,10 @@ mod tests {
                         let origin = view.launch_tdb()[0] - months * CAMPAIGN_PERIOD_S / 12.0;
                         let t0 = Instant::now();
                         let c = measure_campaign_candidates(&scenario, &view, v, origin)
-                            .expect("candidates");
+                            .expect("candidates")
+                            // These probes measure the straight-to-the-rock windows; parking is
+                            // `probe_orbital_assembly`'s.
+                            .direct_only();
                         (label.clone(), c, spacing, t0.elapsed().as_secs_f64())
                     })
                 })
@@ -4795,7 +4957,10 @@ mod tests {
                         // the same epoch at every size.
                         let c =
                             measure_campaign_candidates(&scenario, &view, v, view.launch_tdb()[0])
-                                .expect("candidates");
+                                .expect("candidates")
+                                // These probes measure the straight-to-the-rock windows; parking is
+                                // `probe_orbital_assembly`'s.
+                                .direct_only();
                         (nl, na, build_s, t1.elapsed().as_secs_f64(), c)
                     })
                 })
@@ -5258,7 +5423,10 @@ mod tests {
                                 )
                             }
                         }
-                        .expect("candidates");
+                        .expect("candidates")
+                        // These probes measure the straight-to-the-rock windows; parking is
+                        // `probe_orbital_assembly`'s.
+                        .direct_only();
                         let secs = t0.elapsed().as_secs_f64();
                         println!("{label}: measured in {secs:.0} s");
                         (label.clone(), secs, c)
@@ -5473,24 +5641,38 @@ mod tests {
             view.launch_tdb()[0],
             WindowSource::Continuous(search),
         )
-        .expect("candidates");
+        .expect("candidates")
+        // These probes measure the straight-to-the-rock windows; parking is
+        // `probe_orbital_assembly`'s.
+        .direct_only();
         println!("measured in {:.0} s", t0.elapsed().as_secs_f64());
         println!("flown windows: shift / key (km per m/s*yr), by direction and laps");
         for k in &c.candidates {
             let key = campaign_proxy(k.proxy_along_track_dv_ms, impact - k.arrival_tdb) / yr;
             let s = Vector2::new(k.shift_per_launch_m.0, k.shift_per_launch_m.1).norm() / 1e3;
             println!(
-                "  yr {:2} {} laps {}  launch {:.6} yr before impact  key {:.6}  shift {:8.1} km  ratio {:8.0}",
+                "  yr {:2} {} laps {}  launch {:.6} yr before impact  key {:.6}  shift {:8.1} km  ratio {:8.0}  c3 {:.3}  payload {:.1} kg  xi,zeta {:.1},{:.1} km",
                 k.period,
                 if k.proxy_along_track_dv_ms > 0.0 { "pro " } else { "retr" },
                 k.revolutions,
                 (impact - k.launch_tdb) / yr,
                 key,
                 s,
-                s / key
+                s / key,
+                k.c3_km2_s2,
+                k.payload_kg,
+                k.shift_per_launch_m.0 / 1e3,
+                k.shift_per_launch_m.1 / 1e3
             );
         }
         println!("{} windows flown in all", c.candidates.len());
+        println!(
+            "nominal xi,zeta {:.1},{:.1} km  target |B| {:.1} km  first launch {:.6} yr before impact",
+            c.nominal_b_m.0 / 1e3,
+            c.nominal_b_m.1 / 1e3,
+            c.target_b_m / 1e3,
+            (impact - view.launch_tdb()[0]) / yr
+        );
         let describe = |o: CampaignOutcome| -> (String, Option<CampaignPlan>) {
             match o {
                 CampaignOutcome::Planned(p) => (format!("{} launches", p.total_launches), Some(p)),
@@ -5592,6 +5774,157 @@ mod tests {
             println!(
                 "flown at {rate}/yr rolling: {} launches, {:?}, nonlinearity {:?}",
                 p.total_launches, fl.flown, fl.nonlinearity
+            );
+        }
+    }
+
+    /// Probe, run by hand (`--ignored --nocapture`): orbital assembly. Every launch
+    /// may go up to a parking orbit and leave on a later date with its own departure
+    /// stage (the shipping parked delivery: the published single-payload limit, a
+    /// storable engine), against straight-to-the-rock only and the labelled *what
+    /// ifs*, at every rate - all arithmetic on one measurement. Then the shipping
+    /// plan at each of `ASSEMBLY_FLY_RATES` (default `1,2`) is listed launch by
+    /// launch and flown whole.
+    #[test]
+    #[ignore]
+    fn probe_orbital_assembly() {
+        if !have_kernels() {
+            return;
+        }
+        use asteroid_core::launch_vehicle::FALCON_HEAVY_EXPENDABLE;
+        use asteroid_core::orbital_assembly::WHAT_IF_PARKED_DELIVERIES;
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+        let impact = mc.impact_tdb_seconds();
+        let yr = CAMPAIGN_PERIOD_S;
+        let view = PorkchopView::build(&scenario, 120, 120).expect("grid");
+        // `CAMPAIGN_SEARCH=<step days>x<samples>` measures with another seeding.
+        let search = std::env::var("CAMPAIGN_SEARCH")
+            .ok()
+            .and_then(|s| {
+                let (a, b) = s.split_once('x')?;
+                Some(WindowSearch {
+                    launch_step_days: a.trim().parse().ok()?,
+                    arrival_samples: b.trim().parse().ok()?,
+                    polish_launch: true,
+                })
+            })
+            .unwrap_or(SHIPPING_WINDOW_SEARCH);
+        println!("search {search:?}");
+        let t0 = std::time::Instant::now();
+        let c = measure_campaign_candidates_from(
+            &scenario,
+            &view,
+            &FALCON_HEAVY_EXPENDABLE,
+            view.launch_tdb()[0],
+            WindowSource::Continuous(search),
+        )
+        .expect("candidates");
+        let parked = c.candidates.iter().filter(|k| k.parked).count();
+        println!(
+            "measured in {:.0} s: {} windows flown, {} parked launches offered ({}), launches {:.3}..{:.3} yr before impact",
+            t0.elapsed().as_secs_f64(),
+            c.candidates.len() - parked,
+            parked,
+            c.parked_delivery.map_or("none", |d| d.name),
+            (impact - c.launch_span_tdb.0) / yr,
+            (impact - c.launch_span_tdb.1) / yr
+        );
+        let mut variants: Vec<(String, CampaignCandidates)> = vec![
+            ("direct only".into(), c.direct_only()),
+            (
+                format!("SHIPPING {}", SHIPPING_PARKED_DELIVERY.name),
+                c.clone(),
+            ),
+        ];
+        for d in WHAT_IF_PARKED_DELIVERIES {
+            variants.push((
+                format!("what if {}", d.name),
+                c.with_parking(&d).expect("parking"),
+            ));
+        }
+        let describe = |o: CampaignOutcome, target: f64| -> String {
+            match o {
+                CampaignOutcome::Planned(p) => format!(
+                    "{:2} ({:.0})",
+                    p.total_launches,
+                    p.predicted_impact_parameter() / 1e3
+                ),
+                CampaignOutcome::Unreachable(p) => format!(
+                    "short {:.0}/{:.0} ({})",
+                    p.predicted_impact_parameter() / 1e3,
+                    target / 1e3,
+                    p.total_launches
+                ),
+                CampaignOutcome::AlreadyClear => "clear".into(),
+            }
+        };
+        println!(
+            "launches (predicted |B| km) per rate, columns: {}",
+            variants
+                .iter()
+                .map(|v| v.0.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        for rate in 1..=CAMPAIGN_MAX_RATE {
+            let row: Vec<String> = variants
+                .iter()
+                .map(|(_, v)| describe(v.plan(rate).expect("plan"), v.target_b_m))
+                .collect();
+            println!("{rate:2}/yr: {}", row.join(" | "));
+        }
+        for rate in std::env::var("ASSEMBLY_FLY_RATES")
+            .unwrap_or_else(|_| "1,2".into())
+            .split(',')
+            .filter_map(|s| s.trim().parse::<u32>().ok())
+        {
+            let (CampaignOutcome::Planned(p) | CampaignOutcome::Unreachable(p)) =
+                c.plan(rate).expect("plan")
+            else {
+                continue;
+            };
+            println!(
+                "shipping plan at {rate}/yr: {} launches, predicted |B| {:.0} km",
+                p.total_launches,
+                p.predicted_impact_parameter() / 1e3
+            );
+            let mut wait_max: f64 = 0.0;
+            let mut used: Vec<(&CampaignCandidate, u32)> = c
+                .candidates
+                .iter()
+                .zip(&p.launches)
+                .filter(|(_, &n)| n > 0)
+                .map(|(k, &n)| (k, n))
+                .collect();
+            used.sort_by(|a, b| a.0.launch_tdb.total_cmp(&b.0.launch_tdb));
+            for (k, n) in &used {
+                let wait = k.departure_tdb - k.launch_tdb;
+                wait_max = wait_max.max(wait);
+                println!(
+                    "  {n}x {} launch {:.3} yr before impact, leaves {:.3} (waits {:4.0} d), C3 {:5.1}, {:6.0} kg at impact, shift {:7.1} km{}",
+                    if k.parked { "PARKED" } else { "direct" },
+                    (impact - k.launch_tdb) / yr,
+                    (impact - k.departure_tdb) / yr,
+                    wait / 86_400.0,
+                    k.c3_km2_s2,
+                    k.impact_mass_kg,
+                    Vector2::new(k.shift_per_launch_m.0, k.shift_per_launch_m.1).norm() / 1e3,
+                    if k.proxy_along_track_dv_ms > 0.0 { "  pro" } else { "  retro" }
+                );
+            }
+            let dated: Vec<(f64, u32)> = used.iter().map(|(k, n)| (k.launch_tdb, *n)).collect();
+            println!(
+                "  longest wait in orbit {:.0} d, busiest 365.25 d {}",
+                wait_max / 86_400.0,
+                busiest_rolling_year(&dated)
+            );
+            let fl = fly_campaign_plan(&scenario, &c, &p, 7, PLACEMENT_BAND_A_KM).expect("flight");
+            println!(
+                "  flown: {:?}, nonlinearity {:?}",
+                fl.flown, fl.nonlinearity
             );
         }
     }
@@ -5928,7 +6261,7 @@ mod tests {
                 - ds.nominal().state_at(at).unwrap().position)
                 .norm();
             let v_rel = r.candidates[k].v_rel_vec.norm();
-            let tof = r.candidates[k].arrival_tdb - r.candidates[k].launch_tdb;
+            let tof = r.candidates[k].arrival_tdb - r.candidates[k].departure_tdb;
             println!(
                 "  impactor arriving {:.2} yr before impact: rock {:.1} km off its nominal after {n} earlier launch(es); ~{:.2e} m/s of re-aim against v_rel {:.0} m/s",
                 (impact - r.candidates[k].arrival_tdb) / 3.155_76e7,

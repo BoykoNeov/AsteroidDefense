@@ -39,6 +39,7 @@ pub mod keyhole_target;
 pub mod lambert;
 pub mod launch_vehicle;
 pub mod mission;
+pub mod orbital_assembly;
 pub mod perturber_field;
 pub mod propagator;
 pub mod sbdb;

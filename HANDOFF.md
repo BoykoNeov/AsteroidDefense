@@ -289,7 +289,14 @@ Read this table first, then the session that owns the layer you are touching.
    windows searched continuously*. **Rolling-year cap: DONE 2026-10-01** - at most N
    in any 12 months, planned exactly (N chains a year apart); 2..12 unchanged at 6,
    **1 in any 12 months falls short** (flown perigee 16 500-18 100 km depending on
-   search fineness). See *A launch cap in any 12 months*. Next: orbital assembly.
+   search fineness). See *A launch cap in any 12 months*. **Orbital assembly: DONE
+   2026-10-07** - it is *parking*, not joining (the push is linear in mass, so a
+   joined stack pushes exactly as its parts would): a launch may go up to a parking
+   orbit and leave on a later, better date with its own storable departure stage, at
+   Falcon's published 26.5 t single-payload limit. **1 in any 12 months goes from
+   short to at the line** (9 launches, flown perigee 19 790 km, seed-independent);
+   **2..12 stay at 6**. Hydrogen / the advertised 63.8 t are labelled what-ifs (4-5 /
+   3 / 2). See *Orbital assembly: it is parking, not joining*.
 
 ---
 
@@ -615,9 +622,9 @@ That MVP delivers the whole lesson *and* an honest hit→miss flip. Everything b
 ### Phase 3 (future)
 
 - Plausible launch vehicles + payload mass budgets — **both DONE** (vehicles 2026-07; mass budget 2026-10-01, *What actually hits the rock*)
-- Orbital assembly (assemble-in-orbit when payload too big for one launch)
+- Orbital assembly (assemble-in-orbit when payload too big for one launch) — **DONE 2026-10-07** as parking: joining buys nothing under a linear push; waiting in orbit for a better date is what pays, at a mass cost (*Orbital assembly: it is parking, not joining*)
 - Standing/ready Earth-defense systems
-- Multi-mission campaigns
+- Multi-mission campaigns — **DONE** (2026-09-23 onward, *Several launches against one rock* and after)
 
 ---
 
@@ -6178,3 +6185,152 @@ which is the claim the ranking needs.
 **Frontend.** "RATE UP TO N IN ANY 12 MONTHS"; the dashed fixed-year lines are
 gone from the map; the windows line prints "BUSIEST 12 MO" (at most the rate by
 construction); the harness counts every 365.25 days from the windows' own dates.
+
+### Orbital assembly: it is parking, not joining - 2026-10-07 session (Phase 3: the last open campaign item)
+
+The open item from *The campaign on the map*: "one big impactor instead of N small
+ones". **Joining pieces in orbit buys nothing**, and that came first: a kinetic
+impactor's push is linear in mass, and the b-plane responds linearly at a launch's
+millimetres per second (every campaign flight measures that, to ~0.02 %), so one
+stack of N launches' mass through a window pushes exactly as N separate impactors
+through it - and the planner already allowed N launches on one date. What a parking
+orbit changes is **when a launch can leave**: straight to the rock, a launch leaves on
+its launch date, so a cap of one a year forces late launches through late, weak
+windows; parked, it can wait for the best departure after it.
+
+**And parking costs mass.** A rocket's upper stage cannot wait months, so a parked
+payload carries its own departure stage and the escape burn comes out of it:
+`m_out = m_stack * exp(-dv / (Isp g0))`, `dv = sqrt(2 mu/r + C3) - sqrt(mu/r)` from a
+circular parking orbit. The spent stage **stays attached and hits the rock** (the
+`impactor_mass` reasoning: everything that arrives carries momentum), so no dry mass
+comes off; DART's 3.6 % cruise loss applies after, as for a direct launch.
+`core/src/orbital_assembly.rs`.
+
+#### The decision, and the premise that did not survive its sources
+
+The user first picked "best date + more mass" on a 63.8 t low-orbit figure. The
+sources changed that, and the user re-chose with the corrected numbers ("honest
+default + what-ifs"):
+
+- **63.8 t is SpaceX's advertised total, not a payload.** The *Falcon User's Guide*
+  (SpaceX, 2025-05-09) publishes no mass-to-orbit numbers ("available upon request")
+  and caps a single payload at **"Total Mass: up to 26,500 kg"** - Table 4-1, the
+  3,117-mm strut PAF, extended fairing only, its masses "an initial guide". So the
+  shipping stack is `FALCON_SINGLE_PAYLOAD_LIMIT_KG = 26 500`; 63.8 t is a labelled
+  *what if*. (A side note during the session asked for the answer both ways - it is
+  in every table below.)
+- **The engine is storable**, because the 1-a-year plan waits up to ~16 months in
+  orbit and hydrogen boils off (no sourced boil-off rate exists here):
+  `ORION_OMS_E`, **315.1 s** - Belair et al., *Artemis I Orion-ESM Propulsion System
+  Engine Performance*, Space Propulsion 2024, SP2024_382, Table 2 (NTRS 20240003648);
+  the Shuttle OMS engine, flown on Artemis I. `RL10B_2`, **465.5 s** (National Research
+  Council 2006, *A Review of USAF and DoD Aerospace Propulsion Needs*, App. D p. 256),
+  is the hydrogen *what if*. Aestus (324 s) was found only in secondary sources and is
+  not used.
+- **185 km parking orbit** - the guide's baselined transfer-orbit perigee (§3.1). The
+  conservative choice: 400 km would save ~45 m/s of escape burn at `C3 = 10`.
+
+With the published limit, **parking carries less than a direct Falcon Heavy below
+`C3` 58.0 km^2/s^2** (62 % at `C3` 1, 80 % at the best window's 38.4) and more above it,
+where the direct curve falls toward the rocket's energy limit. So a parked launch
+mostly wins by **date**, not mass.
+
+#### The planner: exact over both ways of flying a launch
+
+A parked launch is just another window to the rolling planner: launched on its own
+date (which the cap counts), pushing its departure window's shift times the mass
+ratio. `core::campaign::parked_launches` lists every one a plan can need:
+
+- **Dates.** A parked launch's worth only falls as its date moves later (fewer
+  departures ahead), so in a best plan each sits as early as its chain allows -
+  `earliest`, or one period after the launch before it. So every parked date is
+  `earliest` or a direct window's date, plus whole periods.
+- **Departures.** At one date the planner wants the largest shift along its push
+  direction; over every direction those are the convex-hull vertices of the
+  candidate shifts, so only those are kept (717-1 361 parked launches, not ~30 000).
+- **`ROLLING_SLACK_S` = 1 ms.** Dates built as `t + k P` are a period apart only to
+  rounding; the planner and `busiest_rolling_count` now share a millisecond of slack.
+  A first try dated parked launches 1 ms *late* instead, and the new test caught it
+  breaking "parked, then direct one period later" - a margin on one side of a gap is
+  the wrong side half the time.
+
+Pinned against brute force (every arrangement of up to four launches on a 10-day
+grid, direct or parked through any window ahead, under the rolling cap), plus
+`a_parked_launch_can_follow_a_direct_one` - added because **mutation-testing showed
+the brute force could not see the dates counted from direct windows**: deleting them
+left it green. The new test fails without them.
+
+**A planner bug, found by the first parking test:** short of the target, the rolling
+planner reported the plan with the *most* launches, not the one that got furthest -
+under the cap one more launch can force the whole chain onto weaker dates (three weak
+ones summing to less than two strong ones). Fixed in `chains_along`. The shipping
+direct numbers did not move (1 a year still reports 22 362 km), but the measurement
+now flies 34 direct windows instead of 40, since the unreachable plans it flies
+changed.
+
+#### Which windows a parked launch can leave through
+
+Only flown ones (a parked shift is a flown shift scaled, never an estimate). But the
+flown windows were chosen for *direct* launches, and parking loses less mass at high
+`C3`, so a year's best departure for a parked launch can be one the direct ranking
+passed over. So the measurement ranks the rest of the pool by the key **at the
+shipping parked mass** and flies each (year, direction)'s best where it beats every
+flown window there - **13 more flights** (34 -> 47). That moved the 1-a-year answer
+from *short by 5 %* (24 617 km with 8 launches, flown perigee 18 709 km) to the
+numbers below. The *what ifs* reuse the same flown windows (chosen at the shipping
+mass), so they are estimates on those windows, not separately searched.
+
+#### What it measures (`probe_orbital_assembly`, Falcon Heavy expendable)
+
+Launches (predicted |B| km; target 25 955), every rate 1..12 planned:
+
+| per 12 months | straight to the rock | **parked, 26.5 t storable (shipping)** | 26.5 t hydrogen | 63.8 t storable | 63.8 t hydrogen |
+|---|---|---|---|---|---|
+| 1 | short (22 362) | **9, at the line (25 739)** | 5 | 3 | 2 |
+| 2 | 6 | **6** | 4 | 3 | 2 |
+| 3..12 | 6 | **6** | 4 | 3 | 2 |
+
+- **1 in any 12 months is now AT THE LINE** (0.83 % short of the target |B|), flown
+  whole: perigee **19 790 km** against the 20 000 km line, 0.021 % off the arithmetic.
+  At the finest search seed (0.5 d x 477): 25 757, flown **19 808 km** - the answer no
+  longer moves with the seed, because the parked plan is *retrograde*, the direction
+  the search has converged (the direct 1/yr plan was prograde: 16 542 / 18 065 km by
+  seed). Seven of the nine launches park; the longest wait is **488 days**, and one
+  leaves at `C3` 62.7, above the crossing, where parking carries more than direct.
+- **2 or more a year: 6, unchanged.** The plans already put every launch through one
+  to three of the best dates; at 2 a year two of them now park (same count).
+- **What ifs:** a hydrogen engine (if it kept) takes 2-12 a year to 4 and 1 a year to
+  5; the advertised 63.8 t as one payload takes everything to 3, or 2 with hydrogen.
+
+#### What this does not model
+
+The parking orbit's plane against the departure asymptote (the NASA `C3` tables the
+direct launches use assume it away too, so the two compare on equal footing);
+gravity losses on a long storable burn (the burn is impulsive); orbit decay at 185 km
+(a real stack would wait higher, which needs *less* burn); rendezvous and docking
+(free - by linearity two stacks leaving the same day would do the same).
+
+#### The frontend
+
+`campaign_plan` carries `parked` / `departure_tdb` per window, a `parking`
+dictionary and a `what_if` row at the dialled rate (arithmetic replans of the held
+measurement). The panel's window list prints parked launches as **`1P`**, a line
+under it names the stack and engine and the plan's longest wait, and the footnote
+line shows the what-ifs (`NO PARKING SHORT  26.5 T STACK, HYDROGEN 5 ...`). The map
+draws a parked launch on the transfer it leaves on (`2X+1P` beside a shared window),
+and does not draw the hundreds of unused parked copies; launches are grouped by map
+cell, because at 2 a year a parked pair leaves ten days before the direct pair and
+the two labels landed on top of each other. The extra line pushed the panel into the
+global key bar on the 2/yr shot (flight and keyhole lines showing), so the two
+fine-print lines are now one. `_campaign_shot.gd` asserts 1/yr is AT THE LINE with
+parking and SHORT without, and its own cap count uses the core's 1 ms slack. In the
+app the measurement takes **~130 s** (47 flights, debug build), up from "a minute or
+two" - the 13 parked-departure flights.
+
+#### What this leaves
+
+- A parked launch's departure is each year's best *by the parked key*; a second-best
+  date of a year is not offered to it. The direct side solved the same problem with
+  the estimate-and-fly loop; parking could join that loop if a count ever sits on it.
+- The *what ifs* are on windows chosen at the shipping parked mass.
+- Phase 3's remaining bullet is standing defence systems.

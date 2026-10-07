@@ -296,8 +296,10 @@ Read this table first, then the session that owns the layer you are touching.
    Falcon's published 26.5 t single-payload limit. On an idealised all-at-once
    burn that took 1 in any 12 months from short to at the line (44 km inside the
    1 % band); **with the escape burn flown for real (2026-10-07: 8 firings of the
-   OMS-E from a 400 km orbit, the user's pick) 1 in any 12 months FALLS SHORT by
-   1.15 %** (9 launches, |B| 25 657 of 25 955 km, flown perigee 19 712 km);
+   OMS-E from a 400 km orbit, the user's pick) 1 in any 12 months is ON THE EDGE:
+   short by 1.15 % at 400 km** (9 launches, |B| 25 657 of 25 955 km, flown perigee
+   19 712 km), at the line from ~500 km, clear from ~1 000 km - the parking height
+   decides it and nothing sourced fixes it;
    **2..12 stay at 6** in every setting. Plane drift costs nothing (pre-aimed by the
    launch time); only the orbit's 28.5 deg tilt limits it. Hydrogen / the advertised
    63.8 t are labelled what-ifs (4-5 / 3 / 2). See *Orbital assembly: it is
@@ -6378,8 +6380,9 @@ two" - the 13 parked-departure flights.
 The parking section above ended on a bias of known sign: 1 a year was **at the
 line on an idealised burn** - 44 km inside the 1 % band, about 7.5 m/s of escape
 burn per parked launch - and two unmodelled costs, both landing on parked launches
-only, looked bigger than that. Both are now modelled. **1 in any 12 months falls
-short by 1.15 %; 2 or more a year stays at 6.**
+only, looked bigger than that. Both are now modelled. **1 in any 12 months is on
+the edge: short by 1.15 % at the shipping 400 km, at the line from ~500 km, clear
+from ~1 000 km. 2 or more a year stays at 6 everywhere.**
 
 #### The burn: split into firings, and the loss measured
 
@@ -6448,7 +6451,30 @@ knife edge: looser settings put 1 a year back at the line by 2-37 km, and the
 unmodelled station-keeping (drag make-up at 400 km, a few m/s a year, several
 times that at solar maximum - unsourced) pushes the other way. Flown whole, the
 shipping 1-a-year plan reaches perigee **19 712 km** against the 20 000 km line
-(nonlinearity 0.021 %). The *what ifs* (hydrogen, 63.8 t) stay on an idealised
+(nonlinearity 0.021 %).
+
+**And the height flips it - caught in the final review.** The first bracket treated
+height as 185 vs 400 km, but 400 km is only the *lowest* height a stack survives
+at, and the escape burn keeps shrinking as the orbit rises. At the shipping escape
+setting (8 firings, 100 000 km cap), 1 in any 12 months:
+
+| height | 1 a year (|B| km) |
+|---|---|
+| 400 km | short, 25 657 (38 km outside the band) |
+| 450 km | short, 25 691 (4 km outside) |
+| 500 km | at the line, 25 725 |
+| 600 km | at the line, 25 790 |
+| 800 km | at the line, 25 915 |
+| 1 000 km | **9 launches, clear** (26 032) |
+| 2 000 km | 9 launches, clear (26 526) |
+
+2..12 a year stay 6 at every height. Nothing sourced fixes the height (1 000 km and
+up also leans on an unsourced lift and sits at the edge of the radiation belts).
+**The user kept 400 km as the cautious default** and asked for the answer to be
+quoted as on the edge: short at 400 km, at the line from ~500 km, clear from
+~1 000 km. The game still prints FALLS SHORT at 1 a year.
+
+The *what ifs* (hydrogen, 63.8 t) stay on an idealised
 burn - the hydrogen engine's limits are not sourced here and one OMS-E is not a
 stage for 63.8 t - now from 400 km: 5 / 4, 3, 2 as before.
 
@@ -6463,8 +6489,10 @@ costs nothing. What cannot be aimed is the tilt: launched due east from the Cape
 the orbit is tilted 28.5 deg, and contains only departures within 28.5 deg of the
 equator. Measured (`TransferMetrics::v_inf_departure`, ICRF - the ephemeris is
 SSB-centred ICRF, checked before reading an angle off it): **7 of the 44 flown
-windows are steeper (up to 58.4 deg); no plan uses one, and every departure in the
-shipping plans is within 27.2 deg.** A steeper window is now not offered to a
+windows are steeper (up to 58.4 deg). Over every plan at every rate, no plan with
+parking and no *what if* uses one (steepest 27.2 deg) - but the straight-to-the-
+rock 1-a-year plan does (58.4 deg)**; it falls short anyway, and whether a direct
+launch could fly that window at the tabled mass is unknown (below). A steeper window is now not offered to a
 parked launch at all (`parking_plane_reaches`). The NASA launch tables the direct
 launches use do not state what departure angles they assume (checked: the LSP
 site, an LSP information summary, and Girija's dataset paper), so whether direct

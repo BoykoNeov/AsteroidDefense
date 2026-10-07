@@ -79,6 +79,15 @@
 //! escape burn, which is smaller from higher up. 185 km was the first cut and is
 //! kept in the bracket only.
 //!
+//! **The 1-a-year answer is on the edge, and the height decides it.** 400 km is
+//! the *lowest* height a stack survives at, not a natural one, and every height
+//! above it needs less escape burn. Measured at the shipping escape setting: 1 in
+//! any 12 months falls short at 400 km (by 38 km of the 1 % band) and 450 km (by
+//! 4 km), is at the line from 500 km, and clears the target outright from about
+//! 1 000 km (which leans on an unsourced lift that high, at the edge of the
+//! radiation belts). The user kept 400 km as the cautious default (2026-10-07), so
+//! the shipping answer is "short" and is quoted with this edge.
+//!
 //! # The escape burn is flown finite ([`crate::departure_burn`])
 //! The OMS-E pushes 26.7 kN against a 26.5 t stack, rated for at most 1 030 s per
 //! firing and 10 starts, so the escape is split into firings at perigee and the
@@ -283,10 +292,9 @@ impl ParkedDelivery {
         else {
             return None;
         };
-        let lim = self
-            .engine
-            .limits
-            .unwrap_or_else(|| panic!("{}: a finite escape needs sourced engine limits", self.name));
+        let lim = self.engine.limits.unwrap_or_else(|| {
+            panic!("{}: a finite escape needs sourced engine limits", self.name)
+        });
         assert!(
             (1..=lim.max_starts).contains(&firings),
             "{}: {firings} firings against {} rated starts",
@@ -567,7 +575,10 @@ mod tests {
         for c3 in [1.0, 20.0, 43.0, 62.7, 90.0] {
             let loss = s.escape_loss_m_s(c3).expect("reaches");
             assert!(loss > 0.0, "C3 {c3}: {loss}");
-            assert!(s.separated_mass_kg(c3) < ideal.separated_mass_kg(c3), "C3 {c3}");
+            assert!(
+                s.separated_mass_kg(c3) < ideal.separated_mass_kg(c3),
+                "C3 {c3}"
+            );
         }
         // Every what-if is impulsive (no sourced limits for the hydrogen engine,
         // and one OMS-E is not a stage for 63.8 t), so it is labelled idealised.
@@ -592,7 +603,9 @@ mod tests {
         }
         assert!(worst < 0.1, "{worst} m/s");
         // Past the table it is flown, not extrapolated.
-        let past = burn.fly(s.stack_kg, s.parking_radius_m(), 104.0).map(|o| o.loss_m_s);
+        let past = burn
+            .fly(s.stack_kg, s.parking_radius_m(), 104.0)
+            .map(|o| o.loss_m_s);
         assert_eq!(s.escape_loss_m_s(104.0), past);
     }
 

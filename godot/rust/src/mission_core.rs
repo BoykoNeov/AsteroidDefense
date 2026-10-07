@@ -58,9 +58,7 @@ use asteroid_core::mission::{
     cell_delivery, impact_impulse, porkchop_grid, required_impactor_mass, verify_cell,
     CellDelivery, MassSolveOutcome, Porkchop, PorkchopCell, TransferMetrics,
 };
-use asteroid_core::orbital_assembly::{
-    parked_delivery_for, parking_plane_reaches, ParkedDelivery,
-};
+use asteroid_core::orbital_assembly::{parked_delivery_for, parking_plane_reaches, ParkedDelivery};
 use asteroid_core::scenario::{
     DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError, SrpParams,
     Tier2Config, ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES, SAFE_PERIGEE_TARGET_M,
@@ -5934,8 +5932,7 @@ mod tests {
         // orbit launched due east from the Cape is tilted 28.5 deg and can only
         // contain asymptotes within 28.5 deg of the equator (the same holds for a
         // direct launch's ascent).
-        let direct: Vec<&CampaignCandidate> =
-            c.candidates.iter().filter(|k| !k.parked).collect();
+        let direct: Vec<&CampaignCandidate> = c.candidates.iter().filter(|k| !k.parked).collect();
         let steep = direct
             .iter()
             .filter(|k| declination_deg(k.v_inf_departure).abs() > 28.5)
@@ -5948,6 +5945,56 @@ mod tests {
             "departure declination: {steep} of {} flown windows beyond 28.5 deg (steepest {worst:.1} deg)",
             direct.len()
         );
+        // And over every plan any column makes, at every rate: the steepest departure
+        // a plan actually uses. Direct launches are not filtered by the tilt, so a
+        // direct-only plan can use a steep window.
+        for (name, v) in &variants {
+            let mut steepest: f64 = 0.0;
+            let mut steep_rates = Vec::new();
+            for rate in 1..=CAMPAIGN_MAX_RATE {
+                let (CampaignOutcome::Planned(p) | CampaignOutcome::Unreachable(p)) =
+                    v.plan(rate).expect("plan")
+                else {
+                    continue;
+                };
+                let s = v
+                    .candidates
+                    .iter()
+                    .zip(&p.launches)
+                    .filter(|(_, &n)| n > 0)
+                    .map(|(k, _)| declination_deg(k.v_inf_departure).abs())
+                    .fold(0.0_f64, f64::max);
+                if s > 28.5 {
+                    steep_rates.push(rate);
+                }
+                steepest = steepest.max(s);
+            }
+            println!(
+                "  {name}: steepest departure used at any rate {steepest:.1} deg; rates using one beyond 28.5: {steep_rates:?}"
+            );
+        }
+        // The parking height, at the shipping escape setting: the escape burn shrinks
+        // as the orbit rises, and 400 km is only the lowest height a stack survives.
+        {
+            use asteroid_core::orbital_assembly::SHIPPING_PARKED_DELIVERY;
+            for alt_km in [400.0, 450.0, 500.0, 600.0, 800.0, 1000.0, 1500.0, 2000.0] {
+                let d = asteroid_core::orbital_assembly::ParkedDelivery {
+                    parking_altitude_m: alt_km * 1e3,
+                    ..SHIPPING_PARKED_DELIVERY
+                };
+                let v = c.with_parking(&d).expect("parking");
+                let rest_six = (2..=CAMPAIGN_MAX_RATE).all(|r| {
+                    matches!(v.plan(r).unwrap(), CampaignOutcome::Planned(p) if p.total_launches == 6)
+                });
+                println!(
+                    "height {alt_km:5.0} km (shipping escape): loss@C3 43 {:5.1} m/s, impulsive {:6.1} m/s | 1/yr {} | 2..12 all 6: {}",
+                    d.escape_loss_m_s(43.0).unwrap_or(f64::NAN),
+                    d.departure_dv_m_s(43.0),
+                    describe(v.plan(1).unwrap(), v.target_b_m),
+                    rest_six
+                );
+            }
+        }
         // The bracket: the shipping stack and engine with every escape setting,
         // replanned on the same measurement (whose extra parked-key windows were
         // chosen at the shipping setting).
@@ -5957,10 +6004,12 @@ mod tests {
             for alt_km in [185.0, 400.0] {
                 let escapes = std::iter::once(EscapeBurn::Impulsive).chain(
                     [1.0e8, 2.0e8, 4.0e8].into_iter().flat_map(|cap| {
-                        [3, 4, 5, 6, 8, 10].into_iter().map(move |n| EscapeBurn::Finite {
-                            firings: n,
-                            apogee_cap_m: cap,
-                        })
+                        [3, 4, 5, 6, 8, 10]
+                            .into_iter()
+                            .map(move |n| EscapeBurn::Finite {
+                                firings: n,
+                                apogee_cap_m: cap,
+                            })
                     }),
                 );
                 for escape in escapes {

@@ -195,7 +195,11 @@ impl FiniteBurn {
     ) -> Option<(f64, f64)> {
         let target = 0.5 * c3_km2_s2 * 1.0e6;
         let fly = |d: f64| {
-            let s0 = if centre { before_perigee(s, d / 2.0) } else { *s };
+            let s0 = if centre {
+                before_perigee(s, d / 2.0)
+            } else {
+                *s
+            };
             let (out, m) = self.fire(&s0, m_kg, d);
             (energy(&out) - target, m)
         };
@@ -232,7 +236,11 @@ impl FiniteBurn {
             if tau > self.max_firing_s || self.mdot_kg_s() * tau >= m {
                 return None;
             }
-            let s0 = if k == 0 { s } else { before_perigee(&s, tau / 2.0) };
+            let s0 = if k == 0 {
+                s
+            } else {
+                before_perigee(&s, tau / 2.0)
+            };
             (s, m) = self.fire(&s0, m, tau);
             if energy(&s) >= 0.0 {
                 return None;
@@ -376,8 +384,14 @@ mod tests {
                 firings: 1,
                 ..oms(1, 1.0e5)
             };
-            let o = b.fly(26_500.0, R_PARK, 43.0).expect("one firing reaches C3 43");
-            assert!(o.loss_m_s > 0.0 && o.loss_m_s < last, "{thrust}: {}", o.loss_m_s);
+            let o = b
+                .fly(26_500.0, R_PARK, 43.0)
+                .expect("one firing reaches C3 43");
+            assert!(
+                o.loss_m_s > 0.0 && o.loss_m_s < last,
+                "{thrust}: {}",
+                o.loss_m_s
+            );
             last = o.loss_m_s;
         }
         assert!(last < 0.5, "{last}");
@@ -423,6 +437,10 @@ mod tests {
         let o = oms(8, 2.0e5).fly(26_500.0, R_PARK, 38.4).expect("reaches");
         let dv = impulsive_dv_m_s(R_PARK, 38.4) + o.loss_m_s;
         let m = 26_500.0 * (-dv / (315.1 * G0_M_S2)).exp();
-        assert!((m - o.separated_kg).abs() < 1e-6, "{m} vs {}", o.separated_kg);
+        assert!(
+            (m - o.separated_kg).abs() < 1e-6,
+            "{m} vs {}",
+            o.separated_kg
+        );
     }
 }

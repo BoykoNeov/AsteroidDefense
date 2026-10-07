@@ -14,7 +14,9 @@ extends Node
 ## - 1/yr is an answer, not a failure: under "1 in any 12 months" it FALLS SHORT,
 ##   about 1 % - launches may park in orbit and leave on a later date, but the escape
 ##   burn is flown finite (8 firings from 400 km) and that loss puts it just outside
-##   the 1 % line; the what-if row says it falls short with no parking too;
+##   the 1 % line. It is on the edge: from ~500 km it would be at the line (the
+##   height is a cautious choice, see HANDOFF). The what-if row says it falls short
+##   with no parking too;
 ## - the parking line names the height, stack, engine and firings, and the plan
 ##   really parks;
 ## - the window boxes sit at their own dates, between the map's cells (look at the

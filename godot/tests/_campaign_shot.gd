@@ -11,10 +11,12 @@ extends Node
 ## - the cap is per ANY 12 MONTHS: no 365.25 days of the plan carry more launches
 ##   than the rate (the core's own count, `busiest_rolling_year`);
 ## - the rate knob is free (no solve fires on [Z]/[X]) and greys the flight line;
-## - 1/yr is an answer, not a failure: under "1 in any 12 months" it is AT THE LINE
-##   (within 1 % of the target |B|) once launches may park in orbit and leave on a
-##   later date - and the what-if row says it FALLS SHORT with no parking;
-## - the parking line names the stack and the engine, and the plan really parks;
+## - 1/yr is an answer, not a failure: under "1 in any 12 months" it FALLS SHORT,
+##   about 1 % - launches may park in orbit and leave on a later date, but the escape
+##   burn is flown finite (8 firings from 400 km) and that loss puts it just outside
+##   the 1 % line; the what-if row says it falls short with no parking too;
+## - the parking line names the height, stack, engine and firings, and the plan
+##   really parks;
 ## - the window boxes sit at their own dates, between the map's cells (look at the
 ##   shot: the continuous search finds dates no cell has);
 ## - [L] makes the held campaign stale instead of showing it as this rocket's;
@@ -104,11 +106,13 @@ func _run() -> void:
 	print("CAMPSHOT  %s" % Sim.campaign_windows_label())
 	print("CAMPSHOT  %s" % Sim.campaign_parking_label())
 	print("CAMPSHOT  %s" % Sim.campaign_what_if_label())
-	assert(Sim.campaign_count_label().begins_with("AT THE LINE"),
-		"1 in any 12 months is at the line with parking")
+	assert(Sim.campaign_count_label().begins_with("FALLS SHORT"),
+		"1 in any 12 months falls short even with parking, once the burn is finite")
 	assert(Sim.campaign_what_if_label().contains("NO PARKING SHORT"),
 		"with no parking, 1 in any 12 months falls short")
 	assert(Sim.campaign_parking_label().contains("LONGEST WAIT"), "the 1/yr plan parks")
+	assert(Sim.campaign_parking_label().contains("400 KM") and Sim.campaign_parking_label().contains("8 BURNS"),
+		"the parking line names the height and the firings")
 	_assert_per_year_cap()
 	await _settle(3)
 	await _shot("campaign_rate_1")

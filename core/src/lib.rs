@@ -24,6 +24,7 @@ pub mod campaign;
 pub mod clock;
 pub mod close_approach;
 pub mod deflection;
+pub mod departure_burn;
 pub mod elements;
 pub mod ephemeris;
 pub mod epoch;

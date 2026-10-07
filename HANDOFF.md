@@ -293,12 +293,15 @@ Read this table first, then the session that owns the layer you are touching.
    2026-10-07** - it is *parking*, not joining (the push is linear in mass, so a
    joined stack pushes exactly as its parts would): a launch may go up to a parking
    orbit and leave on a later, better date with its own storable departure stage, at
-   Falcon's published 26.5 t single-payload limit. **1 in any 12 months goes from
-   short to at the line** (9 launches, flown perigee 19 790 km, seed-independent) -
-   on an idealised burn, 44 km inside the line's 1 % band, which ~7.5 m/s of real
-   burn losses per parked launch would erase;
-   **2..12 stay at 6**. Hydrogen / the advertised 63.8 t are labelled what-ifs (4-5 /
-   3 / 2). See *Orbital assembly: it is parking, not joining*.
+   Falcon's published 26.5 t single-payload limit. On an idealised all-at-once
+   burn that took 1 in any 12 months from short to at the line (44 km inside the
+   1 % band); **with the escape burn flown for real (2026-10-07: 8 firings of the
+   OMS-E from a 400 km orbit, the user's pick) 1 in any 12 months FALLS SHORT by
+   1.15 %** (9 launches, |B| 25 657 of 25 955 km, flown perigee 19 712 km);
+   **2..12 stay at 6** in every setting. Plane drift costs nothing (pre-aimed by the
+   launch time); only the orbit's 28.5 deg tilt limits it. Hydrogen / the advertised
+   63.8 t are labelled what-ifs (4-5 / 3 / 2). See *Orbital assembly: it is
+   parking, not joining* and *The escape burn flown for real*.
 
 ---
 
@@ -624,7 +627,7 @@ That MVP delivers the whole lesson *and* an honest hit→miss flip. Everything b
 ### Phase 3 (future)
 
 - Plausible launch vehicles + payload mass budgets — **both DONE** (vehicles 2026-07; mass budget 2026-10-01, *What actually hits the rock*)
-- Orbital assembly (assemble-in-orbit when payload too big for one launch) — **DONE 2026-10-07** as parking: joining buys nothing under a linear push; waiting in orbit for a better date is what pays, at a mass cost (*Orbital assembly: it is parking, not joining*)
+- Orbital assembly (assemble-in-orbit when payload too big for one launch) — **DONE 2026-10-07** as parking: joining buys nothing under a linear push; waiting in orbit for a better date is what pays, at a mass cost (*Orbital assembly: it is parking, not joining*); the escape burn flown finite and the plane checked the same day — 1 a year falls short by ~1 % (*The escape burn flown for real*)
 - Standing/ready Earth-defense systems
 - Multi-mission campaigns — **DONE** (2026-09-23 onward, *Several launches against one rock* and after)
 
@@ -6307,6 +6310,10 @@ Launches (predicted |B| km; target 25 955), every rate 1..12 planned:
 
 #### What this does not model - and two of it lean toward parking
 
+*(Superseded the same day: both costs below are now modelled, and the verdict
+flipped to just short - see* The escape burn flown for real *right after this
+section.)*
+
 **The 1-a-year verdict carries an optimistic bias of known sign, and its margin is
 smaller than the bias is likely to be.** "At the line" means within 1 % of the target
 |B| (>= 25 695 km); the plan predicts 25 739 km, **44 km** inside. The seven parked
@@ -6365,3 +6372,109 @@ two" - the 13 parked-departure flights.
   the estimate-and-fly loop; parking could join that loop if a count ever sits on it.
 - The *what ifs* are on windows chosen at the shipping parked mass.
 - Phase 3's remaining bullet is standing defence systems.
+
+### The escape burn flown for real - 2026-10-07 session (orbital assembly, its two open costs)
+
+The parking section above ended on a bias of known sign: 1 a year was **at the
+line on an idealised burn** - 44 km inside the 1 % band, about 7.5 m/s of escape
+burn per parked launch - and two unmodelled costs, both landing on parked launches
+only, looked bigger than that. Both are now modelled. **1 in any 12 months falls
+short by 1.15 %; 2 or more a year stays at 6.**
+
+#### The burn: split into firings, and the loss measured
+
+The engine's own table (Belair et al., SP2024_382, Table 2 - re-read at the source
+this session) gives three limits: **26.7 kN thrust, 1 030 s longest firing, 10
+starts max**. The escape at `C3` 43 is ~2 450 s of burning, so it is split into
+firings at perigee. `core/src/departure_burn.rs` flies it: planar two-body,
+thrust along the velocity (never better than optimal steering, so errors go
+against parking), `n - 1` equal phasing firings centred on perigee and a final
+firing solved to hit the exact `C3`. The phasing length is chosen to leave the
+most mass within the limits.
+
+- **The rule is the optimum.** Against a free Nelder-Mead optimisation of every
+  firing length (Python, offline), the equal-firings rule costs 33.5 / 26.8 / 23.9
+  m/s where the optimum is 33.4 / 26.7 / 23.9 (`C3` 43, 185 km, 10 firings, apogee
+  caps 100 / 200 / 400 thousand km). The Rust flight reproduces the Python one to
+  0.3 m/s (pinned).
+- **The final firing dominates.** However many phasing loops, the last firing -
+  from an orbit already near escape - is ~500-700 s long and carries most of the
+  loss. So more firings help less and less: at `C3` 43 from 185 km, 3 firings lose
+  122 m/s, 5 lose 53, 8 lose 37, 10 lose 34.
+- **The apogee cap matters, and has to be stated.** Left free, the schedule swings
+  the last bound orbit out past a million km - beyond the Moon, where a two-body
+  flight means nothing. The Moon's tidal pull relative to Earth's at apogee `r` is
+  `2 (mu_moon/mu_earth)(r/d_moon)^3`: 0.04 % at 100 000 km, 0.35 % at 200 000, 2.8 %
+  at 400 000.
+- **A search trap, caught by a test.** At high `C3` the phasing lengths that let
+  the final firing reach are a sliver just under the apogee cap's edge, and a blind
+  64-point scan stepped over it: above `C3` ~95 every parked departure was priced
+  at zero mass. Now the edge is found exactly first (every phasing limit tightens as
+  the length grows, so the feasible lengths are one interval) and the scan runs
+  inside it; `the_shipping_escape_reaches_the_whole_table` pins it.
+- The loss is a function of `C3` alone per delivery, so it is flown once onto a
+  1 km^2/s^2 table (0..100, linear between knots to < 0.1 m/s, pinned) and cached
+  for the process; the planner's structure is untouched.
+
+#### The parking height: 185 km could not hold a stack for a year
+
+The reviewer's catch, before building: adding the loss while keeping the 185 km
+"conservative" orbit stacks only parking's costs. A 185 km orbit decays in weeks
+and the plans wait up to 488 days; and from higher up the escape burn is smaller
+(~45 m/s at 400 km), the same size as the loss. So the height was bracketed too.
+400 km costs the launcher nothing that matters: the stack is capped by the payload
+adapter at 26.5 t, far under the 63.8 t Falcon Heavy is advertised to lift to low
+orbit.
+
+#### The bracket, and the user's choice
+
+1 in any 12 months, predicted |B| (target 25 955 km; at the line >= 25 695):
+
+| height | firings | apogee cap | 1 a year |
+|---|---|---|---|
+| 185 km | any 3-10 | any | short (best 25 583, 1.4 %) |
+| 400 km | idealised burn | - | at the line (25 883) |
+| 400 km | **8** | **100 000 km** | **short, 25 657 (1.15 %) - shipping** |
+| 400 km | 10 | 100 000 km | short, 25 673 |
+| 400 km | 8 | 200 000 km | at the line by 2 km (25 697) |
+| 400 km | 10 | 200 000 km | at the line, 25 715 |
+| 400 km | 10 | 400 000 km | at the line, 25 732 |
+
+2..12 a year are 6 in **every** row (`ASSEMBLY_BRACKET=1 probe_orbital_assembly`
+prints all 38 settings). The user chose **400 km, 8 firings (two of the 10 starts
+kept for trims during the wait), 100 000 km** - a height a stack can survive at
+and only orbits where the Moon barely matters. The verdict is honest about its
+knife edge: looser settings put 1 a year back at the line by 2-37 km, and the
+unmodelled station-keeping (drag make-up at 400 km, a few m/s a year, several
+times that at solar maximum - unsourced) pushes the other way. Flown whole, the
+shipping 1-a-year plan reaches perigee **19 712 km** against the 20 000 km line
+(nonlinearity 0.021 %). The *what ifs* (hydrogen, 63.8 t) stay on an idealised
+burn - the hydrogen engine's limits are not sourced here and one OMS-E is not a
+stage for 63.8 t - now from 400 km: 5 / 4, 3, 2 as before.
+
+#### The plane: pre-aimed, so only the tilt limits it
+
+The earlier note said a parked stack's plane is fixed at launch and drifts (Earth's
+oblateness turns it about 7 deg a day at 400 km), unlike a direct launch's. But a
+parked launch **knows its departure date when it launches**, and the drift is
+predictable, so its launch time of day - which sets where the plane crosses the
+equator - is chosen so the plane has turned into place on the departure day. That
+costs nothing. What cannot be aimed is the tilt: launched due east from the Cape
+the orbit is tilted 28.5 deg, and contains only departures within 28.5 deg of the
+equator. Measured (`TransferMetrics::v_inf_departure`, ICRF - the ephemeris is
+SSB-centred ICRF, checked before reading an angle off it): **7 of the 44 flown
+windows are steeper (up to 58.4 deg); no plan uses one, and every departure in the
+shipping plans is within 27.2 deg.** A steeper window is now not offered to a
+parked launch at all (`parking_plane_reaches`). The NASA launch tables the direct
+launches use do not state what departure angles they assume (checked: the LSP
+site, an LSP information summary, and Girija's dataset paper), so whether direct
+launches face the same limit cannot be said here.
+
+#### What this leaves
+
+- Station-keeping during the wait (drag make-up, plane trims) is not charged; it
+  is small at 400 km and is what the two spare starts are for.
+- The Moon and Sun during the phasing loops (kept small by the cap).
+- The frontend's panel line now names the height and the firings
+  (`nP = PARKED AT 400 KM: 26.5 T STACK, OMS-E (STORABLE) 315 S IN 8 BURNS`), and
+  `_campaign_shot.gd` asserts 1 a year FALLS SHORT with parking.

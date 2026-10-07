@@ -1862,6 +1862,13 @@ impl Mission {
             parking.set("engine", p.engine.name);
             parking.set("isp_s", p.engine.isp_s);
             parking.set("storable", p.engine.storable);
+            parking.set("altitude_km", p.parking_altitude_m / 1e3);
+            // 0 for an idealised all-at-once escape burn.
+            let firings = match p.escape {
+                asteroid_core::orbital_assembly::EscapeBurn::Finite { firings, .. } => firings,
+                asteroid_core::orbital_assembly::EscapeBurn::Impulsive => 0,
+            };
+            parking.set("escape_firings", firings as i64);
         }
         d.set("parking", &parking);
         // The labelled alternatives, at this rate: arithmetic on the same flown

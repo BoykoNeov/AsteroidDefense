@@ -58,7 +58,9 @@ use asteroid_core::mission::{
     cell_delivery, impact_impulse, porkchop_grid, required_impactor_mass, verify_cell,
     CellDelivery, MassSolveOutcome, Porkchop, PorkchopCell, TransferMetrics,
 };
-use asteroid_core::orbital_assembly::{parked_delivery_for, ParkedDelivery};
+use asteroid_core::orbital_assembly::{
+    parked_delivery_for, parking_plane_reaches, ParkedDelivery,
+};
 use asteroid_core::scenario::{
     DeflectedArc, EncounterFrame, ImpactorConfig, RealFieldScenario, ScenarioError, SrpParams,
     Tier2Config, ENCOUNTER_HALF_WINDOW_SECONDS, ENCOUNTER_SAMPLES, SAFE_PERIGEE_TARGET_M,
@@ -3447,6 +3449,10 @@ pub struct CampaignCandidate {
     /// window holds a *different* transfer: re-reading it from there would aim the
     /// push somewhere this window does not.
     pub v_rel_vec: Vector3<f64>,
+    /// The departure's hyperbolic excess velocity, m/s, ICRF - its angle off the
+    /// equator is the asymptote's declination, which a parking orbit (or a direct
+    /// launch's ascent) has to reach.
+    pub v_inf_departure: Vector3<f64>,
     /// What one launch of the chosen vehicle delivers through this window, kg.
     pub payload_kg: f64,
     /// The part of `payload_kg` that hits the rock, kg — the mass the flight used.
@@ -3562,7 +3568,9 @@ impl CampaignCandidates {
     /// claim every campaign count already rests on and [`fly_campaign_plan`]
     /// measures.
     ///
-    /// Parked launches leave only through **flown** windows. A date the direct
+    /// Parked launches leave only through **flown** windows, and only through those
+    /// whose departure asymptote a parking orbit tilted 28.5 deg can contain
+    /// ([`parking_plane_reaches`]). A date the direct
     /// ranking never chose - a higher-`C3` window, where parking loses less mass
     /// than going direct - is not offered, so a parked count is for the windows
     /// flown, like every other count here.
@@ -3575,7 +3583,8 @@ impl CampaignCandidates {
             .candidates
             .iter()
             .map(|k| {
-                if k.impact_mass_kg > 0.0 {
+                // A parking orbit tilted 28.5 deg cannot contain a steeper asymptote.
+                if k.impact_mass_kg > 0.0 && parking_plane_reaches(k.v_inf_departure) {
                     delivery.impact_mass_kg(k.c3_km2_s2) / k.impact_mass_kg
                 } else {
                     0.0
@@ -4220,6 +4229,7 @@ pub fn measure_campaign_candidates_from(
                 c3_km2_s2: m.c3_km2_s2,
                 revolutions: m.revolutions,
                 v_rel_vec: m.v_rel_vec,
+                v_inf_departure: m.v_inf_departure,
                 payload_kg: d.payload_kg,
                 impact_mass_kg: d.impact_mass_kg,
                 proxy_along_track_dv_ms: d.along_track_dv_ms,
@@ -4370,12 +4380,20 @@ pub fn measure_campaign_candidates_from(
     // Only for a launcher with a sourced parked stack (`parked_delivery_for`) - for
     // the rest there is nothing to rank by and nothing to park.
     let parking = parked_delivery_for(vehicle);
-    let parked_ratio = |c3: f64, impact_kg: f64| match parking {
-        Some(p) if impact_kg > 0.0 => p.impact_mass_kg(c3) / impact_kg,
+    let parked_ratio = |c3: f64, impact_kg: f64, v_inf: Vector3<f64>| match parking {
+        Some(p) if impact_kg > 0.0 && parking_plane_reaches(v_inf) => {
+            p.impact_mass_kg(c3) / impact_kg
+        }
         _ => 0.0,
     };
-    let parked_key_pool =
-        |w: &FoundWindow| key(w) * parked_ratio(w.metrics.c3_km2_s2, w.delivery.impact_mass_kg);
+    let parked_key_pool = |w: &FoundWindow| {
+        key(w)
+            * parked_ratio(
+                w.metrics.c3_km2_s2,
+                w.delivery.impact_mass_kg,
+                w.metrics.v_inf_departure,
+            )
+    };
     let mut parked_best: std::collections::BTreeMap<(u32, bool), (f64, usize)> =
         std::collections::BTreeMap::new();
     for (i, w) in pool.iter().enumerate().filter(|_| parking.is_some()) {
@@ -4395,7 +4413,7 @@ pub fn measure_campaign_candidates_from(
                 c.period == *period
                     && (c.proxy_along_track_dv_ms > 0.0) == *prograde
                     && campaign_proxy(c.proxy_along_track_dv_ms, impact_tdb - c.arrival_tdb)
-                        * parked_ratio(c.c3_km2_s2, c.impact_mass_kg)
+                        * parked_ratio(c.c3_km2_s2, c.impact_mass_kg, c.v_inf_departure)
                         >= *k
             })
         })
@@ -5783,6 +5801,11 @@ mod tests {
         }
     }
 
+    /// The angle of `v` off Earth's equator (ICRF), degrees.
+    fn declination_deg(v: Vector3<f64>) -> f64 {
+        (v.z / v.norm()).asin().to_degrees()
+    }
+
     /// Probe, run by hand (`--ignored --nocapture`): orbital assembly. Every launch
     /// may go up to a parking orbit and leave on a later date with its own departure
     /// stage (the shipping parked delivery: the published single-payload limit, a
@@ -5907,6 +5930,60 @@ mod tests {
                 .collect();
             println!("{rate:2}/yr: {}", row.join(" | "));
         }
+        // The departure asymptote's declination over every flown window: a parking
+        // orbit launched due east from the Cape is tilted 28.5 deg and can only
+        // contain asymptotes within 28.5 deg of the equator (the same holds for a
+        // direct launch's ascent).
+        let direct: Vec<&CampaignCandidate> =
+            c.candidates.iter().filter(|k| !k.parked).collect();
+        let steep = direct
+            .iter()
+            .filter(|k| declination_deg(k.v_inf_departure).abs() > 28.5)
+            .count();
+        let worst = direct
+            .iter()
+            .map(|k| declination_deg(k.v_inf_departure).abs())
+            .fold(0.0_f64, f64::max);
+        println!(
+            "departure declination: {steep} of {} flown windows beyond 28.5 deg (steepest {worst:.1} deg)",
+            direct.len()
+        );
+        // The bracket: the shipping stack and engine with every escape setting,
+        // replanned on the same measurement (whose extra parked-key windows were
+        // chosen at the shipping setting).
+        if std::env::var("ASSEMBLY_BRACKET").is_ok() && c.parked_delivery.is_some() {
+            use asteroid_core::orbital_assembly::{EscapeBurn, SHIPPING_PARKED_DELIVERY};
+            println!("bracket (1/yr | 2/yr | rates 3..12 all 6?), stack 26.5 t OMS-E:");
+            for alt_km in [185.0, 400.0] {
+                let escapes = std::iter::once(EscapeBurn::Impulsive).chain(
+                    [1.0e8, 2.0e8, 4.0e8].into_iter().flat_map(|cap| {
+                        [3, 4, 5, 6, 8, 10].into_iter().map(move |n| EscapeBurn::Finite {
+                            firings: n,
+                            apogee_cap_m: cap,
+                        })
+                    }),
+                );
+                for escape in escapes {
+                    let d = asteroid_core::orbital_assembly::ParkedDelivery {
+                        parking_altitude_m: alt_km * 1e3,
+                        escape,
+                        ..SHIPPING_PARKED_DELIVERY
+                    };
+                    let v = c.with_parking(&d).expect("parking");
+                    let rest_six = (3..=CAMPAIGN_MAX_RATE).all(|r| {
+                        matches!(v.plan(r).unwrap(), CampaignOutcome::Planned(p) if p.total_launches == 6)
+                    });
+                    println!(
+                        "  {alt_km:3.0} km {:<40} loss@C3 43 {:6.1} m/s | {} | {} | {}",
+                        format!("{escape:?}"),
+                        d.escape_loss_m_s(43.0).unwrap_or(f64::NAN),
+                        describe(v.plan(1).unwrap(), v.target_b_m),
+                        describe(v.plan(2).unwrap(), v.target_b_m),
+                        if rest_six { "yes" } else { "NO" }
+                    );
+                }
+            }
+        }
         for rate in std::env::var("ASSEMBLY_FLY_RATES")
             .unwrap_or_else(|_| "1,2".into())
             .split(',')
@@ -5933,15 +6010,20 @@ mod tests {
                 .collect();
             used.sort_by(|a, b| a.0.launch_tdb.total_cmp(&b.0.launch_tdb));
             for (k, n) in &used {
+                assert!(
+                    !k.parked || parking_plane_reaches(k.v_inf_departure),
+                    "a parked launch leaves on an asymptote steeper than its orbit's tilt"
+                );
                 let wait = k.departure_tdb - k.launch_tdb;
                 wait_max = wait_max.max(wait);
                 println!(
-                    "  {n}x {} launch {:.3} yr before impact, leaves {:.3} (waits {:4.0} d), C3 {:5.1}, {:6.0} kg at impact, shift {:7.1} km{}",
+                    "  {n}x {} launch {:.3} yr before impact, leaves {:.3} (waits {:4.0} d), C3 {:5.1}, DLA {:+5.1} deg, {:6.0} kg at impact, shift {:7.1} km{}",
                     if k.parked { "PARKED" } else { "direct" },
                     (impact - k.launch_tdb) / yr,
                     (impact - k.departure_tdb) / yr,
                     wait / 86_400.0,
                     k.c3_km2_s2,
+                    declination_deg(k.v_inf_departure),
                     k.impact_mass_kg,
                     Vector2::new(k.shift_per_launch_m.0, k.shift_per_launch_m.1).norm() / 1e3,
                     if k.proxy_along_track_dv_ms > 0.0 { "  pro" } else { "  retro" }

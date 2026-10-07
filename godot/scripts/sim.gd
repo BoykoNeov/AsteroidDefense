@@ -2268,8 +2268,13 @@ func campaign_parking_label() -> String:
 	for w: Dictionary in c.windows:
 		if int(w.launches) > 0 and bool(w.get("parked", false)):
 			wait_d = maxf(wait_d, (float(w.departure_tdb) - float(w.launch_tdb)) / DAY_S)
-	var s := "nP = PARKED IN ORBIT: %.1f T STACK, %s %d S" % [
-		float(p.stack_kg) / 1000.0, str(p.engine).to_upper(), int(round(float(p.isp_s)))]
+	var s := "nP = PARKED AT %d KM: %.1f T STACK, %s %d S" % [
+		int(round(float(p.get("altitude_km", 0.0)))), float(p.stack_kg) / 1000.0,
+		str(p.engine).to_upper(), int(round(float(p.isp_s)))]
+	# The escape burn is flown in this many firings (0 = an idealised single impulse).
+	var firings := int(p.get("escape_firings", 0))
+	if firings > 0:
+		s += " IN %d BURNS" % firings
 	if wait_d > 0.0:
 		s += "  LONGEST WAIT %d D" % int(round(wait_d))
 	return s

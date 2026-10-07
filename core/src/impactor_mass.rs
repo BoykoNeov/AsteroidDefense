@@ -96,7 +96,7 @@ pub const DART_HYDRAZINE_DV99_M_S: f64 = 55.2;
 pub const MR103G_ISP_RANGE_S: (f64, f64) = (202.0, 224.0);
 
 /// Standard gravity, m/s² (the definition the specific impulse is quoted against).
-const G0_M_S2: f64 = 9.806_65;
+pub const G0_M_S2: f64 = 9.806_65;
 
 /// The mass that hits the rock when a launcher delivers `separated_kg` of
 /// spacecraft, kg. `0` stays `0`: a launcher that cannot reach a `C3` delivers no

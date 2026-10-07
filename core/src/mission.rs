@@ -87,6 +87,11 @@ pub struct TransferMetrics {
     /// the difference is frame-invariant). This is the **impact direction**: the
     /// on-demand verify imparts the impulse along this vector.
     pub v_rel_vec: Vector3<f64>,
+    /// The departure's hyperbolic excess velocity `v1 − v⊕`, m/s, **ICRF** (Earth's
+    /// mean equator of J2000): `|v_inf_departure|² = C3`, and its angle off the
+    /// equator is the departure asymptote's declination — which a parking orbit's
+    /// plane must contain ([`crate::orbital_assembly`]).
+    pub v_inf_departure: Vector3<f64>,
     /// How many complete laps of the Sun this transfer makes before arrival.
     ///
     /// `0` is the direct arc. Anything higher is a genuine multi-revolution
@@ -269,6 +274,7 @@ pub fn transfer_metrics_for_revolutions(
         arrival_v_rel_ms,
         along_track_proj_ms,
         v_rel_vec,
+        v_inf_departure,
     }))
 }
 
@@ -988,6 +994,7 @@ mod tests {
             arrival_v_rel_ms: 6000.0,
             along_track_proj_ms: 4000.0,
             v_rel_vec: Vector3::new(4000.0, 3000.0, 1000.0),
+            v_inf_departure: Vector3::zeros(),
         };
         let m_ast = 2.0e10;
         let beta = 3.6;
@@ -1012,6 +1019,7 @@ mod tests {
             arrival_v_rel_ms: 5000.0,
             along_track_proj_ms: 3000.0,
             v_rel_vec: Vector3::new(3000.0, 0.0, 0.0),
+            v_inf_departure: Vector3::zeros(),
         };
         let d = cell_delivery(&metrics, &ATLAS_V_551, 3.6, 2.0e10);
         assert!(!d.feasible);
@@ -1109,6 +1117,7 @@ mod tests {
             arrival_v_rel_ms: 5000.0,
             along_track_proj_ms: 0.0,
             v_rel_vec: Vector3::new(0.0, 5000.0, 0.0),
+            v_inf_departure: Vector3::zeros(),
         };
         let m_ast = 2.0e10;
         let beta = 3.6;

@@ -50,10 +50,20 @@
 //! standing system with its launcher arranged in advance, not a spacecraft on a
 //! shelf. That is what [`IN_STORAGE`] means here.
 //!
+//! # A stock is limited: the rest are built
+//! A level's `preparation_s` is when the *first* launch can go. A stored stock is
+//! also a *number* of interceptors: "the availability of at least two interceptors
+//! and two observer spacecraft" (Nuth, Barbee & Leung 2018, Summary) - and "the
+//! interceptor would be designed to carry a nuclear device", so the two are a
+//! nuclear-capable stock standing in for kinetic impactors here. [`IN_STORAGE`]
+//! therefore carries `rest_preparation_s`: every launch past the stock waits for the
+//! build-from-scratch delay. [`SOURCED_STOCK_SIZE`] is the paper's two; the campaign
+//! layer takes the size as a dial and plans with it ([`crate::campaign::Stock`]).
+//!
 //! # What this leaves to the caller
-//! Only *when the first launch can go*. How many launches a year can follow is the
-//! campaign's own cap ([`crate::campaign`]), unchanged: a stored stock that could fly
-//! faster than the yearly rate is a separate question this module does not answer.
+//! *When* launches can go. How many a year can follow is the campaign's own cap
+//! ([`crate::campaign`]); whether the stock counts against it is the caller's
+//! [`crate::campaign::StockMode`].
 //! And a launch can only go where the launch map has dates: on the shipping rock the
 //! map starts twelve years before impact, so a warning longer than twelve years plus
 //! the delay buys nothing more here — not because it is worthless, but because the
@@ -76,6 +86,10 @@ pub const STORED_PREPARATION_S: f64 = YEAR_S;
 /// DART, Phase B approval (2017-06-23) to launch (2021-11-24), s.
 pub const DART_APPROVAL_TO_LAUNCH_S: f64 = 1_615.0 * 86_400.0;
 
+/// The stored stock the source recommends: "at least two interceptors" (Nuth,
+/// Barbee & Leung 2018, Summary) - nuclear-capable ones.
+pub const SOURCED_STOCK_SIZE: u32 = 2;
+
 /// How ready a defence is when a rock is found: the time to decide, and the time
 /// from the go-ahead to the first launch.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -86,6 +100,9 @@ pub struct Readiness {
     pub decision_s: f64,
     /// Go-ahead to the first launch, s.
     pub preparation_s: f64,
+    /// Go-ahead to the first launch *past a limited stock*, s - `None` where every
+    /// launch is ready at `preparation_s` (no stock to run out of).
+    pub rest_preparation_s: Option<f64>,
 }
 
 impl Readiness {
@@ -98,6 +115,13 @@ impl Readiness {
     /// before `impact_tdb`.
     pub fn first_launch_tdb(&self, impact_tdb: f64, warning_s: f64) -> f64 {
         impact_tdb - warning_s + self.delay_s()
+    }
+
+    /// The first date a launch past a limited stock can go, TDB s - `None` where
+    /// there is no stock to run out of.
+    pub fn build_from_tdb(&self, impact_tdb: f64, warning_s: f64) -> Option<f64> {
+        self.rest_preparation_s
+            .map(|rest| impact_tdb - warning_s + self.decision_s + rest)
     }
 
     /// The warning, s, at which the first launch can go at `first_launch_tdb` — the
@@ -115,14 +139,17 @@ pub const ON_THE_PAD: Readiness = Readiness {
     name: "ON THE PAD",
     decision_s: 0.0,
     preparation_s: 0.0,
+    rest_preparation_s: None,
 };
 
-/// A standing defence: an interceptor built in advance and stored, its launcher
-/// arranged, flying a year after the go-ahead.
+/// A standing defence: interceptors built in advance and stored, their launchers
+/// arranged, flying a year after the go-ahead - and the launches past the stock
+/// built from scratch.
 pub const IN_STORAGE: Readiness = Readiness {
     name: "IN STORAGE",
     decision_s: PDC23_DECISION_S,
     preparation_s: STORED_PREPARATION_S,
+    rest_preparation_s: Some(BUILD_RANGE_S.1),
 };
 
 /// No standing defence: the interceptor is designed and built after the go-ahead.
@@ -131,6 +158,7 @@ pub const FROM_SCRATCH: Readiness = Readiness {
     name: "FROM SCRATCH",
     decision_s: PDC23_DECISION_S,
     preparation_s: BUILD_RANGE_S.1,
+    rest_preparation_s: None,
 };
 
 /// Every level a readout offers, the shipping one last.
@@ -182,6 +210,20 @@ mod tests {
         // From scratch: 172 d to decide + 5 yr to build = 5.47 yr.
         assert!((FROM_SCRATCH.delay_s() / YEAR_S - 5.471).abs() < 1e-3);
         assert!((IN_STORAGE.delay_s() / YEAR_S - 1.471).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_stock_runs_out_into_the_build_from_scratch_date() {
+        let impact = 1.25e9;
+        let w = 12.0 * YEAR_S;
+        assert_eq!(
+            IN_STORAGE.build_from_tdb(impact, w),
+            Some(FROM_SCRATCH.first_launch_tdb(impact, w))
+        );
+        assert!(IN_STORAGE.first_launch_tdb(impact, w) < FROM_SCRATCH.first_launch_tdb(impact, w));
+        assert_eq!(ON_THE_PAD.build_from_tdb(impact, w), None);
+        assert_eq!(FROM_SCRATCH.build_from_tdb(impact, w), None);
+        assert_eq!(SOURCED_STOCK_SIZE, 2);
     }
 
     #[test]

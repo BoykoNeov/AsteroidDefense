@@ -46,7 +46,8 @@ use nalgebra::{Matrix2, Vector2, Vector3};
 
 use asteroid_core::campaign::{
     best_ahead, campaign_impulses, parked_launch_dates, parked_launches, parked_window,
-    plan_campaign, plan_campaign_rolling, CampaignOutcome, CampaignPlan, CampaignWindow,
+    plan_campaign, plan_campaign_rolling, plan_campaign_stocked, CampaignOutcome, CampaignPlan,
+    CampaignWindow, Stock,
 };
 use asteroid_core::deflection::DeflectionError;
 use asteroid_core::ephemeris::Ephemeris;
@@ -3512,6 +3513,37 @@ pub struct CampaignCandidates {
     /// How parked launches are flown, or `None` for straight-to-the-rock only. The
     /// parked entries come after every direct one in `candidates`.
     pub parked_delivery: Option<ParkedDelivery>,
+    /// A limited stock the plans respect ([`plan_campaign_stocked`]), or `None` when
+    /// every launch from the first date on is ready. Part of the measurement: the
+    /// windows flown were chosen for plans under it.
+    pub stock: Option<Stock>,
+}
+
+/// The rolling-cap planner, or the stocked one when there is a stock.
+fn plan_under(
+    nominal_b: Vector2<f64>,
+    target_b: f64,
+    windows: &[CampaignWindow],
+    max_launches: u32,
+    stock: Option<&Stock>,
+) -> Result<CampaignOutcome, asteroid_core::campaign::CampaignError> {
+    match stock {
+        Some(s) => plan_campaign_stocked(
+            nominal_b,
+            target_b,
+            windows,
+            max_launches,
+            CAMPAIGN_PERIOD_S,
+            s,
+        ),
+        None => plan_campaign_rolling(
+            nominal_b,
+            target_b,
+            windows,
+            max_launches,
+            CAMPAIGN_PERIOD_S,
+        ),
+    }
 }
 
 impl CampaignCandidates {
@@ -3519,12 +3551,12 @@ impl CampaignCandidates {
     /// rule, free (no propagation): every window it can choose was flown for every
     /// rate up to [`CAMPAIGN_MAX_RATE`] when the candidates were measured.
     pub fn plan(&self, max_launches: u32) -> Result<CampaignOutcome, ScenarioError> {
-        plan_campaign_rolling(
+        plan_under(
             Vector2::new(self.nominal_b_m.0, self.nominal_b_m.1),
             self.target_b_m,
             &self.windows,
             max_launches,
-            CAMPAIGN_PERIOD_S,
+            self.stock.as_ref(),
         )
         .map_err(|e| ScenarioError::Integration(format!("launch campaign: planner: {e}")))
     }
@@ -3600,10 +3632,13 @@ impl CampaignCandidates {
                 }
             })
             .collect();
+        // Under a limited stock a chain can also start on the build date.
+        let also: Vec<Epoch> = self.stock.iter().map(|s| s.build_from).collect();
         let choices = parked_launches(
             &out.windows,
             &scale,
             Epoch::from_tdb_seconds_past_j2000(self.launch_span_tdb.0),
+            &also,
             Epoch::from_tdb_seconds_past_j2000(self.launch_span_tdb.1),
             CAMPAIGN_PERIOD_S,
         )
@@ -4156,6 +4191,7 @@ pub fn measure_campaign_candidates(
     vehicle: &LaunchVehicle,
     period_origin_tdb: f64,
     earliest_launch_tdb: Option<f64>,
+    stock: Option<Stock>,
 ) -> Result<CampaignCandidates, ScenarioError> {
     measure_campaign_candidates_from(
         scenario,
@@ -4163,6 +4199,7 @@ pub fn measure_campaign_candidates(
         vehicle,
         period_origin_tdb,
         earliest_launch_tdb,
+        stock,
         WindowSource::Continuous(SHIPPING_WINDOW_SEARCH),
         &asteroid_core::orbital_assembly::WHAT_IF_PARKED_DELIVERIES,
     )
@@ -4199,16 +4236,23 @@ pub fn measure_campaign_candidates(
 /// under. Pass the same date as `period_origin_tdb` so the first year is a whole
 /// one; the rolling cap does not use the years, but the search ranks within them.
 ///
+/// `stock`: a limited stock every plan must respect ([`plan_campaign_stocked`]) -
+/// planned *inside* the measurement, so the windows flown are the ones plans under
+/// it need, not ones chosen for an unlimited stock. `None`: every launch from the
+/// first date on is ready.
+///
 /// `view` is the map the windows are reported against: a continuous window's
 /// `launch_index` / `arrival_index` is the **nearest** cell of it, which the map
 /// uses to say which cell the selection is on — never to place the window, which
 /// sits at its own dates, generally between cells.
+#[allow(clippy::too_many_arguments)]
 pub fn measure_campaign_candidates_from(
     scenario: &RealFieldScenario,
     view: &PorkchopView,
     vehicle: &LaunchVehicle,
     period_origin_tdb: f64,
     earliest_launch_tdb: Option<f64>,
+    stock: Option<Stock>,
     source: WindowSource,
     parked_also: &[ParkedDelivery],
 ) -> Result<CampaignCandidates, ScenarioError> {
@@ -4464,14 +4508,8 @@ pub fn measure_campaign_candidates_from(
                             slot.push(Err(i));
                         }
                     }
-                    let plan = match plan_campaign_rolling(
-                        nominal_b,
-                        target_b,
-                        &all,
-                        rate,
-                        CAMPAIGN_PERIOD_S,
-                    )
-                    .map_err(|e| fail("rolling planner", &e))?
+                    let plan = match plan_under(nominal_b, target_b, &all, rate, stock.as_ref())
+                        .map_err(|e| fail("rolling planner", &e))?
                     {
                         CampaignOutcome::Planned(p) | CampaignOutcome::Unreachable(p) => p,
                         CampaignOutcome::AlreadyClear => break,
@@ -4549,7 +4587,11 @@ pub fn measure_campaign_candidates_from(
     // repeat until one flies nothing.
     while !measured.is_empty() {
         let bases: Vec<f64> = candidates.iter().map(|c| c.launch_tdb).collect();
-        let launch_dates = parked_launch_dates(&bases, span.0, span.1, CAMPAIGN_PERIOD_S);
+        let also: Vec<f64> = stock
+            .iter()
+            .map(|s| s.build_from.tdb_seconds_past_j2000())
+            .collect();
+        let launch_dates = parked_launch_dates(&bases, span.0, &also, span.1, CAMPAIGN_PERIOD_S);
         let mut fly_pool: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         for d in &measured {
             let ratio = |c3: f64, impact_kg: f64, v_inf: Vector3<f64>| {
@@ -4620,6 +4662,7 @@ pub fn measure_campaign_candidates_from(
         windows,
         launch_span_tdb: span,
         parked_delivery: None,
+        stock,
     };
     match parking {
         Some(p) => direct.with_parking(&p),
@@ -4737,7 +4780,7 @@ pub fn plan_launch_campaign(
     let origin = view.launch_tdb().first().copied().ok_or_else(|| {
         ScenarioError::Integration("launch campaign: the grid has no launch dates".into())
     })?;
-    let cands = measure_campaign_candidates(scenario, view, vehicle, origin, None)?;
+    let cands = measure_campaign_candidates(scenario, view, vehicle, origin, None, None)?;
     let outcome = cands.plan(max_launches_per_year)?;
     let flight = match &outcome {
         CampaignOutcome::Planned(plan) => Some(fly_campaign_plan(
@@ -5041,11 +5084,12 @@ mod tests {
                         let spacing = (view.launch_tdb()[1] - view.launch_tdb()[0]) / 86_400.0;
                         let origin = view.launch_tdb()[0] - months * CAMPAIGN_PERIOD_S / 12.0;
                         let t0 = Instant::now();
-                        let c = measure_campaign_candidates(&scenario, &view, v, origin, None)
-                            .expect("candidates")
-                            // These probes measure the straight-to-the-rock windows; parking is
-                            // `probe_orbital_assembly`'s.
-                            .direct_only();
+                        let c =
+                            measure_campaign_candidates(&scenario, &view, v, origin, None, None)
+                                .expect("candidates")
+                                // These probes measure the straight-to-the-rock windows; parking is
+                                // `probe_orbital_assembly`'s.
+                                .direct_only();
                         (label.clone(), c, spacing, t0.elapsed().as_secs_f64())
                     })
                 })
@@ -5159,6 +5203,7 @@ mod tests {
                             &view,
                             v,
                             view.launch_tdb()[0],
+                            None,
                             None,
                         )
                         .expect("candidates")
@@ -5617,6 +5662,7 @@ mod tests {
                                 v,
                                 origin,
                                 None,
+                                None,
                                 WindowSource::Continuous(*s),
                                 &[],
                             ),
@@ -5627,6 +5673,7 @@ mod tests {
                                     &view,
                                     v,
                                     origin,
+                                    None,
                                     None,
                                     WindowSource::GridCells,
                                     &[],
@@ -5850,6 +5897,7 @@ mod tests {
             &view,
             &FALCON_HEAVY_EXPENDABLE,
             view.launch_tdb()[0],
+            None,
             None,
             WindowSource::Continuous(search),
             &[],
@@ -6088,6 +6136,7 @@ mod tests {
                 vehicle,
                 first,
                 Some(first),
+                None,
                 WindowSource::Continuous(search),
                 &asteroid_core::orbital_assembly::WHAT_IF_PARKED_DELIVERIES,
             )
@@ -6192,6 +6241,7 @@ first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown,
                     vehicle,
                     map_first,
                     None,
+                    None,
                     WindowSource::Continuous(search),
                     &asteroid_core::orbital_assembly::WHAT_IF_PARKED_DELIVERIES,
                 )
@@ -6210,6 +6260,163 @@ first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown,
                         "  flown at {rate}/yr: {} launches, {:?}, nonlinearity {:?}",
                         p.total_launches, fl.flown, fl.nonlinearity
                     );
+                }
+            }
+        }
+    }
+
+    /// Probe, run by hand (`--ignored --nocapture`): standing defence with a limited
+    /// stock. IN STORAGE, found `STANDING_WARNING_YR` years out (default 12,9): the
+    /// first `size` launches may go from the storage date, the rest from the
+    /// build-from-scratch date, for each size in `STANDING_STOCK` (default
+    /// 0,1,2,3,4,6,all) and each mode in `STANDING_MODES` (counted,outside). Each is
+    /// its own measurement - the stock is planned inside it. `all` is a stock no plan
+    /// can exhaust (the rolling planner, exactly). Prints counts per rate, how many
+    /// launches came from the stock, and flies the 2- and 6-a-year plans whole.
+    #[test]
+    #[ignore]
+    fn probe_standing_stock() {
+        if !have_kernels() {
+            return;
+        }
+        use asteroid_core::campaign::StockMode;
+        use asteroid_core::launch_vehicle::FALCON_HEAVY_EXPENDABLE;
+        use asteroid_core::readiness::{FROM_SCRATCH, IN_STORAGE};
+        let vehicle = &FALCON_HEAVY_EXPENDABLE;
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+        let impact = mc.impact_tdb_seconds();
+        let yr = asteroid_core::readiness::YEAR_S;
+        let view = PorkchopView::build(&scenario, 120, 120).expect("grid");
+        let map_first = view.launch_tdb()[0];
+        let list = |key: &str, default: &str| -> Vec<String> {
+            std::env::var(key)
+                .unwrap_or_else(|_| default.into())
+                .split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        let warnings: Vec<f64> = list("STANDING_WARNING_YR", "12,9")
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let sizes: Vec<u32> = list("STANDING_STOCK", "0,1,2,3,4,6,all")
+            .iter()
+            .filter_map(|s| {
+                if s == "all" {
+                    Some(u32::MAX)
+                } else {
+                    s.parse().ok()
+                }
+            })
+            .collect();
+        let modes: Vec<StockMode> = list("STANDING_MODES", "counted,outside")
+            .iter()
+            .filter_map(|s| match s.as_str() {
+                "counted" => Some(StockMode::Counted),
+                "outside" => Some(StockMode::OutsideCap),
+                _ => None,
+            })
+            .collect();
+        let rates = [1u32, 2, 3, 4, 6, 12];
+        let describe = |o: &CampaignOutcome, target: f64| -> String {
+            match o {
+                CampaignOutcome::Planned(p) => format!("{:2}", p.total_launches),
+                CampaignOutcome::Unreachable(p) => format!(
+                    "short {:.0}/{:.0} ({})",
+                    p.predicted_impact_parameter() / 1e3,
+                    target / 1e3,
+                    p.total_launches
+                ),
+                CampaignOutcome::AlreadyClear => "clear".into(),
+            }
+        };
+        for warning_yr in warnings {
+            let w = warning_yr * yr;
+            let first = IN_STORAGE.first_launch_tdb(impact, w).max(map_first);
+            let build = IN_STORAGE
+                .build_from_tdb(impact, w)
+                .expect("IN STORAGE has a stock")
+                .max(first);
+            println!(
+                "\nfound {warning_yr} yr out: stock from {:.2} yr, the rest from {:.2} yr before impact (FROM SCRATCH's first launch: {:.2})",
+                (impact - first) / yr,
+                (impact - build) / yr,
+                (impact - FROM_SCRATCH.first_launch_tdb(impact, w)) / yr
+            );
+            for &mode in &modes {
+                for &size in &sizes {
+                    if mode == StockMode::OutsideCap && size == u32::MAX {
+                        continue; // every launch through one window on one day: not a plan
+                    }
+                    let stock = Stock {
+                        size,
+                        build_from: Epoch::from_tdb_seconds_past_j2000(build),
+                        mode,
+                    };
+                    let t0 = std::time::Instant::now();
+                    let c = measure_campaign_candidates(
+                        &scenario,
+                        &view,
+                        vehicle,
+                        first,
+                        Some(first),
+                        Some(stock),
+                    )
+                    .expect("candidates");
+                    let label = if size == u32::MAX {
+                        "all".to_string()
+                    } else {
+                        size.to_string()
+                    };
+                    let row: Vec<String> = rates
+                        .iter()
+                        .map(|&rate| {
+                            let o = c.plan(rate).expect("plan");
+                            let used = match &o {
+                                CampaignOutcome::Planned(p) | CampaignOutcome::Unreachable(p) => c
+                                    .candidates
+                                    .iter()
+                                    .zip(&p.launches)
+                                    .filter(|(k, _)| k.launch_tdb < build)
+                                    .map(|(_, &n)| n)
+                                    .sum::<u32>(),
+                                CampaignOutcome::AlreadyClear => 0,
+                            };
+                            format!("{rate}/yr {} [{used} stocked]", describe(&o, c.target_b_m))
+                        })
+                        .collect();
+                    println!(
+                        "  {mode:?} stock {label:>3} ({} windows, {:.0} s): {}",
+                        c.candidates.iter().filter(|k| !k.parked).count(),
+                        t0.elapsed().as_secs_f64(),
+                        row.join(" | ")
+                    );
+                    for rate in [2u32, 6] {
+                        if let CampaignOutcome::Planned(p) = c.plan(rate).expect("plan") {
+                            let fl = fly_campaign_plan(&scenario, &c, &p, 7, PLACEMENT_BAND_A_KM)
+                                .expect("flight");
+                            let perigee = match fl.flown {
+                                CellVerdict::Encounter {
+                                    perigee_m, is_hit, ..
+                                } => {
+                                    format!(
+                                        "perigee {:.0} km{}",
+                                        perigee_m / 1e3,
+                                        if is_hit { " HIT" } else { "" }
+                                    )
+                                }
+                                other => format!("{other:?}"),
+                            };
+                            println!(
+                                "      flown at {rate}/yr: {} launches, {perigee}",
+                                p.total_launches
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -6277,6 +6484,7 @@ first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown,
             &view,
             vehicle,
             view.launch_tdb()[0],
+            None,
             None,
             WindowSource::Continuous(search),
             &also,

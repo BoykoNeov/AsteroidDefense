@@ -502,6 +502,439 @@ fn chains_along(
     (furthest, false)
 }
 
+// --- A limited stock ---------------------------------------------------------
+
+/// How a limited stock of ready interceptors sits beside the yearly cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StockMode {
+    /// Stocked launches count against the same "N in any 12 months" as every other
+    /// launch: the stock only changes *when* the first ones can go. The shipping mode.
+    Counted,
+    /// Stocked launches fly outside the cap. Since the cap already allows several
+    /// launches on one date, with no cap of their own they all go through the single
+    /// best window on or after the stock's date, on one day - an optimistic what-if
+    /// (it assumes as many pads as stocked rockets), not a surge rate anyone sourced.
+    OutsideCap,
+}
+
+/// A limited stock: `size` interceptors ready from the windows' own first date, and
+/// every other launch no earlier than `build_from` (the build-from-scratch date).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stock {
+    /// How many launches can go before `build_from`. `u32::MAX` is "every launch".
+    pub size: u32,
+    /// The first date a launch that is not from the stock can go.
+    pub build_from: Epoch,
+    /// Counted against the cap, or outside it.
+    pub mode: StockMode,
+}
+
+/// [`plan_campaign_rolling`] with a limited stock: launches dated before
+/// `stock.build_from` must come from the stock, and at most `stock.size` of them
+/// can ([`StockMode::Counted`]); or the stock flies outside the cap, all through
+/// the best window ([`StockMode::OutsideCap`]). Windows are offered as they are -
+/// the caller has already cut them at the stock's own first date.
+///
+/// # Exact, by the same chains
+/// Counted, the rolling cap still splits the launches into `cap` chains a period
+/// apart ([`plan_campaign_rolling`]); the stock adds one number per chain - how many
+/// of its launches are before `build_from` - and the chains' early launches must
+/// sum to at most `size`. Each chain's best value is tabulated by (launches, early
+/// launches), and the chains are combined over both. A stocked launch dated after
+/// `build_from` is indistinguishable from a built one, so "at most `size` early" is
+/// the whole constraint. With `size` large enough it is no constraint and the plan
+/// is [`plan_campaign_rolling`]'s; with `size` 0 it is that planner on the windows
+/// from `build_from` on (both pinned by tests, with a brute force where the stock
+/// binds).
+///
+/// Outside the cap, `k <= size` stocked launches through the best window (along the
+/// direction) are added to the best built-only plan of the remaining launches, and
+/// each total is checked with the arrangement that pushes furthest along it.
+pub fn plan_campaign_stocked(
+    nominal_b: Vector2<f64>,
+    target_b: f64,
+    windows: &[CampaignWindow],
+    max_launches: u32,
+    window_s: f64,
+    stock: &Stock,
+) -> Result<CampaignOutcome, CampaignError> {
+    validate(nominal_b, target_b, windows, max_launches)?;
+    if !(window_s.is_finite() && window_s > 0.0) {
+        return Err(CampaignError::InvalidInput(format!(
+            "the rolling window must be finite and > 0 s (got {window_s})"
+        )));
+    }
+    if nominal_b.norm() >= target_b {
+        return Ok(CampaignOutcome::AlreadyClear);
+    }
+    let build_from = stock.build_from.tdb_seconds_past_j2000();
+    // A stock no plan can exhaust is no constraint: the rolling planner, exactly.
+    // One chain holds at most one launch per period before `build_from`, so `cap`
+    // chains hold at most `cap` per period of the early span.
+    if stock.mode == StockMode::Counted {
+        let early: Vec<f64> = windows
+            .iter()
+            .map(|w| w.launch_epoch.tdb_seconds_past_j2000())
+            .filter(|&t| t < build_from)
+            .collect();
+        let slots = match (
+            early.iter().copied().reduce(f64::min),
+            early.iter().copied().reduce(f64::max),
+        ) {
+            (Some(lo), Some(hi)) => ((hi - lo) / window_s).floor() as u64 + 1,
+            _ => 0,
+        };
+        if u64::from(stock.size) >= u64::from(max_launches) * slots {
+            return plan_campaign_rolling(nominal_b, target_b, windows, max_launches, window_s);
+        }
+    }
+    Ok(best_over_directions(nominal_b, windows, |u| {
+        match stock.mode {
+            StockMode::Counted => stocked_chains_along(
+                nominal_b,
+                target_b,
+                windows,
+                max_launches,
+                window_s,
+                u,
+                build_from,
+                stock.size,
+            ),
+            StockMode::OutsideCap => outside_cap_along(
+                nominal_b,
+                target_b,
+                windows,
+                max_launches,
+                window_s,
+                u,
+                stock,
+            ),
+        }
+    }))
+}
+
+/// Per-chain tables and their combination across `cap` chains: the best value
+/// along `u` of any arrangement of `l` launches with `e` of them before
+/// `build_from`, under the rolling cap. `stock` bounds the early launches in total.
+struct StockedChains {
+    /// Useful windows (indices into the caller's slice), in date order.
+    idx: Vec<usize>,
+    /// `from[m-1][e][k]`: the window an `m`-launch, `e`-early chain ending at `k`
+    /// steps back to.
+    from: Vec<Vec<Vec<Option<usize>>>>,
+    /// `prefix[m-1][e][k]`: (value, window) of the best such chain ending at or before `k`.
+    prefix: Vec<Vec<Vec<(f64, usize)>>>,
+    /// `early[k]`: window `k` (in date order) is before `build_from`.
+    early: Vec<bool>,
+    /// `split[c][l][e]`: best value of `c` chains with `l` launches, `e` early, and
+    /// the (launches, early) the last chain took.
+    split: Vec<Vec<Vec<(f64, usize, usize)>>>,
+    cap: usize,
+    e_max: usize,
+}
+
+impl StockedChains {
+    fn build(
+        windows: &[CampaignWindow],
+        cap: u32,
+        window_s: f64,
+        u: Vector2<f64>,
+        build_from: f64,
+        stock: u32,
+    ) -> Option<Self> {
+        let mut idx: Vec<usize> = (0..windows.len())
+            .filter(|&i| windows[i].shift_per_launch.dot(&u) > 0.0)
+            .collect();
+        let when = |i: usize| windows[i].launch_epoch.tdb_seconds_past_j2000();
+        idx.sort_by(|&a, &b| when(a).total_cmp(&when(b)));
+        let w = idx.len();
+        if w == 0 {
+            return None;
+        }
+        let t: Vec<f64> = idx.iter().map(|&i| when(i)).collect();
+        let v: Vec<f64> = idx
+            .iter()
+            .map(|&i| windows[i].shift_per_launch.dot(&u))
+            .collect();
+        let early: Vec<bool> = t.iter().map(|&tk| tk < build_from).collect();
+        let back: Vec<usize> = (0..w)
+            .map(|k| t.partition_point(|&tj| tj <= t[k] - window_s + ROLLING_SLACK_S))
+            .collect();
+        // One chain holds at most one launch per period, so at most this many early
+        // ones - which keeps the early dimension small even for an unbounded stock.
+        let early_slots = match (t.first(), early.iter().rposition(|&e| e)) {
+            (Some(&t0), Some(last)) => ((t[last] - t0) / window_s).floor() as usize + 1,
+            _ => 0,
+        };
+        let cap = cap as usize;
+        let e_chain = early_slots.min(stock as usize);
+        let e_max = (cap * early_slots).min(stock as usize);
+
+        let ninf = (f64::NEG_INFINITY, 0usize);
+        let prefix_of = |row: &[f64]| -> Vec<(f64, usize)> {
+            let mut acc = ninf;
+            row.iter()
+                .enumerate()
+                .map(|(k, &x)| {
+                    if x > acc.0 {
+                        acc = (x, k);
+                    }
+                    acc
+                })
+                .collect()
+        };
+        // m = 1.
+        let first: Vec<Vec<f64>> = (0..=e_chain)
+            .map(|e| {
+                (0..w)
+                    .map(|k| {
+                        if usize::from(early[k]) == e {
+                            v[k]
+                        } else {
+                            f64::NEG_INFINITY
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut from: Vec<Vec<Vec<Option<usize>>>> = vec![vec![vec![None; w]; e_chain + 1]];
+        let mut prefix: Vec<Vec<Vec<(f64, usize)>>> =
+            vec![first.iter().map(|r| prefix_of(r)).collect()];
+        loop {
+            let prev = prefix.last().expect("one row at least");
+            let mut rows = Vec::with_capacity(e_chain + 1);
+            let mut links = Vec::with_capacity(e_chain + 1);
+            let mut any = false;
+            for e in 0..=e_chain {
+                let (row, link): (Vec<f64>, Vec<Option<usize>>) = (0..w)
+                    .map(|k| {
+                        let ek = usize::from(early[k]);
+                        if back[k] == 0 || e < ek {
+                            return (f64::NEG_INFINITY, None);
+                        }
+                        let (val, j) = prev[e - ek][back[k] - 1];
+                        if val.is_finite() {
+                            (val + v[k], Some(j))
+                        } else {
+                            (f64::NEG_INFINITY, None)
+                        }
+                    })
+                    .unzip();
+                any |= row.iter().any(|x| x.is_finite());
+                rows.push(prefix_of(&row));
+                links.push(link);
+            }
+            if !any {
+                break;
+            }
+            prefix.push(rows);
+            from.push(links);
+        }
+        let longest = prefix.len();
+        let value = |m: usize, e: usize| -> f64 {
+            if m == 0 {
+                if e == 0 {
+                    0.0
+                } else {
+                    f64::NEG_INFINITY
+                }
+            } else if e > e_chain {
+                f64::NEG_INFINITY
+            } else {
+                prefix[m - 1][e][w - 1].0
+            }
+        };
+        let max_l = cap * longest;
+        let mut split =
+            vec![vec![vec![(f64::NEG_INFINITY, 0usize, 0usize); e_max + 1]; max_l + 1]; cap + 1];
+        split[0][0][0] = (0.0, 0, 0);
+        for c in 1..=cap {
+            for l in 0..=max_l {
+                for e_tot in 0..=e_max {
+                    for m in 0..=l.min(longest) {
+                        for e in 0..=e_tot.min(m).min(e_chain) {
+                            let rest = split[c - 1][l - m][e_tot - e].0;
+                            let here = value(m, e);
+                            if rest.is_finite()
+                                && here.is_finite()
+                                && rest + here > split[c][l][e_tot].0
+                            {
+                                split[c][l][e_tot] = (rest + here, m, e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Some(Self {
+            idx,
+            from,
+            prefix,
+            early,
+            split,
+            cap,
+            e_max,
+        })
+    }
+
+    /// The most launches any arrangement can hold.
+    fn max_launches(&self) -> usize {
+        self.split[self.cap].len() - 1
+    }
+
+    /// The best value of `l` launches and the early count it takes, if any arrangement fits.
+    fn best(&self, l: usize) -> Option<(f64, usize)> {
+        let row = self.split[self.cap].get(l)?;
+        let (e, &(val, _, _)) = row
+            .iter()
+            .enumerate()
+            .take(self.e_max + 1)
+            .max_by(|a, b| a.1 .0.total_cmp(&b.1 .0))?;
+        val.is_finite().then_some((val, e))
+    }
+
+    /// Launches per caller window for the best `l`-launch arrangement.
+    fn launches(&self, n_windows: usize, l: usize) -> Vec<u32> {
+        let mut launches = vec![0u32; n_windows];
+        let Some((_, mut e_tot)) = self.best(l) else {
+            return launches;
+        };
+        let mut l = l;
+        let w = self.idx.len();
+        for c in (1..=self.cap).rev() {
+            let (_, m, e) = self.split[c][l][e_tot];
+            if m > 0 {
+                let mut k = self.prefix[m - 1][e][w - 1].1;
+                let mut e_left = e;
+                launches[self.idx[k]] += 1;
+                for level in (1..m).rev() {
+                    let step = self.from[level][e_left][k]
+                        .expect("a chain of more than one launch steps back");
+                    e_left -= usize::from(self.early[k]);
+                    k = step;
+                    launches[self.idx[k]] += 1;
+                }
+            }
+            l -= m;
+            e_tot -= e;
+        }
+        launches
+    }
+}
+
+/// The plan for `launches`, with its predicted aim point.
+fn plan_of(
+    nominal_b: Vector2<f64>,
+    windows: &[CampaignWindow],
+    launches: Vec<u32>,
+) -> CampaignPlan {
+    let predicted_b = launches.iter().zip(windows).fold(nominal_b, |b, (&n, w)| {
+        b + f64::from(n) * w.shift_per_launch
+    });
+    CampaignPlan {
+        total_launches: launches.iter().sum(),
+        launches,
+        predicted_b,
+    }
+}
+
+/// [`plan_campaign_stocked`], counted, along one direction.
+#[allow(clippy::too_many_arguments)]
+fn stocked_chains_along(
+    nominal_b: Vector2<f64>,
+    target_b: f64,
+    windows: &[CampaignWindow],
+    cap: u32,
+    window_s: f64,
+    u: Vector2<f64>,
+    build_from: f64,
+    stock: u32,
+) -> (CampaignPlan, bool) {
+    let empty = plan_of(nominal_b, windows, vec![0; windows.len()]);
+    let Some(t) = StockedChains::build(windows, cap, window_s, u, build_from, stock) else {
+        return (empty, false);
+    };
+    let mut furthest = empty;
+    for l in 1..=t.max_launches() {
+        if t.best(l).is_none() {
+            continue;
+        }
+        let p = plan_of(nominal_b, windows, t.launches(windows.len(), l));
+        if p.predicted_impact_parameter() >= target_b {
+            return (p, true);
+        }
+        if p.predicted_impact_parameter() > furthest.predicted_impact_parameter() {
+            furthest = p;
+        }
+    }
+    (furthest, false)
+}
+
+/// [`plan_campaign_stocked`], outside the cap, along one direction.
+fn outside_cap_along(
+    nominal_b: Vector2<f64>,
+    target_b: f64,
+    windows: &[CampaignWindow],
+    cap: u32,
+    window_s: f64,
+    u: Vector2<f64>,
+    stock: &Stock,
+) -> (CampaignPlan, bool) {
+    let empty = plan_of(nominal_b, windows, vec![0; windows.len()]);
+    // The stock's window: the best along `u` at any date.
+    let best = (0..windows.len())
+        .map(|i| (i, windows[i].shift_per_launch.dot(&u)))
+        .filter(|&(_, x)| x > 0.0)
+        .max_by(|a, b| a.1.total_cmp(&b.1));
+    // The built launches: no stock at all, so nothing before `build_from`.
+    let build_from = stock.build_from.tdb_seconds_past_j2000();
+    let built = StockedChains::build(windows, cap, window_s, u, build_from, 0);
+    let built_max = built.as_ref().map_or(0, |b| b.max_launches());
+    // An unbounded stock still stops: every stocked launch adds the same push along
+    // `u`, so the projection - a lower bound on `|B|` - passes any target; the clamp
+    // only guards a vanishing push.
+    let stock_max = if best.is_some() {
+        (stock.size as usize).min(10_000)
+    } else {
+        0
+    };
+    let mut furthest = empty;
+    for l in 1..=stock_max.saturating_add(built_max) {
+        // The split of `l` that pushes furthest along `u`.
+        let mut top: Option<(f64, usize)> = None;
+        for k in 0..=l.min(stock_max) {
+            let rest = l - k;
+            let built_val = if rest == 0 {
+                Some(0.0)
+            } else {
+                built.as_ref().and_then(|b| b.best(rest)).map(|x| x.0)
+            };
+            let Some(bv) = built_val else { continue };
+            let val = bv + k as f64 * best.map_or(0.0, |x| x.1);
+            if top.is_none_or(|(tv, _)| val > tv) {
+                top = Some((val, k));
+            }
+        }
+        let Some((_, k)) = top else { continue };
+        let mut launches = match (&built, l - k) {
+            (_, 0) => vec![0; windows.len()],
+            (Some(b), rest) => b.launches(windows.len(), rest),
+            (None, _) => continue,
+        };
+        if let Some((i, _)) = best {
+            launches[i] += k as u32;
+        }
+        let p = plan_of(nominal_b, windows, launches);
+        if p.predicted_impact_parameter() >= target_b {
+            return (p, true);
+        }
+        if p.predicted_impact_parameter() > furthest.predicted_impact_parameter() {
+            furthest = p;
+        }
+    }
+    (furthest, false)
+}
+
 /// Greedy fill along one direction: largest positive shift along `u` first, one
 /// launch at a time while the window's period has room, stopping the moment `|B|`
 /// clears the target. Returns the plan and whether it reached.
@@ -584,7 +1017,10 @@ pub struct ParkedLaunch {
 /// [`plan_campaign_rolling`]): either at `earliest`, or exactly one period after
 /// the launch before it in its chain. Chasing that back, every parked date is
 /// `earliest` or a direct window's date plus a whole number of periods — and those
-/// are the dates generated. Each sits a whole number of periods after its base only
+/// are the dates generated. Under a limited stock ([`plan_campaign_stocked`]) a
+/// chain can also start at the build date, the first a launch outside the stock can
+/// go, so the caller passes it in `also_from`: it seeds dates at itself and whole
+/// periods on, as `earliest` does. Each sits a whole number of periods after its base only
 /// to rounding, which [`ROLLING_SLACK_S`] absorbs on both sides of it.
 ///
 /// # Why these departures are enough
@@ -596,6 +1032,7 @@ pub fn parked_launches(
     windows: &[CampaignWindow],
     scale: &[f64],
     earliest: Epoch,
+    also_from: &[Epoch],
     latest: Epoch,
     period_s: f64,
 ) -> Result<Vec<ParkedLaunch>, CampaignError> {
@@ -629,7 +1066,11 @@ pub fn parked_launches(
         return Ok(Vec::new());
     };
     let all_dates: Vec<f64> = (0..windows.len()).map(when).collect();
-    let dates = parked_launch_dates(&all_dates, t_lo, t_hi.min(last_out), period_s);
+    let seeds: Vec<f64> = also_from
+        .iter()
+        .map(|e| e.tdb_seconds_past_j2000())
+        .collect();
+    let dates = parked_launch_dates(&all_dates, t_lo, &seeds, t_hi.min(last_out), period_s);
 
     let mut out = Vec::new();
     for t in dates {
@@ -653,14 +1094,16 @@ pub fn parked_launches(
 }
 
 /// Every date a parked launch can need (see [`parked_launches`] for why): `earliest`
-/// and each direct window's date in `window_dates`, plus whole periods - the window
-/// dates themselves are direct launches, so a parked launch starts one period after
-/// them. Only dates from `earliest` to `stop`, sorted, each once. All TDB s.
+/// and each date in `also_from` plus whole periods (from zero), and each direct
+/// window's date in `window_dates` plus whole periods - the window dates themselves
+/// are direct launches, so a parked launch starts one period after them. Only dates
+/// from `earliest` to `stop`, sorted, each once. All TDB s.
 ///
 /// A period that is not finite and > 0 gives no dates.
 pub fn parked_launch_dates(
     window_dates: &[f64],
     earliest: f64,
+    also_from: &[f64],
     stop: f64,
     period_s: f64,
 ) -> Vec<f64> {
@@ -682,6 +1125,9 @@ pub fn parked_launch_dates(
         }
     };
     from(earliest, 0);
+    for &t in also_from {
+        from(t, 0);
+    }
     for &t in window_dates {
         from(t, 1);
     }
@@ -1128,6 +1574,224 @@ mod tests {
         }
     }
 
+    // --- A limited stock --------------------------------------------------------
+
+    /// Seven windows, three before the build date: more good early windows than a
+    /// small stock covers, so the stock binds.
+    const STOCK_SPEC: [(f64, f64); 7] = [
+        (0.0, 640.0),
+        (30.0, 910.0),
+        (70.0, 370.0),
+        (130.0, 820.0),
+        (160.0, -150.0),
+        (240.0, 450.0),
+        (300.0, 300.0),
+    ];
+    const STOCK_BUILD_DAYS: f64 = 140.0;
+
+    fn stock_windows() -> Vec<CampaignWindow> {
+        STOCK_SPEC
+            .iter()
+            .map(|&(t, s)| window(t, (0.0, s)))
+            .collect()
+    }
+
+    fn stock(size: u32, mode: StockMode) -> Stock {
+        Stock {
+            size,
+            build_from: Epoch::from_tdb_seconds_past_j2000(STOCK_BUILD_DAYS * DAY),
+            mode,
+        }
+    }
+
+    /// The fewest launches by exhaustion, or `None`. `counted`: one rolling cap over
+    /// everything and at most `size` launches before the build date. Otherwise the
+    /// built launches (none before the build date) take the cap and up to `size`
+    /// stocked ones go through any one window, uncapped.
+    fn stock_brute(cap: u32, size: u32, counted: bool, b0: f64, target: f64) -> Option<u32> {
+        let n_w = STOCK_SPEC.len();
+        let span = 100.0 * DAY;
+        let r = cap + 1;
+        let early = |k: usize| STOCK_SPEC[k].0 < STOCK_BUILD_DAYS;
+        let mut best: Option<u32> = None;
+        for code in 0..r.pow(n_w as u32) {
+            let n: Vec<u32> = (0..n_w).map(|k| (code / r.pow(k as u32)) % r).collect();
+            let list: Vec<(f64, u32)> = (0..n_w)
+                .filter(|&k| n[k] > 0)
+                .map(|k| (STOCK_SPEC[k].0 * DAY, n[k]))
+                .collect();
+            if busiest_rolling_count(&list, span) > cap {
+                continue;
+            }
+            let early_n: u32 = (0..n_w).filter(|&k| early(k)).map(|k| n[k]).sum();
+            let z_built = b0
+                + (0..n_w)
+                    .map(|k| f64::from(n[k]) * STOCK_SPEC[k].1)
+                    .sum::<f64>();
+            let total_built: u32 = n.iter().sum();
+            if counted {
+                if early_n <= size && z_built.abs() >= target {
+                    best = Some(best.map_or(total_built, |m| m.min(total_built)));
+                }
+                continue;
+            }
+            if early_n > 0 {
+                continue; // built launches cannot go before the build date
+            }
+            for k_stock in 0..=size {
+                for &(_, sz) in STOCK_SPEC.iter() {
+                    let z = z_built + f64::from(k_stock) * sz;
+                    if z.abs() >= target {
+                        let t = total_built + k_stock;
+                        best = Some(best.map_or(t, |m| m.min(t)));
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn the_stocked_planner_matches_brute_force() {
+        let w = stock_windows();
+        let span = 100.0 * DAY;
+        let build = STOCK_BUILD_DAYS * DAY;
+        let mut bound = 0;
+        for counted in [true, false] {
+            let mode = if counted {
+                StockMode::Counted
+            } else {
+                StockMode::OutsideCap
+            };
+            for cap in [1u32, 2] {
+                for size in [0u32, 1, 2, 3] {
+                    for b0 in [0.0, 400.0] {
+                        for target in [900.0, 1_700.0, 2_600.0, 3_500.0, 5_000.0] {
+                            let brute = stock_brute(cap, size, counted, b0, target);
+                            let got = plan_campaign_stocked(
+                                Vector2::new(0.0, b0),
+                                target,
+                                &w,
+                                cap,
+                                span,
+                                &stock(size, mode),
+                            )
+                            .unwrap();
+                            let tag =
+                                format!("{mode:?} cap={cap} size={size} b0={b0} target={target}");
+                            if let CampaignOutcome::Planned(p) | CampaignOutcome::Unreachable(p) =
+                                &got
+                            {
+                                let early: u32 = w
+                                    .iter()
+                                    .zip(&p.launches)
+                                    .filter(|(x, _)| {
+                                        x.launch_epoch.tdb_seconds_past_j2000() < build
+                                    })
+                                    .map(|(_, &n)| n)
+                                    .sum();
+                                assert!(
+                                    early <= size,
+                                    "{tag}: {early} launches before the build date"
+                                );
+                                if counted {
+                                    assert!(
+                                        busiest_rolling_count(&launch_list(&w, p), span) <= cap,
+                                        "{tag}: breaks the cap"
+                                    );
+                                }
+                            }
+                            // The stock binds somewhere: a bigger one does better.
+                            if counted && size < 3 {
+                                let more = stock_brute(cap, 3, true, b0, target);
+                                if more.is_some() && (brute.is_none() || more < brute) {
+                                    bound += 1;
+                                }
+                            }
+                            match (brute, got) {
+                                (Some(n), CampaignOutcome::Planned(p)) => assert_eq!(
+                                    p.total_launches, n,
+                                    "{tag}: planner {} vs brute {n}",
+                                    p.total_launches
+                                ),
+                                (None, CampaignOutcome::Unreachable(_)) => {}
+                                (brute, got) => panic!("{tag}: brute {brute:?} vs {got:?}"),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            bound > 0,
+            "no case where the stock binds - the brute force never tested the constraint"
+        );
+    }
+
+    #[test]
+    fn a_stock_no_plan_can_exhaust_is_the_rolling_planner() {
+        let w = stock_windows();
+        let span = 100.0 * DAY;
+        for cap in [1u32, 2, 3] {
+            for target in [900.0, 2_600.0, 5_000.0] {
+                let rolling =
+                    plan_campaign_rolling(Vector2::zeros(), target, &w, cap, span).unwrap();
+                let all = plan_campaign_stocked(
+                    Vector2::zeros(),
+                    target,
+                    &w,
+                    cap,
+                    span,
+                    &stock(u32::MAX, StockMode::Counted),
+                )
+                .unwrap();
+                assert_eq!(all, rolling, "cap={cap} target={target}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_stock_is_the_rolling_planner_from_the_build_date() {
+        let w = stock_windows();
+        let build = STOCK_BUILD_DAYS * DAY;
+        let late: Vec<CampaignWindow> = w
+            .iter()
+            .filter(|x| x.launch_epoch.tdb_seconds_past_j2000() >= build)
+            .copied()
+            .collect();
+        let span = 100.0 * DAY;
+        let key = |o: &CampaignOutcome| match o {
+            CampaignOutcome::Planned(p) => (true, p.total_launches, p.predicted_impact_parameter()),
+            CampaignOutcome::Unreachable(p) => {
+                (false, p.total_launches, p.predicted_impact_parameter())
+            }
+            CampaignOutcome::AlreadyClear => (true, 0, 0.0),
+        };
+        for mode in [StockMode::Counted, StockMode::OutsideCap] {
+            for cap in [1u32, 2, 3] {
+                for target in [500.0, 1_200.0, 2_000.0, 4_000.0] {
+                    let from_build =
+                        plan_campaign_rolling(Vector2::zeros(), target, &late, cap, span).unwrap();
+                    let none = plan_campaign_stocked(
+                        Vector2::zeros(),
+                        target,
+                        &w,
+                        cap,
+                        span,
+                        &stock(0, mode),
+                    )
+                    .unwrap();
+                    let (a, b) = (key(&from_build), key(&none));
+                    assert_eq!((a.0, a.1), (b.0, b.1), "{mode:?} cap={cap} target={target}");
+                    assert!(
+                        (a.2 - b.2).abs() < 1e-6,
+                        "{mode:?} cap={cap} target={target}: {a:?} vs {b:?}"
+                    );
+                }
+            }
+        }
+    }
+
     // --- Through a parking orbit -----------------------------------------------
 
     /// The direct windows plus every parked launch, as one list for the planner.
@@ -1142,6 +1806,7 @@ mod tests {
             w,
             scale,
             Epoch::from_tdb_seconds_past_j2000(earliest_days * DAY),
+            &[],
             Epoch::from_tdb_seconds_past_j2000(latest_days * DAY),
             period,
         )
@@ -1245,15 +1910,20 @@ mod tests {
     /// or more periods, inside `[earliest, stop]`, sorted and each once.
     #[test]
     fn parked_launch_dates_are_the_periods_after_each_window() {
-        let d = parked_launch_dates(&[50.0, 30.0, 130.0], 10.0, 260.0, 100.0);
+        let d = parked_launch_dates(&[50.0, 30.0, 130.0], 10.0, &[], 260.0, 100.0);
         // 10, 110, 210 from earliest; 150, 250 from 50; 130, 230 from 30; 230 from 130.
         assert_eq!(d, vec![10.0, 110.0, 130.0, 150.0, 210.0, 230.0, 250.0]);
         // A window before `earliest` still seeds the dates a period on.
         assert_eq!(
-            parked_launch_dates(&[-50.0], 0.0, 100.0, 100.0),
+            parked_launch_dates(&[-50.0], 0.0, &[], 100.0, 100.0),
             vec![0.0, 50.0, 100.0]
         );
-        assert!(parked_launch_dates(&[0.0], 0.0, 100.0, 0.0).is_empty());
+        assert!(parked_launch_dates(&[0.0], 0.0, &[], 100.0, 0.0).is_empty());
+        // A build date seeds dates at itself and whole periods on, like `earliest`.
+        assert_eq!(
+            parked_launch_dates(&[], 10.0, &[75.0], 260.0, 100.0),
+            vec![10.0, 75.0, 110.0, 175.0, 210.0]
+        );
     }
 
     /// Only the points furthest along some direction survive: an interior point, a
@@ -1303,6 +1973,7 @@ mod tests {
             &w,
             &[0.5, 0.5],
             Epoch::from_tdb_seconds_past_j2000(-40.0 * DAY),
+            &[],
             Epoch::from_tdb_seconds_past_j2000(1_000.0 * DAY),
             100.0 * DAY,
         )
@@ -1323,6 +1994,7 @@ mod tests {
             &w,
             &[0.5],
             Epoch::from_tdb_seconds_past_j2000(0.0),
+            &[],
             Epoch::from_tdb_seconds_past_j2000(1.0),
             DAY
         )
@@ -1331,6 +2003,7 @@ mod tests {
             &w,
             &[0.5, -1.0],
             Epoch::from_tdb_seconds_past_j2000(0.0),
+            &[],
             Epoch::from_tdb_seconds_past_j2000(1.0),
             DAY
         )

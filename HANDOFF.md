@@ -43,6 +43,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **The repair shipped, and the band changed units**: the resonant circle placed on the **change** the flyby makes rather than on the closed form's absolute `a'`, with the arriving orbit read off the flown arc; and a second resonance flown to settle what the leftover error is a constant *in* | **done 2026-09-08**; the 3:4's four doors go from a **767 km ladder** in the deflection lead to an **offset** (+352 to +372 km on the shipping convention, 20.7 km apart at the two extremes), so the worst case the band must cover halves. And the 2:3, flown at two leads on a gradient **ten times** steeper, says the error is a constant of **semi-major axis**, not of b-plane distance: 12× apart in kilometres (the gradient ratio) and overlapping in `a'`, with the measurement's own error bar reading ±3 535 and ±3 540 km of `a'` on the two. So `KEYHOLE_PLACEMENT_KM = 800` becomes `KEYHOLE_PLACEMENT_A_KM = 15 000` km of `a'` — **575 km on the 3:4, 57 km on the 2:3** — and the alert is cut per circle on `exposure = margin − band` | `core/src/{keyhole,keyhole_target}.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/{sim,planner}.gd`, `core/tests/keyhole_prediction_bias.rs` |
 | **The leftover constant, flown on six more resonances**: the error in the change across the flyby measured on 5:7, 7:10, 6:5, 7:8, 5:8 and 7:6 at dialable leads, a separating pair chosen from a census, and the crowded register re-run on the circles as shipped | **done 2026-09-23**; **not one number** - same sign on all twenty-one flights (the map always predicts the post-flyby orbit too large) but 2 831 to 46 806 km of `a'`, with the close orbit-raising 6:5 and 7:6 2-5× the rest at 200 d. So `KEYHOLE_PLACEMENT_A_KM` **15 000 → 51 000** (the 3:4's zone ~575 → ~1 950 km), and the several-doors register is **not reachable** on this rock (needs ~660 000 km of `a'`) - its earlier firing was the retired km band | `core/examples/probe_keyhole_placement.rs`, `godot/scripts/sim.gd`, `godot/rust/src/mission_core.rs`, `godot/tests/test_orrery.gd` |
 | **Standing defence, part 1: when the first rocket can fly** — how long before impact the rock is found plus a sourced delay (decide 172 d; build from scratch 60 months, or 1 yr from storage) sets the first launch; the launch map's axes stretched to 0.97 / 0.99 of the span because the old end was setting a headline | **done 2026-10-08**; found 12 yr out, Falcon Heavy at 6 a year needs **6 launches on the pad, 6 from storage, 12 built from scratch**, and at 2 a year **6 / 7 / falls short** - the level delays only the *first* launch, every later one is assumed ready at the cap rate (from storage at 6 a year, all six fly within ~80 days: a six-impactor stock). And with late launch dates on the map, 1 a year on the pad goes from short by ~1 % to **10 launches, clear** | `core/src/readiness.rs`, `godot/rust/src/mission_core.rs` (`measure_campaign_candidates_from`'s `earliest_launch_tdb`, `estimate_shift`), `godot/scripts/{sim,porkchop,main}.gd` |
+| **Standing defence, part 2: a stock that runs out** — IN STORAGE is a *number* of stored interceptors (sourced: Nuth et al.'s "at least two", nuclear-capable), the rest built from scratch; planned exactly (counted against the rate, or outside it as a what-if) inside the measurement | **done 2026-10-08**; found 12 yr out, 6 a year needs **9 launches with the sourced two, at the line** (12 from scratch, 6 with no limit); found 9 yr out the two buy nothing - it takes three to reach the target at all, at 12 a year | `core/src/{campaign,readiness}.rs` (`plan_campaign_stocked`), `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/{sim,porkchop,main}.gd` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -315,8 +316,10 @@ Read this table first, then the session that owns the layer you are touching.
    sourced delay; found 12 yr out, 6 a year needs 6 / 6 / 12 launches on the pad /
    from storage / built from scratch (only the first launch waits; the rest are
    assumed ready at the rate). See *Standing defence: when the first rocket
-   can fly*. Still open: a stored stock that flies faster than the yearly rate,
-   interceptors waiting in orbit for years, and detection.
+   can fly*. **Part 2: DONE 2026-10-08** - the stock runs out: the sourced two
+   stored, the rest built; found 12 yr out, 6 a year needs 9 (*Standing defence,
+   part 2: a stock that runs out*). Still open: interceptors waiting in orbit for
+   years, and detection.
 
 ---
 
@@ -643,7 +646,7 @@ That MVP delivers the whole lesson *and* an honest hit→miss flip. Everything b
 
 - Plausible launch vehicles + payload mass budgets — **both DONE** (vehicles 2026-07; mass budget 2026-10-01, *What actually hits the rock*)
 - Orbital assembly (assemble-in-orbit when payload too big for one launch) — **DONE 2026-10-07** as parking: joining buys nothing under a linear push; waiting in orbit for a better date is what pays, at a mass cost (*Orbital assembly: it is parking, not joining*); the escape burn flown finite and the plane checked the same day — 1 a year falls short by ~1 % (*The escape burn flown for real*); a year's second-best departure date offered 2026-10-08, changing nothing (*A parked launch's second-best date*)
-- Standing/ready Earth-defense systems — **part 1 DONE 2026-10-08**: when the first rocket can fly, from the warning and a sourced readiness delay (*Standing defence: when the first rocket can fly*). Still open: a stored stock flying faster than the yearly rate, interceptors waiting in orbit, detection
+- Standing/ready Earth-defense systems — **parts 1-2 DONE 2026-10-08**: when the first rocket can fly, from the warning and a sourced readiness delay (*Standing defence: when the first rocket can fly*), and a stock that runs out - two stored, the rest built (*Standing defence, part 2: a stock that runs out*). Still open: interceptors waiting in orbit, detection
 - Multi-mission campaigns — **DONE** (2026-09-23 onward, *Several launches against one rock* and after)
 
 ---
@@ -6749,9 +6752,125 @@ on-the-pad numbers on ON THE PAD and measures FROM SCRATCH too (2/yr falls short
   than as "a stock beating the yearly rate" - that is the assumption above, made
   explicit; the rate is secondary. Then interceptors waiting in orbit for years
   (station-keeping stops being small), detection.
-- The orbital-assembly height bracket (400 km "on the edge") was measured on the old
-  axes and is moot at 400 km now; not re-run.
+- The orbital-assembly height bracket, re-run on the new axes (2026-10-08, the
+  user's call; `probe_orbital_assembly`, 182 windows, 185 s): **1 a year is 10
+  launches from 400 to 800 km (|B| 26 276 to 26 541), 9 from 1 000 km up (26 052 to
+  26 550)**, and 2..12 are 6 at every height. The height now decides 10 against 9,
+  not short against clear.
 - The plans that fall short at short warning reach arrivals 0.32 yr out, where the
   estimate has few flown neighbours; a short count there is an upper bound.
 - The one-year storage figure is a bound on "much less than a year"; nothing sourced
   says how much less.
+
+### Standing defence, part 2: a stock that runs out - 2026-10-08 session (Phase 3's last bullet, part 2 of 4)
+
+Part 1's final review caught what its counts silently assumed: a readiness level
+delayed only the *first* launch, and every later one was ready whenever the cap
+allowed - "6 from storage" was six stored impactors flying within ~80 days. Part 2
+was to be "a stored stock that can fly faster than the yearly rate"; the user chose
+**both** halves of the re-posed version: a **limited stock** (the shipping
+behaviour) *and* a stock that may fly **outside the cap** (a what-if dial).
+
+#### The stock, sourced
+
+"We therefore recommend that PDCO oversee a program to establish the full capability
+described above, including the availability of **at least two interceptors** and two
+observer spacecraft" (Nuth, Barbee & Leung 2018, Summary - re-read at the source
+before shipping, after the first figure came from a model's summary of the page).
+And "the interceptor would be designed to carry a nuclear device", so the shipping
+stock (`SOURCED_STOCK_SIZE = 2`) is two nuclear-capable interceptors standing in for
+kinetic impactors, and the panel says so. `IN_STORAGE` now carries
+`rest_preparation_s` = the build-from-scratch 60 months: the stock flies from the
+storage date, everything past it from the build date.
+
+#### The planner (`core::campaign::plan_campaign_stocked`)
+
+- **Counted** (shipping): launches before the build date must come from the stock,
+  at most `size` of them, and everything counts against "N in any 12 months". The
+  rolling planner's chains gain one number - how many of a chain's launches are
+  early - tabulated by (launches, early) per chain and combined across the chains
+  with the early total capped at `size`. A stocked launch after the build date is
+  indistinguishable from a built one, so that is the whole constraint.
+- **Outside the cap** (what-if): the cap already allows several launches on one date,
+  so with no cap of its own the whole stock goes through the single best window on
+  one day - `k` times that window's push, plus the best built-only plan of the rest.
+  Said plainly on the panel ("ALL ON ONE DAY"): it assumes as many pads as stocked
+  rockets, and no surge rate was invented to soften it.
+- **Pinned:** brute force over every allocation on a case where the stock binds
+  (both modes, sizes 0-3, caps 1-2; a counter asserts the binding case occurs); a
+  stock no plan can exhaust **is** `plan_campaign_rolling` (whole-outcome equality,
+  and the code short-circuits to it); a stock of 0 is the rolling planner on the
+  windows from the build date. Mutation-tested: dropping the size limit fails the
+  brute force at once ("1 launches before the build date" with a stock of 0).
+- **Parked launches** gain a second seed: a built chain can start on the build date,
+  so `parked_launch_dates` / `parked_launches` take `also_from` (the build date and
+  whole periods on), in the measurement's rounds and in `with_parking` both.
+
+#### Planned inside the measurement
+
+The stock size and mode are *measured* settings, stale until `[E]`, like the warning:
+`measure_campaign_candidates_from(.., stock: Option<Stock>, ..)` plans every rate
+under the stock while choosing which pool windows to fly, so a limited plan is not
+replanned on windows picked for an unlimited one (the advisor's first catch; the
+what-ifs fell into exactly that trap before they picked their own windows).
+
+#### The numbers (Falcon Heavy, IN STORAGE, `probe_standing_stock`, 3 412 s)
+
+Found 12 yr out - the stock from 10.53 yr before impact, the rest from 6.53:
+
+| Stock, counted | 1/yr | 2/yr | 3/yr | 4/yr | 6/yr | 12/yr |
+|---|---|---|---|---|---|---|
+| 0 (= from scratch) | short | short | short | 16 | 12 | 11 |
+| 1 | short | short | short (1 %) | 12 | 11 | 10 |
+| **2 (sourced)** | short | short | **11** | **10** | **9** (at the line, 0.95 % clear) | **9** |
+| 3 | short | 11 | 9 | 9 | 8 | 8 |
+| 4 | short | 9 | 8 | 8 | 8 | 8 |
+| 6 | short | 7 | 7 | 6 | 6 | 6 |
+| no limit (= part 1) | short | 7 | 7 | 6 | 6 | 6 |
+
+Found 9 yr out - the stock from 7.53 yr, the rest from 3.53:
+
+| Stock, counted | 1/yr | 2/yr | 3/yr | 4/yr | 6/yr | 12/yr |
+|---|---|---|---|---|---|---|
+| 0 | short | short | short | short | short | short (48 launches, 20 195 km) |
+| **2 (sourced)** | short | short | short | short | short | short (50, 25 114 km) |
+| 3 | short | short | short | short | short | 30 |
+| 4 | short | short | short | short | short | 22 |
+| 6 | short | short | short | short | 22 | 15 |
+| no limit | short | short | 15 | 12 | 11 | 10 |
+
+**Outside the cap** changes nothing at 9 yr (every count identical) and nothing at 12
+yr up to a stock of 3; from 4 it helps at the low rates (stock 4: 2/yr 9 -> 8; stock
+6: **6 at every rate, 1 a year included**, the six on one day).
+
+Controls: stock 0 reproduces part 1's from-scratch counts (6.53 yr row) - every count,
+|B| within 2 km on a different window set; stock 6 and no limit reproduce part 1's
+in-storage row exactly. The whole-plan flights all miss (perigee 20 149-22 025 km).
+
+Margins: the probe printed |B| only for plans that fall short; the one planned margin
+read is the app's, stock 2 at 6 a year, **26 200 of 25 954 km - at the line** (inside
+the 1 % band; flown perigee 20 239 km). Other planned counts in these tables may sit
+inside the band too.
+
+**So:** found 12 years out, the sourced two stored interceptors buy 12 -> 9 launches
+at 6 a year (at the line) and make 3 a year possible (11); the remaining distance to part 1's
+"6 from storage" is four more stored impactors. Found 9 years out, two buy nothing -
+it takes three to reach the target at all, and only at 12 a year.
+
+#### The frontend
+
+IN STORAGE adds a panel line - `STOCK 2 (SOURCED: 2 NUCLEAR-CAPABLE), COUNTED IN THE
+RATE - THE REST BUILT FROM <date>  - n FROM STOCK` - and a second band on the map
+("STOCK ONLY ABOVE - BUILT LAUNCHES FROM HERE"). `[;]` / `[']` step the size (0..12,
+then no limit), `[Q]` the mode; both free, `[E]` measures. The plot gave up 1.5 % of
+the view's height for the line (`PLOT_H_FRACTION` 0.56 -> 0.545, `PANEL_H` 274).
+`_campaign_shot.gd` measures the sourced stock: 2/yr falls short, 6/yr 9, both stored
+used.
+
+#### What this leaves
+
+- Parts 3-4: interceptors waiting in orbit for years, detection.
+- The stock is one size for one warning; a stock *replenished* by a production line
+  (built launches arriving faster than one build each) is still the cap.
+- The parking height bracket was re-run on the new axes (1/yr 10 at 400-800 km, 9 from
+  1 000 km); nothing here depends on it.

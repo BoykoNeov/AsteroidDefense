@@ -325,6 +325,14 @@ func _input(event: InputEvent) -> void:
 		Sim.adjust_campaign_warning(1)
 	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_readiness"):
 		Sim.cycle_campaign_readiness()
+	# The stock, for IN STORAGE: [;] / ['] its size, [Q] whether it counts against the
+	# rate. Free to dial, [E] measures - inert at a level with no stock.
+	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_stock_down"):
+		Sim.adjust_campaign_stock(-1)
+	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_stock_up"):
+		Sim.adjust_campaign_stock(1)
+	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_stock_mode"):
+		Sim.toggle_campaign_stock_mode()
 	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_verify"):
 		Sim.request_campaign_step()
 	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_required_mass"):

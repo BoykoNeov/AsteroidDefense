@@ -94,7 +94,10 @@
 //! 3.6 yr before impact, the launch map's old axis end - a drawing choice that the
 //! 1-a-year plan was pressed against. With the axes stretched (HANDOFF *Standing
 //! defence: when the first rocket can fly*), 1 in any 12 months at 400 km is **10
-//! launches, clear by 1.2 %**. The height bracket has not been re-run there.
+//! launches, clear by 1.2 %**. Re-run there (2026-10-08, the user's call): **10
+//! launches from 400 to 800 km, 9 from 1 000 km up** (|B| 26 052 at 1 000 km), 2..12
+//! all 6 at every height. So the height now decides 10 against 9, not short against
+//! clear, and 400 km stays the shipping choice.
 //!
 //! # The escape burn is flown finite ([`crate::departure_burn`])
 //! The OMS-E pushes 26.7 kN against a 26.5 t stack, rated for at most 1 030 s per

@@ -21,7 +21,7 @@ use std::sync::{mpsc, Arc};
 
 use godot::prelude::*;
 
-use asteroid_core::campaign::CampaignOutcome;
+use asteroid_core::campaign::{CampaignOutcome, Stock, StockMode};
 use asteroid_core::launch_vehicle::LaunchVehicle;
 use asteroid_core::mission::MassSolveOutcome;
 use asteroid_core::scenario::{ImpactorConfig, ScenarioError, SAFE_PERIGEE_TARGET_M};
@@ -187,6 +187,10 @@ struct Mission {
     /// one is for. A count without them means nothing, like a count without its cap.
     pending_campaign_readiness: (i64, f64),
     campaign_readiness: (i64, f64),
+    /// The stock size (`-1` for no limit) and whether it flies outside the cap, for
+    /// the in-flight and the held measurement - used only by a level with a stock.
+    pending_campaign_stock: (i64, bool),
+    campaign_stock: (i64, bool),
     /// The held campaign measurement and its launcher. Cap-independent, so the
     /// rate knob replans it for free. Dropped with the grid and the scenario.
     campaign: Option<(i64, CampaignCandidates)>,
@@ -1377,6 +1381,19 @@ impl Mission {
         asteroid_core::readiness::READINESS_LEVELS.len() as i64
     }
 
+    /// The stock the source recommends: "at least two interceptors" (Nuth, Barbee &
+    /// Leung 2018) - nuclear-capable ones, standing in for impactors.
+    #[func]
+    fn sourced_stock_size(&self) -> i64 {
+        i64::from(asteroid_core::readiness::SOURCED_STOCK_SIZE)
+    }
+
+    /// Whether readiness level `i` has a stock that can run out (the rest built).
+    #[func]
+    fn readiness_has_stock(&self, i: i64) -> bool {
+        readiness_at(i).is_some_and(|r| r.rest_preparation_s.is_some())
+    }
+
     /// Readiness level `i`'s label, or `""` past the end.
     #[func]
     fn readiness_name(&self, i: i64) -> GString {
@@ -1724,11 +1741,24 @@ impl Mission {
     /// rocket can fly; no launch, direct or parked, goes before it. A first date
     /// before the map's own first launch date is the map's first date.
     ///
+    /// For a level with a stock (IN STORAGE), `stock_size` launches may go from that
+    /// date and the rest no earlier than the build-from-scratch date (`-1`: no limit,
+    /// every launch ready from the first date); `stock_outside_cap` lets the stock
+    /// fly outside the launch-rate cap. Both are part of the measurement - the
+    /// windows flown are chosen for plans under them - so a change needs a new one.
+    ///
     /// Returns `false` — with a reason in [`last_error`](Self::last_error) — when a
     /// campaign solve is already in flight, there is no grid or scenario, or the
     /// vehicle or readiness index is out of range.
     #[func]
-    fn begin_campaign(&mut self, vehicle: i64, readiness: i64, warning_s: f64) -> bool {
+    fn begin_campaign(
+        &mut self,
+        vehicle: i64,
+        readiness: i64,
+        warning_s: f64,
+        stock_size: i64,
+        stock_outside_cap: bool,
+    ) -> bool {
         if self.campaign_build.is_some() {
             return false;
         }
@@ -1767,15 +1797,29 @@ impl Mission {
         let impact = scenario.impact_epoch().tdb_seconds_past_j2000();
         // The years are counted from the first launch, so the first is a whole one.
         let first = level.first_launch_tdb(impact, warning_s).max(map_first);
+        let stock = match (level.build_from_tdb(impact, warning_s), stock_size) {
+            (Some(build), size) if size >= 0 => Some(Stock {
+                size: size.min(i64::from(u32::MAX)) as u32,
+                build_from: Epoch::from_tdb_seconds_past_j2000(build.max(first)),
+                mode: if stock_outside_cap {
+                    StockMode::OutsideCap
+                } else {
+                    StockMode::Counted
+                },
+            }),
+            _ => None,
+        };
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = measure_campaign_candidates(&scenario, &view, v, first, Some(first))
-                .map_err(|e| e.to_string());
+            let result =
+                measure_campaign_candidates(&scenario, &view, v, first, Some(first), stock)
+                    .map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
         self.campaign_build = Some(rx);
         self.pending_campaign_vehicle = vehicle;
         self.pending_campaign_readiness = (readiness, warning_s);
+        self.pending_campaign_stock = (stock_size, stock_outside_cap);
         // A held campaign (and its flight) beside a running solve would read as
         // this solve's answer.
         self.campaign = None;
@@ -1803,6 +1847,7 @@ impl Mission {
                 self.campaign_build = None;
                 self.campaign = Some((self.pending_campaign_vehicle, c));
                 self.campaign_readiness = self.pending_campaign_readiness;
+                self.campaign_stock = self.pending_campaign_stock;
                 self.error = GString::new();
                 false
             }
@@ -1871,6 +1916,13 @@ impl Mission {
             d.set("delay_s", level.delay_s());
         }
         d.set("first_launch_tdb", c.launch_span_tdb.0);
+        // The stock as dialled for the measurement, and as it bound: `stock_size`
+        // -1 is no limit; `build_from_tdb` is absent when there is no stock rule.
+        d.set("stock_size", self.campaign_stock.0);
+        d.set("stock_outside_cap", self.campaign_stock.1);
+        if let Some(s) = c.stock {
+            d.set("build_from_tdb", s.build_from.tdb_seconds_past_j2000());
+        }
         d.set("last_launch_tdb", c.launch_span_tdb.1);
         d.set("launches_per_year", cap as i64);
         d.set("period_origin_tdb", c.period_origin_tdb);
@@ -1891,6 +1943,18 @@ impl Mission {
                 p.launches.clone()
             }
         };
+        // How many launches the plan takes from the stock (those before the build date).
+        if let Some(st) = c.stock {
+            let build = st.build_from.tdb_seconds_past_j2000();
+            let early: i64 = c
+                .candidates
+                .iter()
+                .zip(&launches)
+                .filter(|(k, _)| k.launch_tdb < build)
+                .map(|(_, &n)| i64::from(n))
+                .sum();
+            d.set("stock_used", early);
+        }
         let mut arr = VarArray::new();
         let launches_for_rolling = launches.clone();
         for (k, n) in c.candidates.iter().zip(launches) {

@@ -509,6 +509,14 @@ const CAMPAIGN_WARNING_MAX_YR := 20.0
 const YEAR_S := 365.25 * DAY_S
 var pork_campaign_readiness := -1
 var pork_campaign_warning_yr := -1.0
+## The stock, for a level that has one (IN STORAGE): how many interceptors are ready
+## at the storage date (-1 = no limit; -2 until first read, then the core's sourced
+## size), and whether they fly outside the launch-rate cap (an optimistic what-if:
+## with no cap of their own they all go through the best window on one day). [;] and
+## ['] step the size, [Q] the mode; both are measured settings, like the warning.
+const CAMPAIGN_STOCK_MAX := 12
+var pork_campaign_stock := -2
+var pork_campaign_stock_outside := false
 
 signal porkchop_changed
 
@@ -2125,7 +2133,7 @@ func request_campaign_step() -> void:
 		return
 	if not pork_campaign_is_current():
 		if mission.begin_campaign(pork_vehicle, campaign_readiness(),
-				campaign_warning_yr() * YEAR_S):
+				campaign_warning_yr() * YEAR_S, campaign_stock(), pork_campaign_stock_outside):
 			pork_campaign_solving = true
 			pork_campaign = {}
 			event_logged.emit(_stamp(t) + "  CAMPAIGN: FLYING THE BEST WINDOWS - A MINUTE OR TWO")
@@ -2196,7 +2204,48 @@ func _poll_campaign() -> void:
 ## found at another time, is not shown as this one's: the windows, the payloads and
 ## the first launch date are all part of it.
 func pork_campaign_is_current() -> bool:
-	return not pork_campaign.is_empty() and int(pork_campaign.vehicle) == pork_vehicle 		and int(pork_campaign.get("readiness", -1)) == campaign_readiness() 		and absf(float(pork_campaign.get("warning_s", -1.0)) - campaign_warning_yr() * YEAR_S) < 1.0
+	if pork_campaign.is_empty() or int(pork_campaign.vehicle) != pork_vehicle:
+		return false
+	if int(pork_campaign.get("readiness", -1)) != campaign_readiness():
+		return false
+	if absf(float(pork_campaign.get("warning_s", -1.0)) - campaign_warning_yr() * YEAR_S) >= 1.0:
+		return false
+	# The stock only means something for a level that has one.
+	if not campaign_has_stock():
+		return true
+	return int(pork_campaign.get("stock_size", -3)) == campaign_stock() \
+		and bool(pork_campaign.get("stock_outside_cap", false)) == pork_campaign_stock_outside
+
+
+## Whether the dialled level has a stock that can run out (IN STORAGE).
+func campaign_has_stock() -> bool:
+	return mission != null and bool(mission.readiness_has_stock(campaign_readiness()))
+
+
+## The dialled stock size; -1 is no limit.
+func campaign_stock() -> int:
+	if pork_campaign_stock < -1 and mission != null:
+		pork_campaign_stock = int(mission.sourced_stock_size())
+	return pork_campaign_stock
+
+
+## Step the stock size: 0 .. CAMPAIGN_STOCK_MAX, then no limit. Free to dial.
+func adjust_campaign_stock(step: int) -> void:
+	if not campaign_has_stock():
+		return
+	var s := campaign_stock()
+	var idx := CAMPAIGN_STOCK_MAX + 1 if s < 0 else s
+	idx = clampi(idx + step, 0, CAMPAIGN_STOCK_MAX + 1)
+	pork_campaign_stock = -1 if idx > CAMPAIGN_STOCK_MAX else idx
+	porkchop_changed.emit()
+
+
+## Toggle whether the stock counts against the launch-rate cap. Free to dial.
+func toggle_campaign_stock_mode() -> void:
+	if not campaign_has_stock():
+		return
+	pork_campaign_stock_outside = not pork_campaign_stock_outside
+	porkchop_changed.emit()
 
 
 ## The dialled readiness level, an index into the core's levels.
@@ -2236,7 +2285,8 @@ func cycle_campaign_readiness() -> void:
 ## core's delay, no earlier than the map's first launch date.
 func pork_campaign_first_launch_tdb() -> float:
 	var impact := EPOCH0_TDB + T_IMPACT * DAY_S
-	var first := impact - campaign_warning_yr() * YEAR_S 		+ float(mission.readiness_delay_s(campaign_readiness()))
+	var first := impact - campaign_warning_yr() * YEAR_S \
+		+ float(mission.readiness_delay_s(campaign_readiness()))
 	if pork_launch_tdb.size() > 0:
 		first = maxf(first, pork_launch_tdb[0])
 	return first
@@ -2246,7 +2296,8 @@ func pork_campaign_first_launch_tdb() -> float:
 func campaign_readiness_label() -> String:
 	var r := campaign_readiness()
 	# Measured: the date the core actually cut at. Only dialled: this side's sum.
-	var first := float(pork_campaign.first_launch_tdb) if pork_campaign_is_current() 		and pork_campaign.has("first_launch_tdb") else pork_campaign_first_launch_tdb()
+	var first := float(pork_campaign.first_launch_tdb) if pork_campaign_is_current() \
+		and pork_campaign.has("first_launch_tdb") else pork_campaign_first_launch_tdb()
 	var line := "FOUND %.1f YR BEFORE IMPACT  %s, %.1f YR TO FIRST LAUNCH  ->  FIRST LAUNCH %s" % [
 		campaign_warning_yr(), str(mission.readiness_name(r)),
 		float(mission.readiness_delay_s(r)) / YEAR_S,
@@ -2256,6 +2307,34 @@ func campaign_readiness_label() -> String:
 	elif pork_launch_tdb.size() > 0 and first <= pork_launch_tdb[0]:
 		line += " (THE MAP'S FIRST DATE)"
 	return line
+
+
+## The stock in one line, for a level that has one - "" otherwise. The sourced size
+## is the paper's two nuclear-capable interceptors, and the line says so.
+func campaign_stock_label() -> String:
+	if not campaign_has_stock():
+		return ""
+	var s := campaign_stock()
+	var size := "NO LIMIT" if s < 0 else str(s)
+	var src := " (SOURCED: 2 NUCLEAR-CAPABLE)" if s == int(mission.sourced_stock_size()) else ""
+	var mode := "OUTSIDE THE RATE - WHAT IF, ALL ON ONE DAY" if pork_campaign_stock_outside \
+		else "COUNTED IN THE RATE"
+	var line := "STOCK %s%s, %s - THE REST BUILT FROM %s" % [size, src, mode,
+		date_string((pork_campaign_build_from_tdb() - EPOCH0_TDB) / DAY_S)]
+	if pork_campaign_is_current() and pork_campaign.has("stock_used"):
+		line += "  - %d FROM STOCK" % int(pork_campaign.stock_used)
+	return line
+
+
+## The first date a launch past the stock can go, TDB s: the build-from-scratch
+## level's own delay (the core's; it is the last level), no earlier than the first
+## launch.
+func pork_campaign_build_from_tdb() -> float:
+	var impact := EPOCH0_TDB + T_IMPACT * DAY_S
+	var from_scratch := int(mission.readiness_count()) - 1
+	var build := impact - campaign_warning_yr() * YEAR_S \
+		+ float(mission.readiness_delay_s(from_scratch))
+	return maxf(build, pork_campaign_first_launch_tdb())
 
 
 func pork_campaign_flight() -> Dictionary:

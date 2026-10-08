@@ -190,6 +190,48 @@ func _run() -> void:
 		main._input(_key(KEY_Z))
 	await _settle(1)
 
+	# IN STORAGE with the sourced stock: two interceptors from the storage date, the
+	# rest built. [W] from FROM SCRATCH wraps to ON THE PAD, then IN STORAGE.
+	main._input(_key(KEY_W))
+	main._input(_key(KEY_W))
+	await _settle(1)
+	print("CAMPSHOT  %s" % Sim.campaign_stock_label())
+	assert(Sim.campaign_has_stock(), "IN STORAGE must have a stock")
+	assert(Sim.campaign_stock_label().begins_with("STOCK 2 (SOURCED"), "the stock must open on the sourced two")
+	# The stock knobs are free.
+	main._input(_key(KEY_APOSTROPHE))
+	main._input(_key(KEY_Q))
+	await _settle(1)
+	assert(Sim.campaign_stock() == 3 and Sim.pork_campaign_stock_outside, "['] / [Q] must step the stock")
+	assert(not Sim.pork_campaign_solving, "a stock knob fired a solve")
+	main._input(_key(KEY_SEMICOLON))
+	main._input(_key(KEY_Q))
+	await _settle(1)
+	assert(Sim.campaign_stock() == 2 and not Sim.pork_campaign_stock_outside, "[;] / [Q] must step back")
+	main._input(_key(KEY_E))
+	assert(Sim.pork_campaign_solving, "[E] must measure the stocked campaign")
+	var t6 := Time.get_ticks_msec()
+	while Sim.pork_campaign_solving and Time.get_ticks_msec() - t6 < 900000:
+		await get_tree().process_frame
+	assert(Sim.pork_campaign_is_current(), "the stocked campaign must land: " + str(Sim.mission.last_error()))
+	var t7 := Time.get_ticks_msec()
+	while Sim.pork_campaign_flying and Time.get_ticks_msec() - t7 < 300000:
+		await get_tree().process_frame
+	print("CAMPSHOT  stock 2, measured in %d ms, 2/yr: %s" % [Time.get_ticks_msec() - t6, Sim.campaign_count_label()])
+	assert(Sim.campaign_count_label().begins_with("FALLS SHORT"), "two stored, 2 a year falls short")
+	for _k in 4:
+		main._input(_key(KEY_X))
+	await _settle(2)
+	print("CAMPSHOT  stock 2, %d/yr: %s | %s" % [Sim.pork_campaign_rate, Sim.campaign_count_label(),
+		Sim.campaign_stock_label()])
+	assert(Sim.campaign_count_label().begins_with("9 LAUNCHES"), "two stored, 6 a year needs 9")
+	assert(Sim.campaign_stock_label().ends_with("2 FROM STOCK"), "the plan must use both stored")
+	_assert_per_year_cap()
+	await _shot("campaign_stock_2")
+	for _k in 4:
+		main._input(_key(KEY_Z))
+	await _settle(1)
+
 	# [L] makes the held campaign another launcher's.
 	main._input(_key(KEY_L))
 	await _settle(3)

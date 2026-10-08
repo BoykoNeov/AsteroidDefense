@@ -40,9 +40,13 @@ const TOP_RESERVE := 96.0
 const LEGEND_W := 168.0
 ## Height reserved at the bottom for the cursor readout. 238 until 2026-10-08, when
 ## the campaign panel's readiness line pushed its key hints onto the global key bar
-## (seen on `_campaign_shot.gd`'s flown shot); one line more, and the plot's date
-## labels (~617 px at 900 high) still clear the title (644).
-const PANEL_H := 256.0
+## (seen on `_campaign_shot.gd`'s flown shot); 256 for that line, 274 for the stock
+## line, which the plot paid for (`PLOT_H_FRACTION`). Kept in step with it: at
+## 900 px high the plot's arrival-date labels sit at ~603 px and the title at 626.
+const PANEL_H := 274.0
+## The plot's height as a fraction of the view's: 0.56 until 2026-10-08, when the
+## campaign panel needed a line for the stock (see `PANEL_H`).
+const PLOT_H_FRACTION := 0.545
 ## Where the cursor readout's left edge sits, as a fraction of the view width.
 ##
 ## Read by **two** files: this one places the panel here, and `hud.gd` budgets the
@@ -197,7 +201,7 @@ func _draw() -> void:
 	# upper band, the colour key its right margin, and the cursor readout the
 	# bottom-*right* — beside the console rather than under the plot, which is
 	# where it would land on top of it.
-	var plot := Rect2(Vector2(MARGIN, TOP_RESERVE), Vector2(w - MARGIN - LEGEND_W, h * 0.56))
+	var plot := Rect2(Vector2(MARGIN, TOP_RESERVE), Vector2(w - MARGIN - LEGEND_W, h * PLOT_H_FRACTION))
 	_draw_cells(plot)
 	_draw_axes(plot, mid, dim, faint)
 	_draw_cursor(plot, bright)
@@ -487,6 +491,18 @@ func _draw_first_launch(plot: Rect2, dim: Color, faint: Color) -> void:
 	var label := "BEFORE THE FIRST LAUNCH"
 	var lw := _font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 3).x
 	_t(Vector2(plot.end.x - lw - 6.0, y - 5.0), label, dim, _fs - 3)
+	# A stored stock: between the two lines only the stock can fly.
+	if Sim.campaign_has_stock() and Sim.campaign_stock() != -1:
+		var build := Sim.pork_campaign_build_from_tdb()
+		if build > first:
+			var yb := plot.position.y + minf((build - t0) / (t1 - t0) * (plot.size.y - ch), plot.size.y)
+			draw_rect(Rect2(Vector2(plot.position.x, y), Vector2(plot.size.x, yb - y)),
+				Color(0.0, 0.0, 0.0, 0.35), true)
+			draw_line(Vector2(plot.position.x, yb), Vector2(plot.end.x, yb), dim, 1.0)
+			# Left end, clear of the frame: the right end of this row is bright cells,
+			# and the glow washed the label out there (seen on the stock shot).
+			_t(Vector2(plot.position.x + 10.0, yb - 5.0),
+				"STOCK ONLY ABOVE - BUILT LAUNCHES FROM HERE", dim, _fs - 3)
 
 
 func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color, faint: Color) -> void:
@@ -500,8 +516,13 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 	# is the rule this replaced.
 	_t(Vector2(col2, y), "RATE  UP TO %d IN ANY 12 MONTHS" % Sim.pork_campaign_rate, bright)
 	y += lh
-	# When the first rocket can fly - the line every count below is conditional on.
+	# When the first rocket can fly - the line every count below is conditional on -
+	# and, for a stored stock, how many and when the rest can.
 	_t(Vector2(x, y), Sim.campaign_readiness_label(), mid, _fs - 1)
+	y += lh
+	var st := Sim.campaign_stock_label()
+	if not st.is_empty():
+		_t(Vector2(x, y), st, mid, _fs - 1)
 	y += lh
 
 	var current := Sim.pork_campaign_is_current()
@@ -561,7 +582,10 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 		wi = "NO PARKED LAUNCHES FOR THIS ROCKET - NOTHING PUBLISHED SAYS WHAT ONE PAYLOAD MAY WEIGH" 			if current else 			"PARKING: FALCON HEAVY (EXPENDABLE) ONLY - ITS PUBLISHED 26.5 T PAYLOAD LIMIT, A STORABLE ENGINE"
 	_t(Vector2(x, y), wi, faint, _fs - 3)
 	y += lh
-	_t(Vector2(x, y), "[Z]/[X] PER 12 MO  [ / ] WARNING  [W] READINESS  [E] MEASURE / FLY  [L] LAUNCHER  [C] WINDOWS  [1] BACK",
+	var keys := "[Z]/[X] PER 12 MO  [ / ] WARNING  [W] READINESS  [E] MEASURE / FLY  [L] LAUNCHER  [C] WINDOWS  [1] BACK"
+	if Sim.campaign_has_stock():
+		keys = "[Z]/[X] PER 12 MO  [ / ] WARNING  [W] READINESS  [; / '] STOCK  [Q] STOCK MODE  [E] MEASURE / FLY  [1] BACK"
+	_t(Vector2(x, y), keys,
 		dim, _fs - 2)
 
 

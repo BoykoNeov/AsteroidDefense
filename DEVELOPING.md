@@ -15,7 +15,7 @@ Linux clone on 2026-09-02; timings are from that machine (release profile).
 ## The kernels, and the trap they guard against
 
 The physics runs in the real JPL DE440 field. The core resolves a **pair** — a
-DE ephemeris `.bsp` and ANISE's `pck11.pca` — from `kernels/` beside the repo
+DE ephemeris `.bsp` and ANISE's `pck11.pca` — from the repo's own `kernels/` folder (gitignored)
 (or `ASTEROID_DE_KERNEL` + `ASTEROID_PLANETARY_CONSTANTS`). Without them every
 physics test **skips and prints green**; `core/src/kernels.rs` explains how that
 once made two verification claims vacuous. So:

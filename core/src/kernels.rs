@@ -218,17 +218,18 @@ pub fn require_kernels() -> bool {
 /// than the process working directory so it answers the same from `cargo test`
 /// at the workspace root, from a crate subdirectory, or from an example.
 pub fn search_dirs() -> Vec<PathBuf> {
-    // `<repo>/core` at build time. The kernels are ordinary large files beside
-    // the repo, never inside it (they are gitignored and far too big to commit).
+    // `<repo>/core` at build time. The kernels are ordinary large files, never
+    // committed (they are gitignored and far too big to commit).
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let repo = crate_root.parent().unwrap_or(crate_root);
     let mut dirs = vec![
         // A kernels/ folder in the repo — the natural "drop them here" spot for
-        // a fresh clone, and the first thing a new contributor will try.
+        // a fresh clone, where `tools/fetch_kernels.py` and CI put them, and
+        // (since 2026-10-08) where the dev machine keeps them too.
         repo.join("kernels"),
-        // This project's conventional scratch root, which is where the dev
-        // machine's kernels actually live: `<drive>/temp/claude/AsteroidDefense`,
-        // a sibling of the `Claude_projects` directory holding the repo.
+        // The dev machine's scratch root before 2026-10-08:
+        // `<drive>/temp/claude/AsteroidDefense`, a sibling of the
+        // `Claude_projects` directory holding the repo. Kept as a fallback.
         repo.join("../../temp/claude/AsteroidDefense/kernels"),
         // The layout this repo lived under before 2026-09-08 — `claud_projects`
         // with a `temp/` sibling *inside* it. Kept so an unmoved checkout, or a

@@ -33,6 +33,12 @@ env/
 *.pca
 /data/
 /kernels/
+
+# ---- Cited source documents (local copies, never committed) ----
+# PDFs/text of the papers and reports the sourced constants come from (DART,
+# NASA LSP launch-vehicle documents, ...). Copyrighted third-party work: kept
+# beside the code for checking a citation, never published with the repo.
+/sources/
 # NOTE: generated validation fixtures (pyref/ output, *.json) ARE committed —
 #       they are the reference column the Rust test suite asserts against.
 

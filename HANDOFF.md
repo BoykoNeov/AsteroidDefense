@@ -5582,7 +5582,7 @@ to subtract it.
 
 #### The rule, written before any flight
 
-`W:\temp\claude\keyhole_constant\decision_rule.md` (outside the repo): the observable
+`docs/decision-rules/2026-09-23-keyhole-constant-one-number.md`: the observable
 is the error in the **change** of `a` across the encounter, converted with each
 row's own gradient. ONE NUMBER only if every new row is the same sign and inside
 ~6 000..11 000 ± 3 540 km of `a'`; the 6:5 (the only then-flown circle whose flyby
@@ -5617,8 +5617,9 @@ own printed snapshot offset):
 | 7:6 Plus | **raises** | 24 200 | −2 069 … −2 403 | 12 768 / **40 507** |
 | 6:5 Plus | **raises** | 22 600 | −2 427 … −2 854 | 18 360 / 19 021 / **46 806** |
 
-Logs: `W:\temp\claude\keyhole_constant\out_*.log`, sweeps `sweep_*.log`, the census
-that picked the separating pair `census.log`.
+Logs (`out_*.log`, sweeps `sweep_*.log`, the census that picked the separating pair
+`census.log`) were scratch and were cleared 2026-10-08; rerun
+`probe_keyhole_placement outgoing` to regenerate them.
 
 #### What it says
 
@@ -5676,8 +5677,9 @@ Result: **NOT REACHABLE at 900, 300 and 200 d.** A second door needs **~660 000 
 of `a'`** at all three (659 779 / 659 867 / 659 112), 13× the new band and 44× the
 old. The close circles do crowd in b-plane km (~2 000 km apart around b 15 - 28
 thousand), but those are the steep ones, so in `a'` they are far apart: the 800 km
-band's "fires at every dialable lead" was the wrong unit, not physics. Logs:
-`W:\temp\claude\keyhole_crowding\crowd_{900,300,200}_15000.log`.
+band's "fires at every dialable lead" was the wrong unit, not physics. (The
+`crowd_{900,300,200}_15000.log` logs were scratch, cleared 2026-10-08; rerun
+`probe_keyhole_placement` to regenerate.)
 
 #### Two probe fixes on the way
 
@@ -5782,8 +5784,8 @@ exposes it.
   outside it with a 123 km band - exposure 374 km, clear, but the closest any
   campaign here came. (The 24×24 prograde plan's was the 7:6 at 1 977 km.)
 - **Probe**: `probe_campaign_grid_resolution_and_sign` (ignored; run by hand)
-  prints the sign census and the count at caps 1/2/3/5/10. Logs:
-  `W:\temp\claude\campaign\`.
+  prints the sign census and the count at caps 1/2/3/5/10. (Its logs were scratch,
+  cleared 2026-10-08; rerun the probe to regenerate.)
 
 #### What this leaves
 

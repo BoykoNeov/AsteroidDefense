@@ -72,7 +72,8 @@ DAY_S = 86_400.0
 JD_REF = 2451545.0  # ASSIST default reference epoch = J2000 TDB (hifitime J2000).
 
 DATA_DIR = os.environ.get(
-    "ASSIST_DATA_DIR", "/mnt/w/temp/claude/AsteroidDefense/kernels"
+    "ASSIST_DATA_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "kernels"),
 )
 FILES = {
     # DE440 planetary (1550–2650) + DE441-consistent 16-asteroid small bodies —

@@ -16,8 +16,8 @@ Done 2026-07-19 (commit 525e33a), closing the kernel-skip trap noted in
 `resolve()` takes env → conventional dirs, **both-or-nothing**; every gated site
 in the workspace (core, `validation`, the gdext binding, the examples) goes
 through `resolve_for_test(what)`. Real kernel dir on this machine is
-`W:\temp\claude\AsteroidDefense\kernels` (de440s.bsp + pck11.pca) — note
-the `AsteroidDefense` segment; earlier notes said `temp/kernels`, which is wrong.
+`W:\Claude_projects\AsteroidDefense\kernels` — **inside the repo**, gitignored
+(`/kernels/`), since 2026-10-08. Before that it was `W:\temp\claude\AsteroidDefense\kernels`.
 
 **Why the flag is a separate thing from the resolver, and why both were needed:**
 resolution cures only *"I have the kernels but didn't point at them"* — this box,
@@ -50,3 +50,16 @@ confirmed `tier1_field_matches_assist` genuinely runs in 0.05 s.
 
 `ScenarioError::MissingKernelEnv` → `KernelsNotFound(String)` carrying the
 searched-paths repair message.
+
+**2026-10-08, the kernels moved INTO the repo — the relative-walk trap above is
+retired.** `W:\Claude_projects\AsteroidDefense\kernels` holds de440s.bsp, pck11.pca,
+sb441-n16.bsp, linux_p1550p2650.440 and `neo/*.neo` (786 882 565 bytes, size-checked
+after the move). It was already the Rust resolver's first search dir and where
+`tools/fetch_kernels.py` and CI put them; Godot's `_search_dirs()` had only
+`res://kernels` (= `<repo>/godot/kernels`), so it gained `res://../kernels`. The
+pyref ASSIST scripts now default to `<script>/../kernels`. The temp-folder walks stay
+as fallbacks. Proved by deleting the temp copy, then `ASTEROID_REQUIRE_KERNELS=1`
+tier1/horizons/kernels tests green and a headless Godot `Kernels.resolve()` reporting
+`source=.../godot/../kernels`. The reference PDFs/texts behind the sourced
+constants (DART, NASA LSP, Cheng, Dotto, Girija, Belair) moved beside them into
+`sources\` — gitignored, because they are copyrighted and the repo is public.

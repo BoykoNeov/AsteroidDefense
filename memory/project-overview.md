@@ -87,8 +87,9 @@ this box's WSL Ubuntu lacks pip/venv + passwordless sudo, so the oracle host is
 shipped ephemeris = **DE440 planetary (`linux_p1550p2650.440`) + DE441-derived
 `sb441-n16.bsp`** (the full DE441 planetary is ~2.6 GB, identical reader; task 1
 allowed "DE440 or DE441"). Results + the written fallback-to-Option-B trigger
-live in `pyref/SPIKE.md`. Kernels/data (~750 MB) live under
-`W:\temp\claude\AsteroidDefense\kernels`, git-ignored.
+live in `pyref/SPIKE.md`. Kernels/data (~750 MB) live in the repo's own
+`W:\Claude_projects\AsteroidDefense\kernels` (moved out of the temp folder 2026-10-08),
+git-ignored.
 
 **Task 4 (§10.4) delivered** in `core/src/propagator.rs`: the `Propagator` trait
 (`fn state_at(&self, Epoch) -> Result<StateVector, PropagatorError>`) — kept
@@ -444,8 +445,8 @@ near nominal (a dip), so the bisect can return a **conservative (non-minimal)** 
 — safe (never under-reports) but watch **curve monotonicity/smoothness** in B.
 
 **Kernel located (unblocks Commit B):** `de440s.bsp` + `pck11.pca` (+ `sb441-n16.bsp`
-Tier-2, `linux_p1550p2650.440` ASSIST-only) live under
-`W:\temp\claude\AsteroidDefense\kernels`, git-ignored, downloaded by
+Tier-2, `linux_p1550p2650.440` ASSIST-only) live in
+`W:\Claude_projects\AsteroidDefense\kernels` (temp folder until 2026-10-08), git-ignored, downloaded by
 `pyref`. ANISE reads the `.bsp`+`.pca`; wire via `ASTEROID_DE_KERNEL` /
 `ASTEROID_PLANETARY_CONSTANTS`.
 

@@ -126,9 +126,13 @@ static func _search_dirs() -> Array[String]:
 	# Beside the executable — where an exported build would ship them, since
 	# res:// lives inside the .pck there and cannot hold a 32 MB kernel usefully.
 	dirs.append(OS.get_executable_path().get_base_dir().path_join("kernels"))
-	# This project's conventional scratch root, which is where the dev machine's
-	# kernels actually live: <drive>/temp/claude/AsteroidDefense, a sibling of the
-	# Claude_projects directory holding the repo (res:// is <repo>/godot).
+	# The repo's own kernels/ folder (res:// is <repo>/godot) — where
+	# tools/fetch_kernels.py and CI put them, the first place core/src/kernels.rs
+	# looks, and (since 2026-10-08) where the dev machine keeps them.
+	dirs.append(ProjectSettings.globalize_path("res://../kernels"))
+	# The dev machine's scratch root before 2026-10-08:
+	# <drive>/temp/claude/AsteroidDefense, a sibling of the Claude_projects
+	# directory holding the repo. Kept as a fallback.
 	dirs.append(ProjectSettings.globalize_path("res://../../../temp/claude/AsteroidDefense/kernels"))
 	# The layout this repo lived under before 2026-09-08 — claud_projects with a
 	# temp/ sibling inside it. Kept so an unmoved checkout still resolves.

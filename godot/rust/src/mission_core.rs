@@ -45,8 +45,8 @@ use godot::global::godot_warn;
 use nalgebra::{Matrix2, Vector2, Vector3};
 
 use asteroid_core::campaign::{
-    campaign_impulses, parked_launches, parked_window, plan_campaign, plan_campaign_rolling,
-    CampaignOutcome, CampaignPlan, CampaignWindow,
+    campaign_impulses, best_ahead, parked_launch_dates, parked_launches, parked_window,
+    plan_campaign, plan_campaign_rolling, CampaignOutcome, CampaignPlan, CampaignWindow,
 };
 use asteroid_core::deflection::DeflectionError;
 use asteroid_core::ephemeris::Ephemeris;
@@ -3731,6 +3731,26 @@ pub const SHIPPING_WINDOW_SEARCH: WindowSearch = WindowSearch {
     polish_launch: true,
 };
 
+/// The parking heights, km, the shipping stack is reported at besides its own
+/// 400 km: 400 km is only the lowest height a stack survives at, and the 1-a-year
+/// answer turns on it.
+pub const PARKING_HEIGHTS_REPORTED_KM: [f64; 7] =
+    [450.0, 500.0, 600.0, 800.0, 1_000.0, 1_500.0, 2_000.0];
+
+/// The parked deliveries reported beside `shipping`: the labelled *what ifs*, then
+/// `shipping` at each of [`PARKING_HEIGHTS_REPORTED_KM`]. Passed as
+/// [`measure_campaign_candidates_from`]'s `parked_also`, each is replanned on
+/// windows chosen for it; otherwise on windows chosen for `shipping`.
+pub fn parked_deliveries_reported(shipping: ParkedDelivery) -> Vec<ParkedDelivery> {
+    asteroid_core::orbital_assembly::WHAT_IF_PARKED_DELIVERIES
+        .into_iter()
+        .chain(PARKING_HEIGHTS_REPORTED_KM.map(|km| ParkedDelivery {
+            parking_altitude_m: km * 1e3,
+            ..shipping
+        }))
+        .collect()
+}
+
 /// Where each year's windows come from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WindowSource {
@@ -4047,6 +4067,7 @@ pub fn measure_campaign_candidates(
         vehicle,
         period_origin_tdb,
         WindowSource::Continuous(SHIPPING_WINDOW_SEARCH),
+        &asteroid_core::orbital_assembly::WHAT_IF_PARKED_DELIVERIES,
     )
 }
 
@@ -4068,6 +4089,13 @@ pub fn measure_campaign_candidates(
 /// (most prograde winners are - see [`WindowSearch`]), so the per-year best is the
 /// best *inside* the slot, not the best nearby.
 ///
+/// `parked_also`: parked deliveries, besides the launcher's shipping one, to choose
+/// parked departure windows for too (see the comment at the choice) - ignored for
+/// a launcher that does not park. The app passes the labelled *what ifs*, which it
+/// prints; the probe adds the other parking heights ([`parked_deliveries_reported`]).
+/// Each costs flights: on the shipping rock the shipping delivery alone flies 96
+/// windows, with the what ifs 117, with the heights too 126.
+///
 /// `view` is the map the windows are reported against: a continuous window's
 /// `launch_index` / `arrival_index` is the **nearest** cell of it, which the map
 /// uses to say which cell the selection is on — never to place the window, which
@@ -4078,6 +4106,7 @@ pub fn measure_campaign_candidates_from(
     vehicle: &LaunchVehicle,
     period_origin_tdb: f64,
     source: WindowSource,
+    parked_also: &[ParkedDelivery],
 ) -> Result<CampaignCandidates, ScenarioError> {
     let fail = |what: &str, e: &dyn std::fmt::Display| {
         ScenarioError::Integration(format!("launch campaign: {what}: {e}"))
@@ -4369,59 +4398,95 @@ pub fn measure_campaign_candidates_from(
 
     // A parked launch leaves only through a flown window, and the windows above were
     // chosen for *direct* launches. Parking loses less mass than a direct launch at
-    // high C3 (the direct curve falls steeply toward the rocket's energy limit), so a
-    // year's best departure for a parked launch can be a window the direct ranking
-    // passed over. So rank what is left of the pool by the key at the shipping parked
-    // mass, and fly each (year, direction)'s best where it beats every flown window
-    // there by that same key - the way each year's best direct window was chosen.
+    // high C3 (the direct curve falls steeply toward the rocket's energy limit), so
+    // the best departure for a parked launch can be a window the direct ranking
+    // passed over. A parked launch that went up on date `t` leaves through the best
+    // window dated `t` or later, and it only ever goes up on `parked_launch_dates`
+    // (the theorem `parked_launches` rests on), so the pool windows worth flying are
+    // the best at or after one of those dates (`best_ahead`) - per push direction, by
+    // the key at the parked mass. (Until 2026-10-08 each year's single best by that
+    // key was flown instead, so a year's second best - dated after its best, and all
+    // a launch going up between the two could still reach - never was. The first
+    // replacement flew every window that beats everything after it, launch date or
+    // not: since a window's worth grows with its lead, that was most of the pool.)
+    //
+    // The shipping delivery gets its own pick, and so does each of `parked_also`
+    // (the probe passes the what ifs and the other parking heights). The mass ratio
+    // differs between them, so their best windows do too, and a delivery replanned
+    // on windows picked for another is replanned on someone else's dates. Each
+    // round flies the union.
     //
     // Only for a launcher with a sourced parked stack (`parked_delivery_for`) - for
     // the rest there is nothing to rank by and nothing to park.
     let parking = parked_delivery_for(vehicle);
-    let parked_ratio = |c3: f64, impact_kg: f64, v_inf: Vector3<f64>| match parking {
-        Some(p) if impact_kg > 0.0 && parking_plane_reaches(v_inf) => {
-            p.impact_mass_kg(c3) / impact_kg
-        }
-        _ => 0.0,
-    };
-    let parked_key_pool = |w: &FoundWindow| {
-        key(w)
-            * parked_ratio(
-                w.metrics.c3_km2_s2,
-                w.delivery.impact_mass_kg,
-                w.metrics.v_inf_departure,
-            )
-    };
-    let mut parked_best: std::collections::BTreeMap<(u32, bool), (f64, usize)> =
-        std::collections::BTreeMap::new();
-    for (i, w) in pool.iter().enumerate().filter(|_| parking.is_some()) {
-        let slot = (
-            campaign_period(w.launch_tdb, period_origin_tdb),
-            w.delivery.along_track_dv_ms > 0.0,
-        );
-        let k = parked_key_pool(w);
-        if parked_best.get(&slot).is_none_or(|b| k > b.0) {
-            parked_best.insert(slot, (k, i));
-        }
-    }
-    let to_fly: Vec<FoundWindow> = parked_best
-        .iter()
-        .filter(|((period, prograde), (k, _))| {
-            !candidates.iter().any(|c| {
-                c.period == *period
-                    && (c.proxy_along_track_dv_ms > 0.0) == *prograde
-                    && campaign_proxy(c.proxy_along_track_dv_ms, impact_tdb - c.arrival_tdb)
-                        * parked_ratio(c.c3_km2_s2, c.impact_mass_kg, c.v_inf_departure)
-                        >= *k
-            })
-        })
-        .map(|(_, (_, i))| pool[*i])
+    let measured: Vec<ParkedDelivery> = parking
+        .into_iter()
+        .chain(parking.iter().flat_map(|_| parked_also.iter().copied()))
         .collect();
-    for (w, shift) in to_fly.iter().zip(fly_all(&to_fly)?) {
-        if let Some(shift) = shift {
-            let (c, cw) = record(w, shift);
-            candidates.push(c);
-            windows.push(cw);
+    let span = (
+        launch_axis.first().copied().unwrap_or(period_origin_tdb),
+        launch_axis.last().copied().unwrap_or(period_origin_tdb),
+    );
+    // A window flown here can be a direct launch too, and a parked launch can go up a
+    // period after any direct one - so each round adds launch dates, and the rounds
+    // repeat until one flies nothing.
+    while !measured.is_empty() {
+        let bases: Vec<f64> = candidates.iter().map(|c| c.launch_tdb).collect();
+        let launch_dates = parked_launch_dates(&bases, span.0, span.1, CAMPAIGN_PERIOD_S);
+        let mut fly_pool: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        for d in &measured {
+            let ratio = |c3: f64, impact_kg: f64, v_inf: Vector3<f64>| {
+                if impact_kg > 0.0 && parking_plane_reaches(v_inf) {
+                    d.impact_mass_kg(c3) / impact_kg
+                } else {
+                    0.0
+                }
+            };
+            for prograde in [false, true] {
+                let mut flown: Vec<(f64, f64)> = Vec::new();
+                for c in &candidates {
+                    if (c.proxy_along_track_dv_ms > 0.0) == prograde {
+                        let k =
+                            campaign_proxy(c.proxy_along_track_dv_ms, impact_tdb - c.arrival_tdb)
+                                * ratio(c.c3_km2_s2, c.impact_mass_kg, c.v_inf_departure);
+                        flown.push((c.launch_tdb, k));
+                    }
+                }
+                let mut from: Vec<usize> = Vec::new();
+                let mut open: Vec<(f64, f64)> = Vec::new();
+                for (i, w) in pool.iter().enumerate() {
+                    if (w.delivery.along_track_dv_ms > 0.0) == prograde {
+                        let k = key(w)
+                            * ratio(
+                                w.metrics.c3_km2_s2,
+                                w.delivery.impact_mass_kg,
+                                w.metrics.v_inf_departure,
+                            );
+                        from.push(i);
+                        open.push((w.launch_tdb, k));
+                    }
+                }
+                fly_pool.extend(
+                    best_ahead(&launch_dates, &flown, &open)
+                        .into_iter()
+                        .map(|j| from[j]),
+                );
+            }
+        }
+        if fly_pool.is_empty() {
+            break;
+        }
+        let to_fly: Vec<FoundWindow> = fly_pool.iter().map(|&i| pool[i]).collect();
+        for (w, shift) in to_fly.iter().zip(fly_all(&to_fly)?) {
+            if let Some(shift) = shift {
+                let (c, cw) = record(w, shift);
+                candidates.push(c);
+                windows.push(cw);
+            }
+        }
+        // Flown (or unflyable) either way: out of the pool.
+        for i in fly_pool.into_iter().rev() {
+            pool.swap_remove(i);
         }
     }
 
@@ -4429,10 +4494,6 @@ pub fn measure_campaign_candidates_from(
     // date, where the launcher has a sourced parked stack: the published
     // single-payload limit and a storable departure engine, on the windows just
     // flown - arithmetic, no flight.
-    let span = (
-        launch_axis.first().copied().unwrap_or(period_origin_tdb),
-        launch_axis.last().copied().unwrap_or(period_origin_tdb),
-    );
     let direct = CampaignCandidates {
         period_origin_tdb,
         period_count,
@@ -5432,6 +5493,7 @@ mod tests {
                                 v,
                                 origin,
                                 WindowSource::Continuous(*s),
+                                &[],
                             ),
                             None => {
                                 let view = PorkchopView::build(&scenario, *n, *n).expect("grid");
@@ -5441,6 +5503,7 @@ mod tests {
                                     v,
                                     origin,
                                     WindowSource::GridCells,
+                                    &[],
                                 )
                             }
                         }
@@ -5661,6 +5724,7 @@ mod tests {
             &FALCON_HEAVY_EXPENDABLE,
             view.launch_tdb()[0],
             WindowSource::Continuous(search),
+            &[],
         )
         .expect("candidates")
         // These probes measure the straight-to-the-rock windows; parking is
@@ -5847,6 +5911,16 @@ mod tests {
             })
             .unwrap_or(SHIPPING_WINDOW_SEARCH);
         println!("search {search:?}");
+        // The what ifs and the heights below choose their own parked windows too.
+        // `ASSEMBLY_ALSO=app` measures what the app measures (the what ifs, not the
+        // heights), and so what it costs there; `ASSEMBLY_ALSO=none` the shipping
+        // delivery alone.
+        let also: Vec<asteroid_core::orbital_assembly::ParkedDelivery> =
+            match (parked_delivery_for(vehicle), std::env::var("ASSEMBLY_ALSO").as_deref()) {
+                (None, _) | (_, Ok("none")) => Vec::new(),
+                (_, Ok("app")) => WHAT_IF_PARKED_DELIVERIES.to_vec(),
+                (Some(p), _) => parked_deliveries_reported(p),
+            };
         let t0 = std::time::Instant::now();
         let c = measure_campaign_candidates_from(
             &scenario,
@@ -5854,6 +5928,7 @@ mod tests {
             vehicle,
             view.launch_tdb()[0],
             WindowSource::Continuous(search),
+            &also,
         )
         .expect("candidates");
         let parked = c.candidates.iter().filter(|k| k.parked).count();
@@ -5977,7 +6052,7 @@ mod tests {
         // as the orbit rises, and 400 km is only the lowest height a stack survives.
         {
             use asteroid_core::orbital_assembly::SHIPPING_PARKED_DELIVERY;
-            for alt_km in [400.0, 450.0, 500.0, 600.0, 800.0, 1000.0, 1500.0, 2000.0] {
+            for alt_km in std::iter::once(400.0).chain(PARKING_HEIGHTS_REPORTED_KM) {
                 let d = asteroid_core::orbital_assembly::ParkedDelivery {
                     parking_altitude_m: alt_km * 1e3,
                     ..SHIPPING_PARKED_DELIVERY

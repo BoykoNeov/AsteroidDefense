@@ -629,7 +629,7 @@ That MVP delivers the whole lesson *and* an honest hit→miss flip. Everything b
 ### Phase 3 (future)
 
 - Plausible launch vehicles + payload mass budgets — **both DONE** (vehicles 2026-07; mass budget 2026-10-01, *What actually hits the rock*)
-- Orbital assembly (assemble-in-orbit when payload too big for one launch) — **DONE 2026-10-07** as parking: joining buys nothing under a linear push; waiting in orbit for a better date is what pays, at a mass cost (*Orbital assembly: it is parking, not joining*); the escape burn flown finite and the plane checked the same day — 1 a year falls short by ~1 % (*The escape burn flown for real*)
+- Orbital assembly (assemble-in-orbit when payload too big for one launch) — **DONE 2026-10-07** as parking: joining buys nothing under a linear push; waiting in orbit for a better date is what pays, at a mass cost (*Orbital assembly: it is parking, not joining*); the escape burn flown finite and the plane checked the same day — 1 a year falls short by ~1 % (*The escape burn flown for real*); a year's second-best departure date offered 2026-10-08, changing nothing (*A parked launch's second-best date*)
 - Standing/ready Earth-defense systems
 - Multi-mission campaigns — **DONE** (2026-09-23 onward, *Several launches against one rock* and after)
 
@@ -6369,10 +6369,11 @@ two" - the 13 parked-departure flights.
 
 #### What this leaves
 
-- A parked launch's departure is each year's best *by the parked key*; a second-best
-  date of a year is not offered to it. The direct side solved the same problem with
-  the estimate-and-fly loop; parking could join that loop if a count ever sits on it.
-- The *what ifs* are on windows chosen at the shipping parked mass.
+- ~~A parked launch's departure is each year's best *by the parked key*; a second-best
+  date of a year is not offered to it.~~ **Closed 2026-10-08** - offered now, and it
+  changes no shipping number (*A parked launch's second-best date*).
+- ~~The *what ifs* are on windows chosen at the shipping parked mass.~~ **Closed
+  2026-10-08** - they choose their own (same section).
 - Phase 3's remaining bullet is standing defence systems.
 
 ### The escape burn flown for real - 2026-10-07 session (orbital assembly, its two open costs)
@@ -6506,3 +6507,95 @@ launches face the same limit cannot be said here.
 - The frontend's panel line now names the height and the firings
   (`nP = PARKED AT 400 KM: 26.5 T STACK, OMS-E (STORABLE) 315 S IN 8 BURNS`), and
   `_campaign_shot.gd` asserts 1 a year FALLS SHORT with parking.
+
+### A parked launch's second-best date - 2026-10-08 session (orbital assembly, its open window choice)
+
+The parking section left one gap in *which windows a parked launch can leave
+through*: the measurement flew, per year and push direction, only the single best
+window by the key at the parked mass. A year's **second** best, dated after its best,
+is all a launch going up between the two can still reach, and it was never offered.
+With 1 a year sitting 1.15 % short, that was the one leftover that could move a
+headline. **It does not: on the shipping rock the second-best dates change no number
+at all.** The rule that finds them ships anyway, with the *what ifs* now choosing
+their own windows too (the user's pick), at the price of a longer measurement.
+
+#### The rule, and the version that did not work
+
+A parked launch that went up on date `t` takes the best window dated `t` or later -
+the cap counts launch dates, and any number of stacks may leave through one window.
+So the windows worth flying are the ones that are that best for some launch date.
+
+- **First cut: every window that beats everything after it.** Read from the last
+  date backwards, that is a staircase - and since a window's worth grows with its
+  lead, almost every earlier window beats everything later. It flew **391** windows
+  (was 44) and took **621 s**. Kept as the upper bound below, not shipped.
+- **Shipped: only the dates a parked launch can actually go up on** -
+  `parked_launch_dates` (now its own function, shared with `parked_launches`): the
+  first launch date, and a whole number of years after any direct window - the same
+  theorem the exact planner already rests on. `best_ahead` returns the pool window
+  that is best at or after each of those dates (a tie goes to a flown window: flying
+  the other buys nothing). Each window flown can itself become a direct launch and
+  add launch dates, so the choice repeats in rounds until one flies nothing. It
+  reproduces the 391-window run's shipping numbers **exactly** (every rate, every
+  height, the flown plan) on a third of the flights.
+
+`best_ahead` is pinned by a hand case and a randomised property test (no launch date
+loses its best window; every window kept is strictly some launch date's best), and
+three deliberate breaks - ignoring the launch dates, dropping the flown-tie rule, a
+launch not allowed its own date - each fail it.
+
+#### What it measures (`probe_orbital_assembly`, Falcon Heavy expendable)
+
+1 in any 12 months, predicted |B| km (target 25 955; at the line >= 25 695); every
+launch count in every column is unchanged throughout, and 2..12 a year stay 6:
+
+| windows chosen for | flown | measure | shipping 1 a year | what ifs: 26.5 t H2 / 63.8 t storable / 63.8 t H2 |
+|---|---|---|---|---|
+| before: one best per year, shipping key | 44 | 162 s | short 25 657 | 5 (29 317) / 3 (28 702) / 2 (32 897) |
+| shipping only (`ASSEMBLY_ALSO=none`) | 96 | 232 s | short 25 657 | same as before |
+| **shipping + what ifs (the app)** | **117** | **234 s** | **short 25 658** | 5 (29 380) / 3 (28 702) / 2 (33 029) |
+| + the other heights (probe default) | 126 | 268 s | short 25 665 | 5 (29 380) / 3 (28 706) / 2 (33 029) |
+| upper bound (staircase, every date) | 391 | 621 s | short 25 665 | 5 (29 432) / 3 (28 706) / 2 (33 133) |
+
+- **Shipping alone: identical to before, to the kilometre.** The second-best date
+  is never what a shipping plan needed; the old per-year pick had already found
+  every window it uses. The item closes by measurement.
+- **The 1-8 km the larger sets add to the shipping answer are ranking noise**:
+  windows picked for *another* delivery that fly a little better than the key
+  ranked them (the key tracks flown shifts only to 24-57 %, *The windows searched
+  continuously*). About 0.03 % of the reach - the size of the wobble any count on
+  this rock has, and far inside the 1.1 % it falls short by.
+- **Heights:** with the heights' own windows flown, 450 km is **at the line by 4 km**
+  (25 699; was short by 4) and 500 / 600 / 800 / 1 000 / 2 000 km read 25 733 /
+  25 800 / 25 927 / 26 047 / 26 553. The 450 km flip is inside the noise above, so
+  the quote becomes **short at 400 km, at the line from ~450-500 km, clear from
+  ~1 000 km.** The shipping 1-a-year plan flown whole: perigee **19 719 km** (was
+  19 712), nonlinearity 0.021 %.
+
+#### The frontend
+
+`measure_campaign_candidates_from` takes `parked_also` - deliveries besides the
+shipping one to choose windows for. The app passes the three *what ifs* it prints
+(user's choice over "shipping only", "probe only" and "drop it": the threat
+designer can put the rock on another orbit, where a second-best date could matter);
+the probe adds the seven other heights (`parked_deliveries_reported`;
+`ASSEMBLY_ALSO=app` or `=none` measure the smaller sets). The cost is the
+measurement: 44 -> 117 flights, **162 -> 234 s** in the release probe and **~130 ->
+184 s in the app** (`_campaign_shot.gd`, unchanged and green: 1 a year FALLS SHORT,
+25 657 of 25 954 km; 2 a year 6, flown perigee 20 784 km). That harness needs a
+window - run headless it hangs at its first screenshot and never reaches the
+measurement (it timed out at 1 200 s that way this session, which looked like a
+slow measurement and was not).
+
+#### What this leaves
+
+- **Each launch date's arrival is still chosen for a direct launch.** The window
+  search keeps, per launch date, the arrival best by the *direct* key; a parked
+  stack loses less mass at high `C3`, so its best arrival on the same date can be a
+  different one. Not measured. Given the date dimension moved nothing, probably
+  small - but that is a guess, not a number.
+- Station-keeping during the wait and the Moon and Sun in the phasing loops, both
+  still uncharged. Both only cost parking, so neither can rescue 400 km; they can
+  only push the "at the line" height up.
+- The 38-setting escape bracket (`ASSEMBLY_BRACKET=1`) is still replanned on
+  windows chosen for the shipping setting.

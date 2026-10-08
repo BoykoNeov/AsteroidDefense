@@ -628,31 +628,8 @@ pub fn parked_launches(
     let Some(last_out) = departures.iter().map(|&i| when(i)).reduce(f64::max) else {
         return Ok(Vec::new());
     };
-    let stop = t_hi.min(last_out);
-
-    // Every date a parked launch can need: `earliest` and each direct window's date,
-    // plus whole periods (the window dates themselves are direct launches, so a
-    // parked launch starts one period after them).
-    let mut dates: Vec<f64> = Vec::new();
-    let mut from = |base: f64, first: u32| {
-        let mut k = first;
-        loop {
-            let t = base + f64::from(k) * period_s;
-            if t > stop {
-                break;
-            }
-            if t >= t_lo {
-                dates.push(t);
-            }
-            k += 1;
-        }
-    };
-    from(t_lo, 0);
-    for i in 0..windows.len() {
-        from(when(i), 1);
-    }
-    dates.sort_by(f64::total_cmp);
-    dates.dedup();
+    let all_dates: Vec<f64> = (0..windows.len()).map(when).collect();
+    let dates = parked_launch_dates(&all_dates, t_lo, t_hi.min(last_out), period_s);
 
     let mut out = Vec::new();
     for t in dates {
@@ -675,6 +652,39 @@ pub fn parked_launches(
     Ok(out)
 }
 
+/// Every date a parked launch can need (see [`parked_launches`] for why): `earliest`
+/// and each direct window's date in `window_dates`, plus whole periods - the window
+/// dates themselves are direct launches, so a parked launch starts one period after
+/// them. Only dates from `earliest` to `stop`, sorted, each once. All TDB s.
+///
+/// A period that is not finite and > 0 gives no dates.
+pub fn parked_launch_dates(window_dates: &[f64], earliest: f64, stop: f64, period_s: f64) -> Vec<f64> {
+    if !(period_s.is_finite() && period_s > 0.0) {
+        return Vec::new();
+    }
+    let mut dates: Vec<f64> = Vec::new();
+    let mut from = |base: f64, first: u32| {
+        let mut k = first;
+        loop {
+            let t = base + f64::from(k) * period_s;
+            if t > stop {
+                break;
+            }
+            if t >= earliest {
+                dates.push(t);
+            }
+            k += 1;
+        }
+    };
+    from(earliest, 0);
+    for &t in window_dates {
+        from(t, 1);
+    }
+    dates.sort_by(f64::total_cmp);
+    dates.dedup();
+    dates
+}
+
 /// The planner's view of one parked launch: launched on its own date (which the cap
 /// counts), arriving with its departure window, pushing `scale ×` that window's
 /// per-launch push. `period` is the caller's label, as for any window.
@@ -691,6 +701,65 @@ pub fn parked_window(
         impulse_per_launch: scale * departure.impulse_per_launch,
         shift_per_launch: scale * departure.shift_per_launch,
     }
+}
+
+/// Which `pool` windows a parked launch can leave through, given the `flown` ones
+/// and the dates it can go up on (`launch_dates`, from [`parked_launch_dates`]):
+/// each window is `(date, key)` - its date (TDB s) and its worth to a parked
+/// launch, the larger the better. Returns the indices into `pool`, ascending.
+///
+/// # Why this is the set
+/// The cap counts a parked launch's **launch** date, not its departure, and any
+/// number of parked stacks may leave through one window - so a parked launch that
+/// went up on date `t` takes the best window dated `t` or later, and nothing else.
+/// The pool windows returned are the ones that are that best for some launch date.
+/// A window only as good as (or worse than) another at or after its own date is
+/// never one; nor is a window that is the best from some date on, but only from
+/// dates no launch can go up on - which is why the launch dates are an argument.
+/// Without them the answer is every window that beats everything after it, and
+/// since a window's worth grows with its lead, read from the last date backwards
+/// that is most of the pool.
+///
+/// A key of 0 or less never counts. A tie goes to a flown window (at any date a
+/// launch reaches both), then to the later pool window, then to the lower index.
+pub fn best_ahead(launch_dates: &[f64], flown: &[(f64, f64)], pool: &[(f64, f64)]) -> Vec<usize> {
+    // The staircase, read from the last date backwards: every window that beats
+    // everything at or after its date, as (date, None = flown | Some(pool index)).
+    // Sorted latest first, then the highest key, flown before pool, lower index
+    // first - so the first entry of a date is the only one that can beat the best.
+    let mut all: Vec<(f64, f64, Option<usize>)> = flown
+        .iter()
+        .map(|&(t, k)| (t, k, None))
+        .chain(pool.iter().enumerate().map(|(i, &(t, k))| (t, k, Some(i))))
+        .collect();
+    all.sort_by(|a, b| {
+        b.0.total_cmp(&a.0)
+            .then(b.1.total_cmp(&a.1))
+            .then(a.2.cmp(&b.2))
+    });
+    // A flown window that only *ties* the best after it still takes the step: a
+    // launch that can reach both needs nothing flown.
+    let mut best = 0.0_f64;
+    let mut stairs: Vec<(f64, Option<usize>)> = Vec::new();
+    for (t, k, i) in all {
+        if k > best || (i.is_none() && k == best && k > 0.0) {
+            best = k;
+            stairs.push((t, i));
+        }
+    }
+    // Earliest first: the best window at or after `t` is the first step dated `t`
+    // or later.
+    stairs.reverse();
+    let mut out: Vec<usize> = launch_dates
+        .iter()
+        .filter_map(|&t| {
+            let j = stairs.partition_point(|s| s.0 < t);
+            stairs.get(j).and_then(|s| s.1)
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// Indices of the points that are vertices of the convex hull of `points` and the
@@ -1079,6 +1148,102 @@ mod tests {
             }),
         );
         all
+    }
+
+    /// By hand: a year's best is flown; the same year's second best, dated *after*
+    /// it, is what a launch going up between the two can still reach - but only if
+    /// a launch can go up there.
+    #[test]
+    fn best_ahead_keeps_a_later_second_best_a_launch_can_reach() {
+        let flown = [(10.0, 9.0), (400.0, 5.0)];
+        let pool = [
+            (5.0, 8.0),   // 0: before the flown 9 - a launch here reaches the 9
+            (50.0, 7.0),  // 1: after the 9, beats everything later
+            (60.0, 6.0),  // 2: beats everything later (the 7 is earlier)
+            (300.0, 5.0), // 3: only ties the flown 5 at 400
+            (300.0, 5.5), // 4: same date, higher
+            (500.0, 0.0), // 5: worthless
+            (450.0, 1.0), // 6: the only worth after the flown 5
+        ];
+        // A launch on every date: every window that beats everything after it.
+        let every: Vec<f64> = (0..=500).map(f64::from).collect();
+        assert_eq!(best_ahead(&every, &flown, &pool), vec![1, 2, 4, 6]);
+        // Launches only at 0, 55 and 420: from 0 the flown 9 is best, from 55 the 6,
+        // from 420 the 1 - the 7 and the 5.5 are no launch's best.
+        assert_eq!(best_ahead(&[0.0, 55.0, 420.0], &flown, &pool), vec![2, 6]);
+        // A launch dated exactly on a window can take it.
+        assert_eq!(best_ahead(&[300.0], &flown, &pool), vec![4]);
+        // After every window: nothing.
+        assert!(best_ahead(&[600.0], &flown, &pool).is_empty());
+        // Same date and key as a flown window: the flown one already serves.
+        assert!(best_ahead(&[0.0], &[(7.0, 3.0)], &[(7.0, 3.0)]).is_empty());
+        // Two pool windows tied: the lower index.
+        assert_eq!(best_ahead(&[0.0], &[], &[(7.0, 3.0), (7.0, 3.0)]), vec![0]);
+    }
+
+    /// The property itself, on random windows and launch dates: for every launch
+    /// date the best window at or after it is the same with the pool cut to what
+    /// `best_ahead` keeps as with all of it, and every window kept is strictly the
+    /// best from some launch date (removing it would lower that launch's best).
+    #[test]
+    fn best_ahead_loses_no_parked_launch_and_keeps_nothing_spare() {
+        let mut s: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move |n: u64| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s % n
+        };
+        let best_from = |t: f64, a: &[(f64, f64)], b: &[(f64, f64)]| {
+            a.iter()
+                .chain(b)
+                .filter(|w| w.0 >= t)
+                .map(|w| w.1)
+                .fold(0.0_f64, f64::max)
+        };
+        for _ in 0..400 {
+            // Coarse dates and keys so that ties happen.
+            let mut draw = |n: u64| -> Vec<(f64, f64)> {
+                (0..next(n))
+                    .map(|_| (next(12) as f64 * 30.0, next(8) as f64 - 1.0))
+                    .collect()
+            };
+            let flown = draw(5);
+            let pool = draw(9);
+            let launches: Vec<f64> = (0..next(5)).map(|_| next(13) as f64 * 30.0 - 15.0).collect();
+            let kept = best_ahead(&launches, &flown, &pool);
+            let cut: Vec<(f64, f64)> = kept.iter().map(|&i| pool[i]).collect();
+            for &t in &launches {
+                assert_eq!(
+                    best_from(t, &flown, &cut),
+                    best_from(t, &flown, &pool),
+                    "launch at {t}: flown {flown:?} pool {pool:?} kept {kept:?}"
+                );
+            }
+            for j in 0..kept.len() {
+                let mut without = cut.clone();
+                without.remove(j);
+                assert!(
+                    launches
+                        .iter()
+                        .any(|&t| best_from(t, &flown, &without) < best_from(t, &flown, &cut)),
+                    "pool {} kept but spare: launches {launches:?} flown {flown:?} pool {pool:?} kept {kept:?}",
+                    kept[j]
+                );
+            }
+        }
+    }
+
+    /// The dates are `earliest` plus whole periods, and each window's date plus one
+    /// or more periods, inside `[earliest, stop]`, sorted and each once.
+    #[test]
+    fn parked_launch_dates_are_the_periods_after_each_window() {
+        let d = parked_launch_dates(&[50.0, 30.0, 130.0], 10.0, 260.0, 100.0);
+        // 10, 110, 210 from earliest; 150, 250 from 50; 130, 230 from 30; 230 from 130.
+        assert_eq!(d, vec![10.0, 110.0, 130.0, 150.0, 210.0, 230.0, 250.0]);
+        // A window before `earliest` still seeds the dates a period on.
+        assert_eq!(parked_launch_dates(&[-50.0], 0.0, 100.0, 100.0), vec![0.0, 50.0, 100.0]);
+        assert!(parked_launch_dates(&[0.0], 0.0, 100.0, 0.0).is_empty());
     }
 
     /// Only the points furthest along some direction survive: an interior point, a

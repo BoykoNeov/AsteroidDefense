@@ -45,7 +45,7 @@ use godot::global::godot_warn;
 use nalgebra::{Matrix2, Vector2, Vector3};
 
 use asteroid_core::campaign::{
-    campaign_impulses, best_ahead, parked_launch_dates, parked_launches, parked_window,
+    best_ahead, campaign_impulses, parked_launch_dates, parked_launches, parked_window,
     plan_campaign, plan_campaign_rolling, CampaignOutcome, CampaignPlan, CampaignWindow,
 };
 use asteroid_core::deflection::DeflectionError;
@@ -3734,6 +3734,7 @@ pub const SHIPPING_WINDOW_SEARCH: WindowSearch = WindowSearch {
 /// The parking heights, km, the shipping stack is reported at besides its own
 /// 400 km: 400 km is only the lowest height a stack survives at, and the 1-a-year
 /// answer turns on it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const PARKING_HEIGHTS_REPORTED_KM: [f64; 7] =
     [450.0, 500.0, 600.0, 800.0, 1_000.0, 1_500.0, 2_000.0];
 
@@ -3741,6 +3742,7 @@ pub const PARKING_HEIGHTS_REPORTED_KM: [f64; 7] =
 /// `shipping` at each of [`PARKING_HEIGHTS_REPORTED_KM`]. Passed as
 /// [`measure_campaign_candidates_from`]'s `parked_also`, each is replanned on
 /// windows chosen for it; otherwise on windows chosen for `shipping`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parked_deliveries_reported(shipping: ParkedDelivery) -> Vec<ParkedDelivery> {
     asteroid_core::orbital_assembly::WHAT_IF_PARKED_DELIVERIES
         .into_iter()
@@ -5915,12 +5917,14 @@ mod tests {
         // `ASSEMBLY_ALSO=app` measures what the app measures (the what ifs, not the
         // heights), and so what it costs there; `ASSEMBLY_ALSO=none` the shipping
         // delivery alone.
-        let also: Vec<asteroid_core::orbital_assembly::ParkedDelivery> =
-            match (parked_delivery_for(vehicle), std::env::var("ASSEMBLY_ALSO").as_deref()) {
-                (None, _) | (_, Ok("none")) => Vec::new(),
-                (_, Ok("app")) => WHAT_IF_PARKED_DELIVERIES.to_vec(),
-                (Some(p), _) => parked_deliveries_reported(p),
-            };
+        let also: Vec<asteroid_core::orbital_assembly::ParkedDelivery> = match (
+            parked_delivery_for(vehicle),
+            std::env::var("ASSEMBLY_ALSO").as_deref(),
+        ) {
+            (None, _) | (_, Ok("none")) => Vec::new(),
+            (_, Ok("app")) => WHAT_IF_PARKED_DELIVERIES.to_vec(),
+            (Some(p), _) => parked_deliveries_reported(p),
+        };
         let t0 = std::time::Instant::now();
         let c = measure_campaign_candidates_from(
             &scenario,

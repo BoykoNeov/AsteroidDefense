@@ -298,8 +298,10 @@ Read this table first, then the session that owns the layer you are touching.
    1 % band); **with the escape burn flown for real (2026-10-07: 8 firings of the
    OMS-E from a 400 km orbit, the user's pick) 1 in any 12 months is ON THE EDGE:
    short by 1.15 % at 400 km** (9 launches, |B| 25 657 of 25 955 km, flown perigee
-   19 712 km), at the line from ~500 km, clear from ~1 000 km - the parking height
-   decides it and nothing sourced fixes it;
+   19 712 km), at the line from ~450-500 km (450 km by 4 km once its own windows are
+   flown, 2026-10-08 - within the ranking noise), clear from ~1 000 km - the parking
+   height decides it and nothing sourced fixes it. A year's second-best departure
+   date, offered 2026-10-08, changes none of this;
    **2..12 stay at 6** in every setting. Plane drift costs nothing (pre-aimed by the
    launch time); only the orbit's 28.5 deg tilt limits it. Hydrogen / the advertised
    63.8 t are labelled what-ifs (4-5 / 3 / 2). See *Orbital assembly: it is

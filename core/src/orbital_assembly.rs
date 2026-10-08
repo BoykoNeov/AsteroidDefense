@@ -82,8 +82,10 @@
 //! **The 1-a-year answer is on the edge, and the height decides it.** 400 km is
 //! the *lowest* height a stack survives at, not a natural one, and every height
 //! above it needs less escape burn. Measured at the shipping escape setting: 1 in
-//! any 12 months falls short at 400 km (by 38 km of the 1 % band) and 450 km (by
-//! 4 km), is at the line from 500 km, and clears the target outright from about
+//! any 12 months falls short at 400 km (by 38 km of the 1 % band), sits on the line
+//! at 450 km (short by 4 km on windows chosen for 400 km, at it by 4 km on its own -
+//! within the ranking noise, 2026-10-08), is at the line from 500 km, and clears
+//! the target outright from about
 //! 1 000 km (which leans on an unsourced lift that high, at the edge of the
 //! radiation belts). The user kept 400 km as the cautious default (2026-10-07), so
 //! the shipping answer is "short" and is quoted with this edge.

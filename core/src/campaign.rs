@@ -658,7 +658,12 @@ pub fn parked_launches(
 /// them. Only dates from `earliest` to `stop`, sorted, each once. All TDB s.
 ///
 /// A period that is not finite and > 0 gives no dates.
-pub fn parked_launch_dates(window_dates: &[f64], earliest: f64, stop: f64, period_s: f64) -> Vec<f64> {
+pub fn parked_launch_dates(
+    window_dates: &[f64],
+    earliest: f64,
+    stop: f64,
+    period_s: f64,
+) -> Vec<f64> {
     if !(period_s.is_finite() && period_s > 0.0) {
         return Vec::new();
     }
@@ -1210,7 +1215,9 @@ mod tests {
             };
             let flown = draw(5);
             let pool = draw(9);
-            let launches: Vec<f64> = (0..next(5)).map(|_| next(13) as f64 * 30.0 - 15.0).collect();
+            let launches: Vec<f64> = (0..next(5))
+                .map(|_| next(13) as f64 * 30.0 - 15.0)
+                .collect();
             let kept = best_ahead(&launches, &flown, &pool);
             let cut: Vec<(f64, f64)> = kept.iter().map(|&i| pool[i]).collect();
             for &t in &launches {
@@ -1242,7 +1249,10 @@ mod tests {
         // 10, 110, 210 from earliest; 150, 250 from 50; 130, 230 from 30; 230 from 130.
         assert_eq!(d, vec![10.0, 110.0, 130.0, 150.0, 210.0, 230.0, 250.0]);
         // A window before `earliest` still seeds the dates a period on.
-        assert_eq!(parked_launch_dates(&[-50.0], 0.0, 100.0, 100.0), vec![0.0, 50.0, 100.0]);
+        assert_eq!(
+            parked_launch_dates(&[-50.0], 0.0, 100.0, 100.0),
+            vec![0.0, 50.0, 100.0]
+        );
         assert!(parked_launch_dates(&[0.0], 0.0, 100.0, 0.0).is_empty());
     }
 

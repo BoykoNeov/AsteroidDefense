@@ -38,8 +38,11 @@ const MARGIN := 64.0
 const TOP_RESERVE := 96.0
 ## Width of the colour-key column down the plot's right edge.
 const LEGEND_W := 168.0
-## Height reserved at the bottom for the cursor readout.
-const PANEL_H := 238.0
+## Height reserved at the bottom for the cursor readout. 238 until 2026-10-08, when
+## the campaign panel's readiness line pushed its key hints onto the global key bar
+## (seen on `_campaign_shot.gd`'s flown shot); one line more, and the plot's date
+## labels (~617 px at 900 high) still clear the title (644).
+const PANEL_H := 256.0
 ## Where the cursor readout's left edge sits, as a fraction of the view width.
 ##
 ## Read by **two** files: this one places the panel here, and `hud.gd` budgets the
@@ -199,6 +202,7 @@ func _draw() -> void:
 	_draw_axes(plot, mid, dim, faint)
 	_draw_cursor(plot, bright)
 	if Sim.pork_campaign_open:
+		_draw_first_launch(plot, dim, faint)
 		_draw_campaign_overlay(plot, bright, dim, faint)
 	_draw_legend(plot, mid, dim, faint)
 	if Sim.pork_campaign_open:
@@ -417,7 +421,7 @@ func _draw_keys(pos: Vector2, dim: Color) -> void:
 ## are not drawn: they are copies of flown windows, hundreds of them.
 func _draw_campaign_overlay(plot: Rect2, bright: Color, dim: Color, faint: Color) -> void:
 	var c: Dictionary = Sim.pork_campaign
-	if not Sim.pork_campaign_is_current_vehicle() or Sim.pork_rows < 2 or Sim.pork_cols < 2:
+	if not Sim.pork_campaign_is_current() or Sim.pork_rows < 2 or Sim.pork_cols < 2:
 		return
 	var cw := plot.size.x / float(Sim.pork_cols)
 	var ch := plot.size.y / float(Sim.pork_rows)
@@ -460,6 +464,31 @@ func _draw_campaign_overlay(plot: Rect2, bright: Color, dim: Color, faint: Color
 		_t(Vector2(r.end.x + 4.0, r.position.y + ch + 2.0), "+".join(label), bright, _fs - 2)
 
 
+## The dialled first launch date across the map, and the launch dates before it
+## dimmed: no rocket can fly them at this warning and readiness. Drawn for the
+## dialled setting, measured or not - it is what [E] would measure.
+func _draw_first_launch(plot: Rect2, dim: Color, faint: Color) -> void:
+	if Sim.pork_rows < 2:
+		return
+	var t0: float = Sim.pork_launch_tdb[0]
+	var t1: float = Sim.pork_launch_tdb[Sim.pork_rows - 1]
+	var first := Sim.pork_campaign_first_launch_tdb()
+	if first <= t0:
+		return
+	# Rows are cell tops at their own date, so the last row's cell ends one row on.
+	var ch := plot.size.y / float(Sim.pork_rows)
+	var y := plot.position.y + minf((first - t0) / (t1 - t0) * (plot.size.y - ch), plot.size.y)
+	# 0.55 measured as a 47 % drop in mean brightness that the glow still made read
+	# as faint on the shot; 0.75 reads at a glance.
+	var shade := Color(0.0, 0.0, 0.0, 0.75)
+	draw_rect(Rect2(plot.position, Vector2(plot.size.x, y - plot.position.y)), shade, true)
+	draw_line(Vector2(plot.position.x, y), Vector2(plot.end.x, y), dim, 1.0)
+	# Right end: at the left the plot's frame ate the first letter.
+	var label := "BEFORE THE FIRST LAUNCH"
+	var lw := _font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, _fs - 3).x
+	_t(Vector2(plot.end.x - lw - 6.0, y - 5.0), label, dim, _fs - 3)
+
+
 func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color, faint: Color) -> void:
 	var lh := _fs + 5.0
 	var x := origin.x
@@ -471,15 +500,18 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 	# is the rule this replaced.
 	_t(Vector2(col2, y), "RATE  UP TO %d IN ANY 12 MONTHS" % Sim.pork_campaign_rate, bright)
 	y += lh
+	# When the first rocket can fly - the line every count below is conditional on.
+	_t(Vector2(x, y), Sim.campaign_readiness_label(), mid, _fs - 1)
+	y += lh
 
-	var current := Sim.pork_campaign_is_current_vehicle()
+	var current := Sim.pork_campaign_is_current()
 	if Sim.pork_campaign_solving:
 		_t(Vector2(x, y), "FLYING THE BEST WINDOWS IN THE FULL FIELD - A MINUTE OR TWO ...", mid)
 		y += lh
 	elif not current:
 		var msg := "[E] MEASURE: FLY THE BEST WINDOWS ONCE (A MINUTE OR TWO)"
 		if not Sim.pork_campaign.is_empty():
-			msg = "[E] MEASURE (LAST CAMPAIGN WAS FOR ANOTHER LAUNCHER)"
+			msg = "[E] MEASURE (LAST CAMPAIGN WAS FOR ANOTHER LAUNCHER OR ANOTHER WARNING)"
 		_t(Vector2(x, y), msg, dim)
 		y += lh
 	else:
@@ -529,7 +561,7 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 		wi = "NO PARKED LAUNCHES FOR THIS ROCKET - NOTHING PUBLISHED SAYS WHAT ONE PAYLOAD MAY WEIGH" 			if current else 			"PARKING: FALCON HEAVY (EXPENDABLE) ONLY - ITS PUBLISHED 26.5 T PAYLOAD LIMIT, A STORABLE ENGINE"
 	_t(Vector2(x, y), wi, faint, _fs - 3)
 	y += lh
-	_t(Vector2(x, y), "[Z]/[X] LAUNCHES PER 12 MO  [E] MEASURE / FLY  [L] LAUNCHER  [C] WINDOW READOUT  [1] BACK",
+	_t(Vector2(x, y), "[Z]/[X] PER 12 MO  [ / ] WARNING  [W] READINESS  [E] MEASURE / FLY  [L] LAUNCHER  [C] WINDOWS  [1] BACK",
 		dim, _fs - 2)
 
 

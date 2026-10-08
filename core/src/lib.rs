@@ -43,6 +43,7 @@ pub mod mission;
 pub mod orbital_assembly;
 pub mod perturber_field;
 pub mod propagator;
+pub mod readiness;
 pub mod sbdb;
 pub mod scenario;
 pub mod state;

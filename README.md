@@ -205,8 +205,11 @@ workspace/
   keyholes, keyhole targeting, and real JPL orbit covariances. Remaining inside
   Phase 2: the Tier-3 ellipse on screen.
 - **Phase 3** — ✅ launch vehicles & payload budgets, multi-mission campaigns
-  under a launch-rate cap, and orbital assembly (launches parked in orbit that
-  leave on a better date). Remaining: standing defense systems.
+  under a launch-rate cap, orbital assembly (launches parked in orbit that
+  leave on a better date), and the first part of standing defense: the first
+  launch waits for the warning and a sourced readiness delay (found 12 years out,
+  Falcon Heavy at 6 a year needs 6 launches from storage, 12 built from scratch).
+  Remaining: a stored stock, interceptors waiting in orbit, detection.
 
 See [`HANDOFF.md`](HANDOFF.md) for the complete spec, the locked decisions, the
 known hard problems, and the dated record of every batch; [`DEVELOPING.md`](DEVELOPING.md)

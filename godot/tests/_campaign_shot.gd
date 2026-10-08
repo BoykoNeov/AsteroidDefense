@@ -11,12 +11,18 @@ extends Node
 ## - the cap is per ANY 12 MONTHS: no 365.25 days of the plan carry more launches
 ##   than the rate (the core's own count, `busiest_rolling_year`);
 ## - the rate knob is free (no solve fires on [Z]/[X]) and greys the flight line;
-## - 1/yr is an answer, not a failure: under "1 in any 12 months" it FALLS SHORT,
-##   about 1 % - launches may park in orbit and leave on a later date, but the escape
-##   burn is flown finite (8 firings from 400 km) and that loss puts it just outside
-##   the 1 % line. It is on the edge: from ~450-500 km it would be at the line (the
-##   height is a cautious choice, see HANDOFF). The what-if row says it falls short
-##   with no parking too;
+## - the readiness line: the panel opens on the shipping level (FROM SCRATCH, the
+##   rock found when the scenario starts), [W] and [ / ] are free to dial (no solve
+##   fires), and a held campaign measured at another setting is not shown as this
+##   one's. The ON THE PAD level reproduces every count from before 2026-10-08's
+##   standing-defence batch, so the checks below that pin those run on it;
+## - 1/yr on the pad is 10 LAUNCHES since the map's axes were stretched (it fell
+##   short by ~1 % while launches stopped 3.6 yr before impact; its last launch is
+##   now 2.72 yr out). Launches park in orbit and leave on a later date, the escape
+##   burn flown finite (8 firings from 400 km). The what-if row says it falls short
+##   with no parking;
+## - FROM SCRATCH, found 12 yr out (first launch 6.53 yr before impact), 2/yr FALLS
+##   SHORT and 6/yr needs 12 LAUNCHES, against 6 on the pad;
 ## - the parking line names the height, stack, engine and firings, and the plan
 ##   really parks;
 ## - the window boxes sit at their own dates, between the map's cells (look at the
@@ -70,7 +76,23 @@ func _run() -> void:
 	main._input(_key(KEY_C))
 	await _settle(3)
 	assert(Sim.pork_campaign_open, "[C] must open the campaign panel on the map")
+	print("CAMPSHOT  %s" % Sim.campaign_readiness_label())
+	assert(Sim.campaign_readiness_label().contains("FROM SCRATCH"),
+		"the panel must open on the shipping readiness level")
 	await _shot("campaign_unsolved")
+
+	# The readiness knobs are free: dialling them fires nothing.
+	main._input(_key(KEY_BRACKETRIGHT))
+	await _settle(1)
+	assert(Sim.campaign_warning_yr() > Sim.T_IMPACT * Sim.DAY_S / Sim.YEAR_S, "[ ] ] must lengthen the warning")
+	main._input(_key(KEY_BRACKETLEFT))
+	await _settle(1)
+	assert(absf(Sim.campaign_warning_yr() - Sim.T_IMPACT * Sim.DAY_S / Sim.YEAR_S) < 1e-9, "[ [ ] must step it back")
+	# [W] from the shipping level (the last) wraps to ON THE PAD (the first).
+	main._input(_key(KEY_W))
+	await _settle(1)
+	assert(not Sim.pork_campaign_solving, "a readiness knob fired a solve")
+	assert(Sim.campaign_readiness_label().contains("ON THE PAD"), "[W] must step to ON THE PAD")
 
 	main._input(_key(KEY_E))
 	assert(Sim.pork_campaign_solving, "[E] on the campaign panel must start the measurement")
@@ -81,7 +103,7 @@ func _run() -> void:
 	while Sim.pork_campaign_solving and Time.get_ticks_msec() - t2 < 900000:
 		await get_tree().process_frame
 	print("CAMPSHOT  measured in %d ms: %s" % [Time.get_ticks_msec() - t2, Sim.campaign_count_label()])
-	assert(Sim.pork_campaign_is_current_vehicle(), "the campaign must land: " + str(Sim.mission.last_error()))
+	assert(Sim.pork_campaign_is_current(), "the campaign must land: " + str(Sim.mission.last_error()))
 	print("CAMPSHOT  %s" % Sim.campaign_windows_label())
 	_assert_per_year_cap()
 
@@ -108,8 +130,8 @@ func _run() -> void:
 	print("CAMPSHOT  %s" % Sim.campaign_windows_label())
 	print("CAMPSHOT  %s" % Sim.campaign_parking_label())
 	print("CAMPSHOT  %s" % Sim.campaign_what_if_label())
-	assert(Sim.campaign_count_label().begins_with("FALLS SHORT"),
-		"1 in any 12 months falls short even with parking, once the burn is finite")
+	assert(Sim.campaign_count_label().begins_with("10 LAUNCHES"),
+		"1 in any 12 months on the pad is 10 launches once late launch dates are on the map")
 	assert(Sim.campaign_what_if_label().contains("NO PARKING SHORT"),
 		"with no parking, 1 in any 12 months falls short")
 	assert(Sim.campaign_parking_label().contains("LONGEST WAIT"), "the 1/yr plan parks")
@@ -135,10 +157,43 @@ func _run() -> void:
 	assert(not main.planner.visible, "[M] opened the planner over the campaign panel")
 	assert(not Sim.pork_mass_solving, "[M] started a mass solve the campaign panel does not show")
 
+	# FROM SCRATCH: the same rock, the first launch 5.5 yr later.
+	main._input(_key(KEY_W))
+	main._input(_key(KEY_W))
+	await _settle(2)
+	assert(Sim.campaign_readiness_label().contains("FROM SCRATCH"), "[W] twice must come back round")
+	assert(not Sim.pork_campaign_is_current(), "a campaign measured on the pad shown as FROM SCRATCH's")
+	await _shot("campaign_scratch_unsolved")
+	main._input(_key(KEY_E))
+	assert(Sim.pork_campaign_solving, "[E] must measure the new readiness")
+	var t4 := Time.get_ticks_msec()
+	while Sim.pork_campaign_solving and Time.get_ticks_msec() - t4 < 900000:
+		await get_tree().process_frame
+	assert(Sim.pork_campaign_is_current(), "the FROM SCRATCH campaign must land: " + str(Sim.mission.last_error()))
+	print("CAMPSHOT  from scratch, measured in %d ms: %s" % [Time.get_ticks_msec() - t4, Sim.campaign_readiness_label()])
+	print("CAMPSHOT  from scratch %d/yr: %s" % [Sim.pork_campaign_rate, Sim.campaign_count_label()])
+	assert(Sim.campaign_count_label().begins_with("FALLS SHORT"), "built from scratch, 2 a year must fall short")
+	assert(float(Sim.pork_campaign.first_launch_tdb) > Sim.pork_launch_tdb[0], "the first launch must have moved")
+	_assert_per_year_cap()
+	# The landing flies the plan if there is one; at 2/yr there is not.
+	var t5 := Time.get_ticks_msec()
+	while Sim.pork_campaign_flying and Time.get_ticks_msec() - t5 < 300000:
+		await get_tree().process_frame
+	for _k in 4:
+		main._input(_key(KEY_X))
+	await _settle(2)
+	print("CAMPSHOT  from scratch %d/yr: %s" % [Sim.pork_campaign_rate, Sim.campaign_count_label()])
+	assert(Sim.campaign_count_label().begins_with("12 LAUNCHES"), "built from scratch, 6 a year needs 12")
+	_assert_per_year_cap()
+	await _shot("campaign_scratch_6")
+	for _k in 4:
+		main._input(_key(KEY_Z))
+	await _settle(1)
+
 	# [L] makes the held campaign another launcher's.
 	main._input(_key(KEY_L))
 	await _settle(3)
-	assert(not Sim.pork_campaign_is_current_vehicle(), "[L] left the campaign labelled as this rocket's")
+	assert(not Sim.pork_campaign_is_current(), "[L] left the campaign labelled as this rocket's")
 	await _shot("campaign_other_launcher")
 	get_tree().quit(0)
 

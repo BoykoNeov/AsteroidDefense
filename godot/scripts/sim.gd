@@ -495,6 +495,20 @@ var pork_campaign_flying := false        # the whole plan flying (seconds)
 ## The plan at the dialled rate, as `Mission.campaign_plan` returns it — refreshed
 ## on each input it depends on, never per frame.
 var pork_campaign := {}
+## Standing defence ([ and ] step the warning, [W] the readiness, while the campaign
+## panel is up). When the rock is found and how ready the defence is set the first
+## date a rocket can fly; nothing launches before it. The delays are the core's
+## (`asteroid_core::readiness`, sourced there) - this side only steps the knobs.
+## Every count before 2026-10-08 let the first rocket fly on the map's first day,
+## which is the ON THE PAD level, kept for comparison. Intentions, like the rate:
+## they survive a rebuild. -1 until first read: then the core's shipping level (its
+## last) and a rock found when the scenario starts.
+const CAMPAIGN_WARNING_STEP_YR := 0.5
+const CAMPAIGN_WARNING_MIN_YR := 0.5
+const CAMPAIGN_WARNING_MAX_YR := 20.0
+const YEAR_S := 365.25 * DAY_S
+var pork_campaign_readiness := -1
+var pork_campaign_warning_yr := -1.0
 
 signal porkchop_changed
 
@@ -2109,8 +2123,9 @@ func _poll_required_mass() -> void:
 func request_campaign_step() -> void:
 	if not pork_online or pork_campaign_solving or pork_campaign_flying:
 		return
-	if not pork_campaign_is_current_vehicle():
-		if mission.begin_campaign(pork_vehicle):
+	if not pork_campaign_is_current():
+		if mission.begin_campaign(pork_vehicle, campaign_readiness(),
+				campaign_warning_yr() * YEAR_S):
 			pork_campaign_solving = true
 			pork_campaign = {}
 			event_logged.emit(_stamp(t) + "  CAMPAIGN: FLYING THE BEST WINDOWS - A MINUTE OR TWO")
@@ -2176,11 +2191,71 @@ func _poll_campaign() -> void:
 		porkchop_changed.emit()
 
 
-## Whether the held measurement is for the selected launcher. A campaign measured
-## for another rocket is not shown as this one's: the windows and the payloads
-## are both the launcher's.
-func pork_campaign_is_current_vehicle() -> bool:
-	return not pork_campaign.is_empty() and int(pork_campaign.vehicle) == pork_vehicle
+## Whether the held measurement is for the selected launcher **and** the dialled
+## warning and readiness. A campaign measured for another rocket, or for a rock
+## found at another time, is not shown as this one's: the windows, the payloads and
+## the first launch date are all part of it.
+func pork_campaign_is_current() -> bool:
+	return not pork_campaign.is_empty() and int(pork_campaign.vehicle) == pork_vehicle 		and int(pork_campaign.get("readiness", -1)) == campaign_readiness() 		and absf(float(pork_campaign.get("warning_s", -1.0)) - campaign_warning_yr() * YEAR_S) < 1.0
+
+
+## The dialled readiness level, an index into the core's levels.
+func campaign_readiness() -> int:
+	if pork_campaign_readiness < 0 and mission != null:
+		pork_campaign_readiness = maxi(int(mission.readiness_count()) - 1, 0)
+	return pork_campaign_readiness
+
+
+## The dialled warning, years before impact the rock is found.
+func campaign_warning_yr() -> float:
+	if pork_campaign_warning_yr < 0.0:
+		pork_campaign_warning_yr = T_IMPACT * DAY_S / YEAR_S
+	return pork_campaign_warning_yr
+
+
+## Step the warning. Free to dial; [E] measures it (minutes).
+func adjust_campaign_warning(step: int) -> void:
+	var w := clampf(campaign_warning_yr() + step * CAMPAIGN_WARNING_STEP_YR,
+		CAMPAIGN_WARNING_MIN_YR, CAMPAIGN_WARNING_MAX_YR)
+	if w == pork_campaign_warning_yr:
+		return
+	pork_campaign_warning_yr = w
+	porkchop_changed.emit()
+
+
+## Cycle the readiness level. Free to dial; [E] measures it (minutes).
+func cycle_campaign_readiness() -> void:
+	var n := int(mission.readiness_count()) if mission != null else 0
+	if n <= 0:
+		return
+	pork_campaign_readiness = (campaign_readiness() + 1) % n
+	porkchop_changed.emit()
+
+
+## The first date a rocket can fly at the dialled setting, TDB s: found, plus the
+## core's delay, no earlier than the map's first launch date.
+func pork_campaign_first_launch_tdb() -> float:
+	var impact := EPOCH0_TDB + T_IMPACT * DAY_S
+	var first := impact - campaign_warning_yr() * YEAR_S 		+ float(mission.readiness_delay_s(campaign_readiness()))
+	if pork_launch_tdb.size() > 0:
+		first = maxf(first, pork_launch_tdb[0])
+	return first
+
+
+## The dialled setting in one line - the count below is meaningless without it.
+func campaign_readiness_label() -> String:
+	var r := campaign_readiness()
+	# Measured: the date the core actually cut at. Only dialled: this side's sum.
+	var first := float(pork_campaign.first_launch_tdb) if pork_campaign_is_current() 		and pork_campaign.has("first_launch_tdb") else pork_campaign_first_launch_tdb()
+	var line := "FOUND %.1f YR BEFORE IMPACT  %s, %.1f YR TO FIRST LAUNCH  ->  FIRST LAUNCH %s" % [
+		campaign_warning_yr(), str(mission.readiness_name(r)),
+		float(mission.readiness_delay_s(r)) / YEAR_S,
+		date_string((first - EPOCH0_TDB) / DAY_S)]
+	if pork_launch_tdb.size() > 0 and first >= pork_launch_tdb[pork_launch_tdb.size() - 1]:
+		line += "  - AFTER THE MAP'S LAST LAUNCH DATE"
+	elif pork_launch_tdb.size() > 0 and first <= pork_launch_tdb[0]:
+		line += " (THE MAP'S FIRST DATE)"
+	return line
 
 
 func pork_campaign_flight() -> Dictionary:
@@ -2192,7 +2267,7 @@ func pork_campaign_flight() -> Dictionary:
 ## Whether the last flight flew the plan now on screen — same launcher, same rate.
 func pork_campaign_flight_is_current() -> bool:
 	var f := pork_campaign_flight()
-	if f.is_empty() or not pork_campaign_is_current_vehicle():
+	if f.is_empty() or not pork_campaign_is_current():
 		return false
 	return int(f.vehicle) == pork_vehicle and int(f.launches_per_year) == pork_campaign_rate
 

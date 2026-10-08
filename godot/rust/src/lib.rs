@@ -48,6 +48,13 @@ fn vehicle_at(index: i64) -> Option<&'static LaunchVehicle> {
     launch_vehicle(index as usize)
 }
 
+/// The core's readiness level at `index`, or `None` out of range.
+fn readiness_at(index: i64) -> Option<asteroid_core::readiness::Readiness> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| asteroid_core::readiness::READINESS_LEVELS.get(i).copied())
+}
+
 /// Metres per astronomical unit — synthetic-body semi-major axes reach the SI
 /// core as AU from GDScript.
 const AU_M: f64 = 1.495_978_707e11;
@@ -175,6 +182,11 @@ struct Mission {
     campaign_build: Option<mpsc::Receiver<Result<CampaignCandidates, String>>>,
     /// Which launcher the in-flight campaign measurement is for.
     pending_campaign_vehicle: i64,
+    /// The readiness level (an index into the core's `READINESS_LEVELS`) and the
+    /// warning, s, the in-flight measurement is for - and, once it lands, the held
+    /// one is for. A count without them means nothing, like a count without its cap.
+    pending_campaign_readiness: (i64, f64),
+    campaign_readiness: (i64, f64),
     /// The held campaign measurement and its launcher. Cap-independent, so the
     /// rate knob replans it for free. Dropped with the grid and the scenario.
     campaign: Option<(i64, CampaignCandidates)>,
@@ -1358,6 +1370,26 @@ impl Mission {
         vehicle_at(i).map_or(-1.0, |v| v.max_c3_km2_s2())
     }
 
+    /// How many readiness levels the core offers (see
+    /// [`asteroid_core::readiness`]); the shipping level is the last.
+    #[func]
+    fn readiness_count(&self) -> i64 {
+        asteroid_core::readiness::READINESS_LEVELS.len() as i64
+    }
+
+    /// Readiness level `i`'s label, or `""` past the end.
+    #[func]
+    fn readiness_name(&self, i: i64) -> GString {
+        readiness_at(i).map_or_else(GString::new, |r| r.name.into())
+    }
+
+    /// Readiness level `i`'s discovery-to-first-launch delay, s (`-1.0` past the
+    /// end): the time to decide plus the time to get a spacecraft to the pad.
+    #[func]
+    fn readiness_delay_s(&self, i: i64) -> f64 {
+        readiness_at(i).map_or(-1.0, |r| r.delay_s())
+    }
+
     // --- The on-demand full-field verify of one cell ------------------------
 
     /// Re-fly the asteroid through the **full `n`-body field** after the impulse
@@ -1687,11 +1719,16 @@ impl Mission {
     /// press. Keyed by vehicle, like the verify: a `[L]` press makes it stale, not
     /// wrong-and-shown.
     ///
+    /// `readiness` (an index into [`readiness_levels`](Self::readiness_levels)) and
+    /// `warning_s` (how long before impact the rock is found) set the first date a
+    /// rocket can fly; no launch, direct or parked, goes before it. A first date
+    /// before the map's own first launch date is the map's first date.
+    ///
     /// Returns `false` — with a reason in [`last_error`](Self::last_error) — when a
     /// campaign solve is already in flight, there is no grid or scenario, or the
-    /// vehicle index is out of range.
+    /// vehicle or readiness index is out of range.
     #[func]
-    fn begin_campaign(&mut self, vehicle: i64) -> bool {
+    fn begin_campaign(&mut self, vehicle: i64, readiness: i64, warning_s: f64) -> bool {
         if self.campaign_build.is_some() {
             return false;
         }
@@ -1711,18 +1748,34 @@ impl Mission {
             self.error = format!("no launcher at index {vehicle}").as_str().into();
             return false;
         };
-        let Some(origin) = view.launch_tdb().first().copied() else {
+        let Some(map_first) = view.launch_tdb().first().copied() else {
             self.error = "the grid has no launch dates".into();
             return false;
         };
+        let Some(level) = readiness_at(readiness) else {
+            self.error = format!("no readiness level at index {readiness}")
+                .as_str()
+                .into();
+            return false;
+        };
+        if !(warning_s.is_finite() && warning_s > 0.0) {
+            self.error = format!("the warning must be finite and > 0 s (got {warning_s})")
+                .as_str()
+                .into();
+            return false;
+        }
+        let impact = scenario.impact_epoch().tdb_seconds_past_j2000();
+        // The years are counted from the first launch, so the first is a whole one.
+        let first = level.first_launch_tdb(impact, warning_s).max(map_first);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let result =
-                measure_campaign_candidates(&scenario, &view, v, origin).map_err(|e| e.to_string());
+            let result = measure_campaign_candidates(&scenario, &view, v, first, Some(first))
+                .map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
         self.campaign_build = Some(rx);
         self.pending_campaign_vehicle = vehicle;
+        self.pending_campaign_readiness = (readiness, warning_s);
         // A held campaign (and its flight) beside a running solve would read as
         // this solve's answer.
         self.campaign = None;
@@ -1749,6 +1802,7 @@ impl Mission {
             Ok(Ok(c)) => {
                 self.campaign_build = None;
                 self.campaign = Some((self.pending_campaign_vehicle, c));
+                self.campaign_readiness = self.pending_campaign_readiness;
                 self.error = GString::new();
                 false
             }
@@ -1807,6 +1861,17 @@ impl Mission {
             Err(_) => return d,
         };
         d.set("vehicle", *vehicle);
+        // What the first launch waited for: the readiness level and the warning
+        // the measurement was made at, and the first date that left.
+        let (readiness, warning_s) = self.campaign_readiness;
+        d.set("readiness", readiness);
+        d.set("warning_s", warning_s);
+        if let Some(level) = readiness_at(readiness) {
+            d.set("readiness_name", level.name);
+            d.set("delay_s", level.delay_s());
+        }
+        d.set("first_launch_tdb", c.launch_span_tdb.0);
+        d.set("last_launch_tdb", c.launch_span_tdb.1);
         d.set("launches_per_year", cap as i64);
         d.set("period_origin_tdb", c.period_origin_tdb);
         d.set("period_s", CAMPAIGN_PERIOD_S);

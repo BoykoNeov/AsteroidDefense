@@ -2875,19 +2875,29 @@ pub fn launch_vehicle_count() -> usize {
 }
 
 /// Where the launch axis stops, as a fraction of the campaign span (`impact −
-/// epoch0`). Launching later than this leaves no room for a transfer *and* the
-/// lead the deflection needs afterwards.
-const LAUNCH_AXIS_END_FRACTION: f64 = 0.70;
+/// epoch0`): the arrival axis's end less about the shortest transfer
+/// ([`MIN_TOF_DAYS`] is 2 % of the shipping 12-year span).
+///
+/// It was **0.70** (3.6 yr before impact) until 2026-10-08, chosen as the point past
+/// which a launch "leaves no room for a transfer and the lead the deflection needs".
+/// Measured, that was wrong in the way that matters: with later dates searched, 1 in
+/// any 12 months goes from falling short to **10 launches, clear**, its last launch
+/// 2.71 yr out - and a rock found late has *only* late dates. A weak late window is
+/// still a window, and the planner already ranks it by its weakness. HANDOFF *Standing
+/// defence: when the first rocket can fly*.
+const LAUNCH_AXIS_END_FRACTION: f64 = 0.97;
 
 /// Where the arrival axis starts, as a fraction of the campaign span — the
 /// earliest interception worth plotting, a minimum cruise past `epoch0`.
 const ARRIVAL_AXIS_START_FRACTION: f64 = 0.10;
 
-/// Where the arrival axis stops, as a fraction of the campaign span. Deliberately
-/// short of impact: an intercept in the last months deflects almost nothing
-/// however well aimed (the §5 lever is lead time), so plotting up to the impact
-/// itself would spend a third of the frame on windows that cannot work.
-const ARRIVAL_AXIS_END_FRACTION: f64 = 0.92;
+/// Where the arrival axis stops, as a fraction of the campaign span: ~44 days before
+/// impact on the shipping rock. Still short of impact - the last weeks deflect almost
+/// nothing however well aimed (the §5 lever is lead time) - but no longer the 0.92
+/// (0.96 yr out) it was until 2026-10-08, which was a choice of what is worth
+/// *drawing* and silently capped what a short warning can do. No plan measured on
+/// the shipping rock reaches this end (the latest arrival any uses is 0.32 yr out).
+const ARRIVAL_AXIS_END_FRACTION: f64 = 0.99;
 
 /// Shortest transfer the grid will consider, days. Below this the Lambert arc is a
 /// near-radial sprint no launcher reaches; the cells are blanked by the grid's own
@@ -3226,7 +3236,8 @@ impl PorkchopView {
 ///
 /// **Cost is cell-dependent: measured 5.8 s at a late arrival, 18.2 s at an early
 /// one**, because the propagation re-flies from arrival to the encounter and the
-/// arrival axis spans 0.10–0.92 of a ~12 yr campaign. (An earlier note here said
+/// arrival axis spans 0.10–0.92 of a ~12 yr campaign (0.99 since 2026-10-08, so a
+/// late cell is cheaper still). (An earlier note here said
 /// "~1 s"; that was never measured and is wrong by 6–18×. It matters because it is
 /// the unit the required-mass solve is priced in — see [`required_cell_mass`].)
 pub fn verify_porkchop_cell(
@@ -3665,8 +3676,13 @@ pub struct LaunchCampaignReport {
 /// (10 %; 2026-10-01, `probe_campaign_rolling_check`); across the 20 strong
 /// retrograde windows the rolling cap flies it is 30 %, and **57 %** once three weak
 /// ones join (along-track push 2.5-8 % of the strongest, where the other components
-/// of the push dominate). Good enough to *choose* strong windows with; never used
-/// to *count* — every count is on flown shifts.
+/// of the push dominate). On the stretched axes (2026-10-08) the strong retrograde
+/// windows span **53 %**, and the cause is the arrival date - the orbital phase the
+/// push lands at (2.1 near 4 yr out, 3.3 near 2.7 yr) - not the push's along-track
+/// share, which is ~0.3 at both ends. So it is never used globally: an unflown
+/// window is scaled from a *nearby* flown one ([`estimate_shift`]), measured good to
+/// 2.2 % at the 90th percentile. Good enough to *choose* with; never used to *count*
+/// — every count is on flown shifts.
 pub fn campaign_proxy(along_track_dv_ms: f64, lead_seconds: f64) -> f64 {
     along_track_dv_ms.abs() * lead_seconds.max(0.0)
 }
@@ -3689,6 +3705,59 @@ fn campaign_period(launch_tdb: f64, origin_tdb: f64) -> u32 {
     ((launch_tdb - origin_tdb) / CAMPAIGN_PERIOD_S)
         .floor()
         .max(0.0) as u32
+}
+
+/// Which flown window an unflown one's shift is scaled from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EstimateRule {
+    /// The flown window launching nearest in date.
+    NearestLaunch,
+    /// The flown window arriving nearest in date. The arrival sets the lead and the
+    /// orbital phase the push lands at, and the shift per unit of key rises and falls
+    /// with it (2.1 to 3.3 across arrivals 1.6 to 4.3 yr out, measured 2026-10-08).
+    /// Measured against [`NearestLaunch`](Self::NearestLaunch) and tied, so not
+    /// shipped; kept for the test that re-measures the two.
+    #[cfg_attr(not(test), allow(dead_code))]
+    NearestArrival,
+}
+
+/// The rule the measurement ships. See [`estimate_shift`].
+pub const SHIPPING_ESTIMATE_RULE: EstimateRule = EstimateRule::NearestLaunch;
+
+/// An unflown window's shift per launch, estimated from the flown ones: the nearest
+/// flown window (by `rule`) with the same push direction and lap count (any lap
+/// count if none has it), scaled by the ratio of their [`campaign_proxy`] keys.
+/// `None` when no flown window shares the push direction.
+///
+/// Only ever used to *choose*: a plan that uses the window flies it before it
+/// counts, so an overestimate is flown and corrected, and an underestimate is never
+/// flown. Estimate errors can make a count too high, never too low.
+pub fn estimate_shift(
+    launch_tdb: f64,
+    arrival_tdb: f64,
+    along_track_dv_ms: f64,
+    revolutions: u32,
+    impact_tdb: f64,
+    flown: &[CampaignCandidate],
+    rule: EstimateRule,
+) -> Option<Vector2<f64>> {
+    let sign = along_track_dv_ms > 0.0;
+    let distance = |k: &CampaignCandidate| match rule {
+        EstimateRule::NearestLaunch => (k.launch_tdb - launch_tdb).abs(),
+        EstimateRule::NearestArrival => (k.arrival_tdb - arrival_tdb).abs(),
+    };
+    let pick = |same_laps: bool| {
+        flown
+            .iter()
+            .filter(|k| (k.proxy_along_track_dv_ms > 0.0) == sign)
+            .filter(|k| !same_laps || k.revolutions == revolutions)
+            .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+    };
+    let k = pick(true).or_else(|| pick(false))?;
+    let k_key = campaign_proxy(k.proxy_along_track_dv_ms, impact_tdb - k.arrival_tdb);
+    let p_key = campaign_proxy(along_track_dv_ms, impact_tdb - arrival_tdb);
+    (k_key > 0.0)
+        .then(|| Vector2::new(k.shift_per_launch_m.0, k.shift_per_launch_m.1) * (p_key / k_key))
 }
 
 /// How the continuous window search samples before it zooms in.
@@ -3721,6 +3790,13 @@ pub struct WindowSearch {
     /// Step 3 on or off. Off, the launch dates are only the stepped ones — the
     /// probe's "continuous arrival on the map's own rows" control.
     pub polish_launch: bool,
+    /// The last launch date searched, as a fraction of the campaign span (`impact -
+    /// epoch0`). The map's own axis ends are [`LAUNCH_AXIS_END_FRACTION`] and
+    /// [`ARRIVAL_AXIS_END_FRACTION`], chosen for what is worth *drawing*; a short
+    /// warning leaves only the late dates, so a probe can search past them.
+    pub launch_end_fraction: f64,
+    /// The last arrival date searched, as a fraction of the campaign span.
+    pub arrival_end_fraction: f64,
 }
 
 /// The shipping search. Measured against seeds twice as coarse and twice as fine
@@ -3729,6 +3805,8 @@ pub const SHIPPING_WINDOW_SEARCH: WindowSearch = WindowSearch {
     launch_step_days: 2.0,
     arrival_samples: 120,
     polish_launch: true,
+    launch_end_fraction: LAUNCH_AXIS_END_FRACTION,
+    arrival_end_fraction: ARRIVAL_AXIS_END_FRACTION,
 };
 
 /// The parking heights, km, the shipping stack is reported at besides its own
@@ -3798,12 +3876,19 @@ pub struct FoundWindows {
 /// The campaign's continuous window search: per period and push direction, the best
 /// window at **any** dates inside the map's axes. See [`WindowSearch`] for how.
 ///
+/// `earliest_launch_tdb`: no launch before this date (the first a rocket can fly
+/// after the rock is found - [`asteroid_core::readiness`]); `None` is the map's own
+/// first date. The launch dates are stepped from it, so a later start is a fresh
+/// search of the shorter axis, not a filter of the full one - a filter would lose
+/// every window dated after the cut in a year whose best was dated before it.
+///
 /// Worker-thread only: ~1 500 launch dates, each an arrival scan and a few zooms,
 /// spread over the machine's cores — a few seconds.
 pub fn search_campaign_windows(
     scenario: &RealFieldScenario,
     vehicle: &LaunchVehicle,
     origin_tdb: f64,
+    earliest_launch_tdb: Option<f64>,
     search: WindowSearch,
 ) -> Result<FoundWindows, ScenarioError> {
     use asteroid_core::mission::{maximise_on_interval, TransferEvaluator};
@@ -3813,10 +3898,18 @@ pub fn search_campaign_windows(
     let t0 = scenario.epoch0().tdb_seconds_past_j2000();
     let impact = scenario.impact_epoch().tdb_seconds_past_j2000();
     let span = impact - t0;
-    let (l_lo, l_hi) = (t0, t0 + LAUNCH_AXIS_END_FRACTION * span);
+    let l_hi = t0 + search.launch_end_fraction * span;
+    let l_lo = earliest_launch_tdb.map_or(t0, |e| e.max(t0));
+    if l_lo >= l_hi {
+        // Found too late for any launch date the map has.
+        return Ok(FoundWindows {
+            per_period: std::collections::BTreeMap::new(),
+            profile: Vec::new(),
+        });
+    }
     let (a_lo, a_hi) = (
         t0 + ARRIVAL_AXIS_START_FRACTION * span,
-        t0 + ARRIVAL_AXIS_END_FRACTION * span,
+        t0 + search.arrival_end_fraction * span,
     );
     let n_a = search.arrival_samples.max(3);
     let a_step = (a_hi - a_lo) / (n_a - 1) as f64;
@@ -4062,12 +4155,14 @@ pub fn measure_campaign_candidates(
     view: &PorkchopView,
     vehicle: &LaunchVehicle,
     period_origin_tdb: f64,
+    earliest_launch_tdb: Option<f64>,
 ) -> Result<CampaignCandidates, ScenarioError> {
     measure_campaign_candidates_from(
         scenario,
         view,
         vehicle,
         period_origin_tdb,
+        earliest_launch_tdb,
         WindowSource::Continuous(SHIPPING_WINDOW_SEARCH),
         &asteroid_core::orbital_assembly::WHAT_IF_PARKED_DELIVERIES,
     )
@@ -4098,6 +4193,12 @@ pub fn measure_campaign_candidates(
 /// Each costs flights: on the shipping rock the shipping delivery alone flies 96
 /// windows, with the what ifs 117, with the heights too 126.
 ///
+/// `earliest_launch_tdb`: no launch, direct or parked, before this date - the first
+/// a rocket can fly after the rock is found ([`asteroid_core::readiness`]). `None`
+/// is the map's first date, the assumption every count before 2026-10-08 was made
+/// under. Pass the same date as `period_origin_tdb` so the first year is a whole
+/// one; the rolling cap does not use the years, but the search ranks within them.
+///
 /// `view` is the map the windows are reported against: a continuous window's
 /// `launch_index` / `arrival_index` is the **nearest** cell of it, which the map
 /// uses to say which cell the selection is on — never to place the window, which
@@ -4107,6 +4208,7 @@ pub fn measure_campaign_candidates_from(
     view: &PorkchopView,
     vehicle: &LaunchVehicle,
     period_origin_tdb: f64,
+    earliest_launch_tdb: Option<f64>,
     source: WindowSource,
     parked_also: &[ParkedDelivery],
 ) -> Result<CampaignCandidates, ScenarioError> {
@@ -4146,13 +4248,22 @@ pub fn measure_campaign_candidates_from(
     let mut pool: Vec<FoundWindow> = Vec::new();
     let best: std::collections::BTreeMap<(u32, bool), FoundWindow> = match source {
         WindowSource::Continuous(search) => {
-            let found = search_campaign_windows(scenario, vehicle, period_origin_tdb, search)?;
+            let found = search_campaign_windows(
+                scenario,
+                vehicle,
+                period_origin_tdb,
+                earliest_launch_tdb,
+                search,
+            )?;
             pool = found.profile;
             found.per_period
         }
         WindowSource::GridCells => {
             let mut best = std::collections::BTreeMap::new();
             for (i, &t_launch) in launch_axis.iter().enumerate() {
+                if earliest_launch_tdb.is_some_and(|e| t_launch < e) {
+                    continue;
+                }
                 let period = campaign_period(t_launch, period_origin_tdb);
                 for (j, &t_arrival) in arrival_axis.iter().enumerate() {
                     let Some(m) = view.metrics_at(i, j) else {
@@ -4179,9 +4290,16 @@ pub fn measure_campaign_candidates_from(
     };
     let mut ranked: Vec<(u32, FoundWindow)> = best.into_iter().map(|((p, _), w)| (p, w)).collect();
     ranked.sort_by(|a, b| key(&b.1).total_cmp(&key(&a.1)));
-    let period_count = launch_axis
-        .last()
-        .map_or(0, |&t| campaign_period(t, period_origin_tdb) + 1);
+    // The last date a rocket can launch: the map's own, or further for a search that
+    // reaches past it (the parked launches below go up no later than this either).
+    let last_launch_tdb = match source {
+        WindowSource::Continuous(search) => {
+            let t0 = scenario.epoch0().tdb_seconds_past_j2000();
+            Some(t0 + search.launch_end_fraction * (impact_tdb - t0))
+        }
+        WindowSource::GridCells => launch_axis.last().copied(),
+    };
+    let period_count = last_launch_tdb.map_or(0, |t| campaign_period(t, period_origin_tdb) + 1);
     // The map cell nearest an epoch, on an evenly spaced axis.
     let nearest = |axis: &[f64], t: f64| -> usize {
         let n = axis.len();
@@ -4292,32 +4410,25 @@ pub fn measure_campaign_candidates_from(
     // a year apart can no longer both take the full rate, and the next-best date of
     // a year may be the one that fits. So the per-date pool joins in — but only to
     // *choose* dates. A pool window's shift is an estimate (the nearest flown window
-    // of the same push direction and lap count, scaled by the ranking key), and the
-    // key tracks the flown shift only to ~24 % across windows, which is more than
-    // the margins counts are decided by. So: plan with the estimates, fly every pool
+    // of the same push direction and lap count, scaled by the ranking key -
+    // `estimate_shift`), good to 2.2 % at the 90th percentile next to a flown
+    // neighbour but off by up to ~190 % where none is near - more than the margins
+    // counts are decided by. So: plan with the estimates, fly every pool
     // window the plan uses, swap the measured shift in, and plan again, until the
     // plan uses flown windows only — for every rate the knob reaches, so that
     // replanning at any rate afterwards is arithmetic on flown windows and nothing
     // else. (A plan over only flown windows that was the best over the whole pool
     // is also the best over the flown ones, so the counts do not move.)
     let estimate = |p: &FoundWindow, flown: &[CampaignCandidate]| -> Option<Vector2<f64>> {
-        let sign = p.delivery.along_track_dv_ms > 0.0;
-        let pick = |same_laps: bool| {
-            flown
-                .iter()
-                .filter(|k| (k.proxy_along_track_dv_ms > 0.0) == sign)
-                .filter(|k| !same_laps || k.revolutions == p.metrics.revolutions)
-                .min_by(|a, b| {
-                    (a.launch_tdb - p.launch_tdb)
-                        .abs()
-                        .total_cmp(&(b.launch_tdb - p.launch_tdb).abs())
-                })
-        };
-        let k = pick(true).or_else(|| pick(false))?;
-        let k_key = campaign_proxy(k.proxy_along_track_dv_ms, impact_tdb - k.arrival_tdb);
-        (k_key > 0.0).then(|| {
-            Vector2::new(k.shift_per_launch_m.0, k.shift_per_launch_m.1) * (key(p) / k_key)
-        })
+        estimate_shift(
+            p.launch_tdb,
+            p.arrival_tdb,
+            p.delivery.along_track_dv_ms,
+            p.metrics.revolutions,
+            impact_tdb,
+            flown,
+            SHIPPING_ESTIMATE_RULE,
+        )
     };
     //
     // **Per push direction, and swept until nothing new flies.** One loop over both
@@ -4425,10 +4536,14 @@ pub fn measure_campaign_candidates_from(
         .into_iter()
         .chain(parking.iter().flat_map(|_| parked_also.iter().copied()))
         .collect();
-    let span = (
-        launch_axis.first().copied().unwrap_or(period_origin_tdb),
-        launch_axis.last().copied().unwrap_or(period_origin_tdb),
-    );
+    let span = {
+        let first = launch_axis.first().copied().unwrap_or(period_origin_tdb);
+        let last = last_launch_tdb.unwrap_or(period_origin_tdb);
+        // Found after the map's last launch date: an empty span at the cut, so no
+        // parked launch can go up either.
+        let lo = earliest_launch_tdb.map_or(first, |e| e.max(first));
+        (lo, last.max(lo))
+    };
     // A window flown here can be a direct launch too, and a parked launch can go up a
     // period after any direct one - so each round adds launch dates, and the rounds
     // repeat until one flies nothing.
@@ -4622,7 +4737,7 @@ pub fn plan_launch_campaign(
     let origin = view.launch_tdb().first().copied().ok_or_else(|| {
         ScenarioError::Integration("launch campaign: the grid has no launch dates".into())
     })?;
-    let cands = measure_campaign_candidates(scenario, view, vehicle, origin)?;
+    let cands = measure_campaign_candidates(scenario, view, vehicle, origin, None)?;
     let outcome = cands.plan(max_launches_per_year)?;
     let flight = match &outcome {
         CampaignOutcome::Planned(plan) => Some(fly_campaign_plan(
@@ -4926,7 +5041,7 @@ mod tests {
                         let spacing = (view.launch_tdb()[1] - view.launch_tdb()[0]) / 86_400.0;
                         let origin = view.launch_tdb()[0] - months * CAMPAIGN_PERIOD_S / 12.0;
                         let t0 = Instant::now();
-                        let c = measure_campaign_candidates(&scenario, &view, v, origin)
+                        let c = measure_campaign_candidates(&scenario, &view, v, origin, None)
                             .expect("candidates")
                             // These probes measure the straight-to-the-rock windows; parking is
                             // `probe_orbital_assembly`'s.
@@ -5039,12 +5154,17 @@ mod tests {
                         let t1 = Instant::now();
                         // The shipping anchor: the first launch date, which is
                         // the same epoch at every size.
-                        let c =
-                            measure_campaign_candidates(&scenario, &view, v, view.launch_tdb()[0])
-                                .expect("candidates")
-                                // These probes measure the straight-to-the-rock windows; parking is
-                                // `probe_orbital_assembly`'s.
-                                .direct_only();
+                        let c = measure_campaign_candidates(
+                            &scenario,
+                            &view,
+                            v,
+                            view.launch_tdb()[0],
+                            None,
+                        )
+                        .expect("candidates")
+                        // These probes measure the straight-to-the-rock windows; parking is
+                        // `probe_orbital_assembly`'s.
+                        .direct_only();
                         (nl, na, build_s, t1.elapsed().as_secs_f64(), c)
                     })
                 })
@@ -5458,6 +5578,7 @@ mod tests {
                     launch_step_days: row120_days,
                     arrival_samples: 120,
                     polish_launch: false,
+                    ..SHIPPING_WINDOW_SEARCH
                 }
             } else {
                 let (a, b) = s.split_once('x').expect("searches like 2x120");
@@ -5465,6 +5586,7 @@ mod tests {
                     launch_step_days: a.parse().unwrap(),
                     arrival_samples: b.parse().unwrap(),
                     polish_launch: true,
+                    ..SHIPPING_WINDOW_SEARCH
                 }
             };
             runs.push((format!("search {s}"), Some(search), 120));
@@ -5494,6 +5616,7 @@ mod tests {
                                 view120,
                                 v,
                                 origin,
+                                None,
                                 WindowSource::Continuous(*s),
                                 &[],
                             ),
@@ -5504,6 +5627,7 @@ mod tests {
                                     &view,
                                     v,
                                     origin,
+                                    None,
                                     WindowSource::GridCells,
                                     &[],
                                 )
@@ -5715,6 +5839,7 @@ mod tests {
                     launch_step_days: a.trim().parse().ok()?,
                     arrival_samples: b.trim().parse().ok()?,
                     polish_launch: true,
+                    ..SHIPPING_WINDOW_SEARCH
                 })
             })
             .unwrap_or(SHIPPING_WINDOW_SEARCH);
@@ -5725,6 +5850,7 @@ mod tests {
             &view,
             &FALCON_HEAVY_EXPENDABLE,
             view.launch_tdb()[0],
+            None,
             WindowSource::Continuous(search),
             &[],
         )
@@ -5870,6 +5996,225 @@ mod tests {
         (v.z / v.norm()).asin().to_degrees()
     }
 
+    /// Probe, run by hand (`--ignored --nocapture`): standing defence - how the
+    /// campaign changes when the first launch cannot go on the map's first day. The
+    /// campaign depends only on the first launch date, so it is measured once per
+    /// date (`STANDING_FIRST_YR`, years before impact, default 12 down to 4) the way
+    /// the app measures it, and each readiness level reads the same row at its own
+    /// warning (`warning = first-launch lead + delay`). The 12 yr row is the map's
+    /// own first date and must reproduce the unrestricted measurement exactly.
+    /// `STANDING_FLY=1` also flies the 1- and 2-a-year plans whole.
+    ///
+    /// `STANDING_REACH=<arrival end fraction>` searches past the map's own axes
+    /// (0.97 / 0.99 of the span since 2026-10-08; 0.70 / 0.92 before): the
+    /// arrivals out to that fraction, the launches to it less the shortest transfer.
+    /// Each plan then says how late its last launch is, and every flown window how
+    /// its flown shift compares with the ranking key - the key is `push x lead`, and
+    /// the `1/lead` law under it is only measured down to about one orbit.
+    #[test]
+    #[ignore]
+    fn probe_standing_defence() {
+        if !have_kernels() {
+            return;
+        }
+        use asteroid_core::launch_vehicle::FALCON_HEAVY_EXPENDABLE;
+        use asteroid_core::readiness::READINESS_LEVELS;
+        let vehicle = &FALCON_HEAVY_EXPENDABLE;
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+        let impact = mc.impact_tdb_seconds();
+        let yr = asteroid_core::readiness::YEAR_S;
+        let view = PorkchopView::build(&scenario, 120, 120).expect("grid");
+        let map_first = view.launch_tdb()[0];
+        let map_last = *view.launch_tdb().last().expect("launch dates");
+        println!(
+            "launcher {}; map launches {:.3}..{:.3} yr before impact",
+            vehicle.name,
+            (impact - map_first) / yr,
+            (impact - map_last) / yr
+        );
+        for r in READINESS_LEVELS {
+            println!("  {:<13} delay {:.3} yr", r.name, r.delay_s() / yr);
+        }
+        let leads: Vec<f64> = std::env::var("STANDING_FIRST_YR")
+            .ok()
+            .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+            .unwrap_or_else(|| (4..=12).rev().map(f64::from).collect());
+        let fly = std::env::var("STANDING_FLY").is_ok_and(|v| v == "1");
+        let span = impact - map_first;
+        let search = match std::env::var("STANDING_REACH")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+        {
+            Some(arrival_end) => WindowSearch {
+                arrival_end_fraction: arrival_end,
+                launch_end_fraction: arrival_end - MIN_TOF_DAYS * 86_400.0 / span,
+                ..SHIPPING_WINDOW_SEARCH
+            },
+            None => SHIPPING_WINDOW_SEARCH,
+        };
+        println!(
+            "search launches to {:.3} yr, arrivals to {:.3} yr before impact",
+            (1.0 - search.launch_end_fraction) * span / yr,
+            (1.0 - search.arrival_end_fraction) * span / yr
+        );
+        let describe = |o: &CampaignOutcome, target: f64| -> String {
+            match o {
+                CampaignOutcome::Planned(p) => format!(
+                    "{:2} ({:.0})",
+                    p.total_launches,
+                    p.predicted_impact_parameter() / 1e3
+                ),
+                CampaignOutcome::Unreachable(p) if p.total_launches == 0 => "none".into(),
+                CampaignOutcome::Unreachable(p) => format!(
+                    "short {:.0}/{:.0} ({})",
+                    p.predicted_impact_parameter() / 1e3,
+                    target / 1e3,
+                    p.total_launches
+                ),
+                CampaignOutcome::AlreadyClear => "clear".into(),
+            }
+        };
+        let rates = [1u32, 2, 3, 4, 6, 12];
+        for lead_yr in leads {
+            // The map's first date stands for "12": the scenario starts there.
+            let first = (impact - lead_yr * yr).max(map_first);
+            let t0 = std::time::Instant::now();
+            let c = measure_campaign_candidates_from(
+                &scenario,
+                &view,
+                vehicle,
+                first,
+                Some(first),
+                WindowSource::Continuous(search),
+                &asteroid_core::orbital_assembly::WHAT_IF_PARKED_DELIVERIES,
+            )
+            .expect("candidates");
+            let parked = c.candidates.iter().filter(|k| k.parked).count();
+            println!(
+                "
+first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown, {} parked offered, {:.0} s",
+                lead_yr,
+                (impact - c.launch_span_tdb.0) / yr,
+                (impact - c.launch_span_tdb.1) / yr,
+                c.candidates.len() - parked,
+                parked,
+                t0.elapsed().as_secs_f64()
+            );
+            let warnings: Vec<String> = READINESS_LEVELS
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{} {:.2} yr",
+                        r.name,
+                        r.warning_for_first_launch_s(impact, c.launch_span_tdb.0) / yr
+                    )
+                })
+                .collect();
+            println!("  warning needed: {}", warnings.join(", "));
+            let row: Vec<String> = rates
+                .iter()
+                .map(|&rate| {
+                    format!(
+                        "{rate}/yr {}",
+                        describe(&c.plan(rate).expect("plan"), c.target_b_m)
+                    )
+                })
+                .collect();
+            println!("  parked+direct: {}", row.join(" | "));
+            let d = c.direct_only();
+            let row: Vec<String> = rates
+                .iter()
+                .map(|&rate| {
+                    format!(
+                        "{rate}/yr {}",
+                        describe(&d.plan(rate).expect("plan"), d.target_b_m)
+                    )
+                })
+                .collect();
+            println!("  direct only:   {}", row.join(" | "));
+            // How late each plan reaches: its last launch and last arrival.
+            let reach: Vec<String> = rates
+                .iter()
+                .filter_map(|&rate| match c.plan(rate).expect("plan") {
+                    CampaignOutcome::Planned(p) | CampaignOutcome::Unreachable(p) => {
+                        let used = c.candidates.iter().zip(&p.launches).filter(|(_, &n)| n > 0);
+                        let (l, a) = used
+                            .fold((f64::NEG_INFINITY, f64::NEG_INFINITY), |acc, (k, _)| {
+                                (acc.0.max(k.launch_tdb), acc.1.max(k.arrival_tdb))
+                            });
+                        l.is_finite().then(|| {
+                            format!(
+                                "{rate}/yr {:.2}/{:.2}",
+                                (impact - l) / yr,
+                                (impact - a) / yr
+                            )
+                        })
+                    }
+                    CampaignOutcome::AlreadyClear => None,
+                })
+                .collect();
+            println!(
+                "  latest launch/arrival used, yr before impact: {}",
+                reach.join(" | ")
+            );
+            // Flown shift per unit of ranking key, by arrival lead: the key is what
+            // the pool's estimates are scaled by, so a drift here is a ranking error.
+            let mut by_lead: Vec<(f64, f64)> = c
+                .candidates
+                .iter()
+                .filter(|k| !k.parked)
+                .map(|k| {
+                    let key =
+                        campaign_proxy(k.proxy_along_track_dv_ms, impact - k.arrival_tdb).abs();
+                    let flown = k.shift_per_launch_m.0.hypot(k.shift_per_launch_m.1);
+                    ((impact - k.arrival_tdb) / yr, flown / key)
+                })
+                .collect();
+            by_lead.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let late: Vec<String> = by_lead
+                .iter()
+                .take(6)
+                .map(|(lead, r)| format!("{lead:.2} yr {r:.3e}"))
+                .collect();
+            let mid = by_lead.get(by_lead.len() / 2).map_or(f64::NAN, |x| x.1);
+            println!(
+                "  flown/key, median {mid:.3e}; the six latest arrivals: {}",
+                late.join(", ")
+            );
+            if first == map_first {
+                // The control: the map's own first date is no restriction at all.
+                let free = measure_campaign_candidates_from(
+                    &scenario,
+                    &view,
+                    vehicle,
+                    map_first,
+                    None,
+                    WindowSource::Continuous(search),
+                    &asteroid_core::orbital_assembly::WHAT_IF_PARKED_DELIVERIES,
+                )
+                .expect("candidates");
+                assert_eq!(
+                    free, c,
+                    "a first launch on the map's first date must change nothing"
+                );
+                println!("  control: identical to the unrestricted measurement");
+            }
+            for rate in [1u32, 2].into_iter().filter(|_| fly) {
+                if let CampaignOutcome::Planned(p) = c.plan(rate).expect("plan") {
+                    let fl = fly_campaign_plan(&scenario, &c, &p, 7, PLACEMENT_BAND_A_KM)
+                        .expect("flight");
+                    println!(
+                        "  flown at {rate}/yr: {} launches, {:?}, nonlinearity {:?}",
+                        p.total_launches, fl.flown, fl.nonlinearity
+                    );
+                }
+            }
+        }
+    }
+
     /// Probe, run by hand (`--ignored --nocapture`): orbital assembly. Every launch
     /// may go up to a parking orbit and leave on a later date with its own departure
     /// stage (the shipping parked delivery: the published single-payload limit, a
@@ -5909,6 +6254,7 @@ mod tests {
                     launch_step_days: a.trim().parse().ok()?,
                     arrival_samples: b.trim().parse().ok()?,
                     polish_launch: true,
+                    ..SHIPPING_WINDOW_SEARCH
                 })
             })
             .unwrap_or(SHIPPING_WINDOW_SEARCH);
@@ -5931,6 +6277,7 @@ mod tests {
             &view,
             vehicle,
             view.launch_tdb()[0],
+            None,
             WindowSource::Continuous(search),
             &also,
         )
@@ -6198,10 +6545,11 @@ mod tests {
                 launch_step_days: a.parse().unwrap(),
                 arrival_samples: b.parse().unwrap(),
                 polish_launch: true,
+                ..SHIPPING_WINDOW_SEARCH
             };
             let t = std::time::Instant::now();
             let found =
-                search_campaign_windows(&scenario, &FALCON_HEAVY_EXPENDABLE, origin, search)
+                search_campaign_windows(&scenario, &FALCON_HEAVY_EXPENDABLE, origin, None, search)
                     .expect("search");
             println!("{s}: {:.1} s", t.elapsed().as_secs_f64());
             all.push((s.trim().to_string(), found));
@@ -6226,6 +6574,17 @@ mod tests {
             println!("{row}");
         }
     }
+
+    /// The shipping estimate's leave-one-out error, 90th percentile, that
+    /// `a_launch_campaign_flies_the_way_it_was_planned` must stay under. Measured
+    /// 2026-10-08 on the 0.97 / 0.99 axes: 2.2 % (median 0.2 %) over 176 flown
+    /// windows, nearest launch and nearest arrival within a tenth of each other. The
+    /// tail is isolation, not phase: the worst five (21-189 %) each have no flown
+    /// neighbour of their kind within 87-138 days, three of them arriving 0.12-0.79 yr
+    /// before impact - while a pool window the planner estimates sits ~2 days from
+    /// one. 5 % is room for a re-seeded search, and a fifth of the 53 % the retired
+    /// global gate tripped on.
+    const ESTIMATE_ERROR_90TH_BOUND: f64 = 0.05;
 
     /// A multi-launch campaign on the real field, end to end: rank, fly the
     /// candidates, plan, fly the plan whole, and read it back.
@@ -6299,63 +6658,110 @@ mod tests {
                 c.shift_per_launch_m.1 / 1e3
             );
         }
-        // The proxy has to order windows the way the flights do: within one push
-        // direction, the shift per unit of `|dv| x lead` must be near-constant. (Across
-        // the two directions it is not - a retrograde launch moved the rock ~30% more
-        // per unit of proxy than a prograde one on the shipping grid - which is why
-        // the candidates are split by sign rather than ranked on one list.)
+        // The proxy has to order windows the way the flights do - but only
+        // **locally**. The planner never ranks one window against another across the
+        // axis on the proxy alone: an unflown window's shift is scaled from a nearby
+        // flown one (`estimate_shift`), and every window a plan uses is flown before
+        // it counts. A global gate ("shift per unit of key is constant to 1.5x") was
+        // the check here until 2026-10-08, and it is the wrong one: the ratio rises
+        // and falls with the arrival date (the orbital phase the push lands at), from
+        // ~2.1 to ~3.3 on the stretched axes, which is physics, not a ranking error -
+        // and the old axes passed only because their flown set happened to miss the
+        // 2.7 yr-arrival window that carries the top of it.
         //
-        // **Strong windows only.** The proxy is the *along-track* part of the push
-        // times the lead; where that part is small the other components dominate
-        // what the rock does, and the ratio wanders off. The rolling cap flies such
-        // windows (a 1-in-12-months chain needs some date in every year, weak years
-        // included): measured 2026-10-01, three retrograde windows with keys 2.5-8 %
-        // of the direction's strongest moved the full-set spread from 24 % to 57 %.
-        // They are flown and counted on their flights, never on the proxy - so the
-        // claim pinned here is the one the ranking needs: among the windows strong
-        // enough to compete for "best" (key >= 10 % of the direction's strongest),
-        // the proxy orders them the way the flights do.
-        for prograde in [true, false] {
-            let pairs: Vec<(f64, f64)> = r
-                .candidates
-                .iter()
-                .filter(|c| (c.proxy_along_track_dv_ms > 0.0) == prograde)
-                .map(|c| {
-                    let s = Vector2::new(c.shift_per_launch_m.0, c.shift_per_launch_m.1).norm();
-                    let k = campaign_proxy(c.proxy_along_track_dv_ms, impact - c.arrival_tdb);
-                    (k, s / k)
-                })
-                .collect();
-            if pairs.is_empty() {
-                continue;
+        // So the gate is the estimate itself, leave one out: every flown direct
+        // window predicted from the *other* flown ones, by each rule, and the error is
+        // the vector difference over the flown shift. Parked entries are left out -
+        // they are exact scaled copies of flown windows and would predict themselves.
+        let direct: Vec<CampaignCandidate> =
+            r.candidates.iter().filter(|c| !c.parked).copied().collect();
+        let mut medians = Vec::new();
+        for rule in [EstimateRule::NearestLaunch, EstimateRule::NearestArrival] {
+            let mut errs: Vec<f64> = Vec::new();
+            let mut worst: Vec<(f64, String)> = Vec::new();
+            for (i, c) in direct.iter().enumerate() {
+                let others: Vec<CampaignCandidate> = direct
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(_, k)| *k)
+                    .collect();
+                let Some(est) = estimate_shift(
+                    c.launch_tdb,
+                    c.arrival_tdb,
+                    c.proxy_along_track_dv_ms,
+                    c.revolutions,
+                    impact,
+                    &others,
+                    rule,
+                ) else {
+                    continue;
+                };
+                let flown = Vector2::new(c.shift_per_launch_m.0, c.shift_per_launch_m.1);
+                let e = (est - flown).norm() / flown.norm();
+                errs.push(e);
+                // How far its nearest same-direction, same-lap neighbour is, in days.
+                let gap = others
+                    .iter()
+                    .filter(|k| {
+                        (k.proxy_along_track_dv_ms > 0.0) == (c.proxy_along_track_dv_ms > 0.0)
+                    })
+                    .filter(|k| k.revolutions == c.revolutions)
+                    .map(|k| match rule {
+                        EstimateRule::NearestLaunch => (k.launch_tdb - c.launch_tdb).abs(),
+                        EstimateRule::NearestArrival => (k.arrival_tdb - c.arrival_tdb).abs(),
+                    })
+                    .fold(f64::INFINITY, f64::min)
+                    / 86_400.0;
+                worst.push((
+                    e,
+                    format!(
+                        "{:.0}% at launch {:.2} / arrival {:.2} yr out, {} laps, key {:.2e}, neighbour {gap:.0} d away",
+                        100.0 * e,
+                        (impact - c.launch_tdb) / 3.155_76e7,
+                        (impact - c.arrival_tdb) / 3.155_76e7,
+                        c.revolutions,
+                        campaign_proxy(c.proxy_along_track_dv_ms, impact - c.arrival_tdb)
+                    ),
+                ));
             }
-            let spread = |rs: &mut dyn Iterator<Item = f64>| {
-                rs.fold((f64::INFINITY, 0.0_f64), |(l, h), x| (l.min(x), h.max(x)))
-            };
-            let (all_lo, all_hi) = spread(&mut pairs.iter().map(|p| p.1));
-            let strongest = pairs.iter().map(|p| p.0).fold(0.0_f64, f64::max);
-            let strong: Vec<f64> = pairs
-                .iter()
-                .filter(|p| p.0 >= 0.1 * strongest)
-                .map(|p| p.1)
-                .collect();
-            let (lo, hi) = spread(&mut strong.iter().copied());
+            worst.sort_by(|a, b| b.0.total_cmp(&a.0));
+            for w in worst.iter().take(5) {
+                println!("    {rule:?} worst: {}", w.1);
+            }
+            errs.sort_by(f64::total_cmp);
+            let q = |f: f64| errs[((errs.len() - 1) as f64 * f).round() as usize];
             println!(
-                "{} shift per (m/s x s) of proxy: {:.3e} .. {:.3e} (spread {:.1}%) over the {} strong windows; {:.1}% over all {}",
-                if prograde { "prograde  " } else { "retrograde" },
-                lo,
-                hi,
-                100.0 * (hi / lo - 1.0),
-                strong.len(),
-                100.0 * (all_hi / all_lo - 1.0),
-                pairs.len()
+                "estimate by {rule:?}: {} windows left out one at a time, error median {:.1}%, 90th {:.1}%, worst {:.1}%",
+                errs.len(),
+                100.0 * q(0.5),
+                100.0 * q(0.9),
+                100.0 * q(1.0)
             );
+            medians.push((rule, q(0.5), q(0.9)));
+        }
+        let shipping = medians
+            .iter()
+            .find(|m| m.0 == SHIPPING_ESTIMATE_RULE)
+            .expect("the shipping rule is measured");
+        // Another rule has to be *clearly* better to displace the shipping one - a
+        // fifth less error at the 90th percentile; measured, the two tie.
+        for m in &medians {
             assert!(
-                hi / lo < 1.5,
-                "the proxy does not track what one launch does (spread {:.0}%) - ranking by it would fly the wrong windows",
-                100.0 * (hi / lo - 1.0)
+                m.2 >= 0.8 * shipping.2,
+                "{:?} estimates clearly better than the shipping {:?} (90th {:.1}% vs {:.1}%) - ship it",
+                m.0,
+                SHIPPING_ESTIMATE_RULE,
+                100.0 * m.2,
+                100.0 * shipping.2
             );
         }
+        assert!(
+            shipping.2 < ESTIMATE_ERROR_90TH_BOUND,
+            "the shipping estimate's 90th-percentile error is {:.1}%, past the {:.0}% it was measured at",
+            100.0 * shipping.2,
+            100.0 * ESTIMATE_ERROR_90TH_BOUND
+        );
         println!("outcome: {:?}", r.outcome);
         let flight = r.flight.clone().expect("a planned campaign is flown");
         println!(
@@ -6803,8 +7209,16 @@ mod tests {
         // floor, so the assertion would pass without ever entering the regime it
         // exists to protect. Asserting the regime is reached comes first, for
         // exactly that reason.
-        let deep = PorkchopView::build_with_revolutions(&scenario, n, n, DEFAULT_MAX_REVOLUTIONS)
-            .expect("grid builds");
+        //
+        // On 240x240: the 24x24 grid above found the pocket until the axes were
+        // stretched to 0.97 / 0.99 of the span on 2026-10-08; then its rows stepped
+        // over it (cheapest 7.31), and so did the shipping 120x120 map's (1.065, just
+        // above the 1.0 floor). 240x240 reaches 0.204. The shipping map not reaching
+        // it is not a reason to drop the guard: the campaign's continuous window
+        // search samples dates no map row has, and can land in the pocket.
+        let deep =
+            PorkchopView::build_with_revolutions(&scenario, 240, 240, DEFAULT_MAX_REVOLUTIONS)
+                .expect("grid builds");
         let deep_c3 = deep.c3_flat();
         let cheapest = deep_c3
             .iter()

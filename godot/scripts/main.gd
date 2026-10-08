@@ -317,6 +317,14 @@ func _input(event: InputEvent) -> void:
 		Sim.adjust_campaign_rate(-1)
 	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_rate_up"):
 		Sim.adjust_campaign_rate(1)
+	# Standing defence: [ / ] step how long before impact the rock is found, [W]
+	# how ready the defence is. Both are free to dial and [E] measures them.
+	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_warning_down"):
+		Sim.adjust_campaign_warning(-1)
+	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_warning_up"):
+		Sim.adjust_campaign_warning(1)
+	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_readiness"):
+		Sim.cycle_campaign_readiness()
 	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_verify"):
 		Sim.request_campaign_step()
 	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_required_mass"):

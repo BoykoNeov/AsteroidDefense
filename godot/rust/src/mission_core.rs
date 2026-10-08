@@ -6581,8 +6581,9 @@ first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown,
     /// windows, nearest launch and nearest arrival within a tenth of each other. The
     /// tail is isolation, not phase: the worst five (21-189 %) each have no flown
     /// neighbour of their kind within 87-138 days, three of them arriving 0.12-0.79 yr
-    /// before impact - while a pool window the planner estimates sits ~2 days from
-    /// one. 5 % is room for a re-seeded search, and a fifth of the 53 % the retired
+    /// before impact. (This is flown windows predicted from flown windows; how far
+    /// the pool windows the planner estimates sit from a flown one was not measured.)
+    /// 5 % is room for a re-seeded search, and a tenth of the 53 % the retired
     /// global gate tripped on.
     const ESTIMATE_ERROR_90TH_BOUND: f64 = 0.05;
 

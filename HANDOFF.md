@@ -42,7 +42,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **Where in the closed form the ladder lives**: the four ingredients the map takes from the nominal rock swapped one at a time, then the same construction asked on the leg *before* the encounter | **done 2026-09-08**; none of the four ingredients orders by lead and their sum is not the bias either (additive to 11 %, so no cancellation), while splitting the prediction into a **baseline** (which orbit the rock arrives on) and a **turn** (what the flyby does to it) separates them cleanly: across the two extreme doors the two absolute errors are **750 and 805 km apart** and the error in the *change* is **55 km apart**, inside the ±136 km bar. So the flyby is predicted right to a constant and the whole 19 → 786 km ladder is the baseline. Placing the circle on the change instead would turn that ladder into a **103 km spread about a constant** — measured, deliberately not shipped | `core/examples/probe_keyhole_placement.rs`, `core/tests/keyhole_prediction_bias.rs`, `core/src/keyhole.rs` |
 | **The repair shipped, and the band changed units**: the resonant circle placed on the **change** the flyby makes rather than on the closed form's absolute `a'`, with the arriving orbit read off the flown arc; and a second resonance flown to settle what the leftover error is a constant *in* | **done 2026-09-08**; the 3:4's four doors go from a **767 km ladder** in the deflection lead to an **offset** (+352 to +372 km on the shipping convention, 20.7 km apart at the two extremes), so the worst case the band must cover halves. And the 2:3, flown at two leads on a gradient **ten times** steeper, says the error is a constant of **semi-major axis**, not of b-plane distance: 12× apart in kilometres (the gradient ratio) and overlapping in `a'`, with the measurement's own error bar reading ±3 535 and ±3 540 km of `a'` on the two. So `KEYHOLE_PLACEMENT_KM = 800` becomes `KEYHOLE_PLACEMENT_A_KM = 15 000` km of `a'` — **575 km on the 3:4, 57 km on the 2:3** — and the alert is cut per circle on `exposure = margin − band` | `core/src/{keyhole,keyhole_target}.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/{sim,planner}.gd`, `core/tests/keyhole_prediction_bias.rs` |
 | **The leftover constant, flown on six more resonances**: the error in the change across the flyby measured on 5:7, 7:10, 6:5, 7:8, 5:8 and 7:6 at dialable leads, a separating pair chosen from a census, and the crowded register re-run on the circles as shipped | **done 2026-09-23**; **not one number** - same sign on all twenty-one flights (the map always predicts the post-flyby orbit too large) but 2 831 to 46 806 km of `a'`, with the close orbit-raising 6:5 and 7:6 2-5× the rest at 200 d. So `KEYHOLE_PLACEMENT_A_KM` **15 000 → 51 000** (the 3:4's zone ~575 → ~1 950 km), and the several-doors register is **not reachable** on this rock (needs ~660 000 km of `a'`) - its earlier firing was the retired km band | `core/examples/probe_keyhole_placement.rs`, `godot/scripts/sim.gd`, `godot/rust/src/mission_core.rs`, `godot/tests/test_orrery.gd` |
-| **Standing defence, part 1: when the first rocket can fly** — how long before impact the rock is found plus a sourced delay (decide 172 d; build from scratch 60 months, or 1 yr from storage) sets the first launch; the launch map's axes stretched to 0.97 / 0.99 of the span because the old end was setting a headline | **done 2026-10-08**; found 12 yr out, Falcon Heavy at 6 a year needs **6 launches on the pad, 6 from storage, 12 built from scratch**, and at 2 a year **6 / 7 / falls short**. And with late launch dates on the map, 1 a year on the pad goes from short by ~1 % to **10 launches, clear** | `core/src/readiness.rs`, `godot/rust/src/mission_core.rs` (`measure_campaign_candidates_from`'s `earliest_launch_tdb`, `estimate_shift`), `godot/scripts/{sim,porkchop,main}.gd` |
+| **Standing defence, part 1: when the first rocket can fly** — how long before impact the rock is found plus a sourced delay (decide 172 d; build from scratch 60 months, or 1 yr from storage) sets the first launch; the launch map's axes stretched to 0.97 / 0.99 of the span because the old end was setting a headline | **done 2026-10-08**; found 12 yr out, Falcon Heavy at 6 a year needs **6 launches on the pad, 6 from storage, 12 built from scratch**, and at 2 a year **6 / 7 / falls short** - the level delays only the *first* launch, every later one is assumed ready at the cap rate (from storage at 6 a year, all six fly within ~80 days: a six-impactor stock). And with late launch dates on the map, 1 a year on the pad goes from short by ~1 % to **10 launches, clear** | `core/src/readiness.rs`, `godot/rust/src/mission_core.rs` (`measure_campaign_candidates_from`'s `earliest_launch_tdb`, `estimate_shift`), `godot/scripts/{sim,porkchop,main}.gd` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -313,7 +313,8 @@ Read this table first, then the session that owns the layer you are touching.
    km, last launch 2.72 yr out); 2..12 stay 6, what-ifs 5-4 / 3 / 2. **Standing
    defence, part 1: DONE 2026-10-08** - the first launch waits for the warning and a
    sourced delay; found 12 yr out, 6 a year needs 6 / 6 / 12 launches on the pad /
-   from storage / built from scratch. See *Standing defence: when the first rocket
+   from storage / built from scratch (only the first launch waits; the rest are
+   assumed ready at the rate). See *Standing defence: when the first rocket
    can fly*. Still open: a stored stock that flies faster than the yearly rate,
    interceptors waiting in orbit for years, and detection.
 
@@ -6680,7 +6681,8 @@ Two tests moved with it, neither by loosening:
   run had that window at 3.2 too; the old gate passed because its flown set missed
   it. But the planner never ranks globally: an unflown window is scaled from a nearby
   flown one (`estimate_shift`, now shared by the planner and the test). So the gate
-  is now that estimate, **leave one out**: 176 flown windows, median 0.2 %, 90th
+  is now that estimate, **leave one out** among the flown windows (pool-to-flown
+  distances were not measured): 176 flown windows, median 0.2 %, 90th
   percentile 2.2 %, bound 5 %. Nearest *launch* (shipping) and nearest *arrival* tie
   (2.2 / 2.1 %), so the rule did not change. The tail (21-189 %) is isolation: the
   worst five each have no flown neighbour within 87-138 days. Estimates only choose,
@@ -6713,7 +6715,17 @@ delay`). `probe_standing_defence`, 11 dates, 1 497 s:
 
 Read as warning: add 0 / 1.47 / 5.47 yr. So a rock found 12 years out needs, at 6 a
 year, **6 launches if one is on the pad, 6 from storage, 12 built from scratch**; at
-2 a year **6 / 7 / falls short**. Every 2-a-year plan that reaches the target is
+2 a year **6 / 7 / falls short**.
+
+**What a level means - read before quoting any of these.** A readiness level delays
+only the *first* launch. Every launch after it is assumed ready whenever the cap
+allows, so the counts silently assume a stock (or a production line) as large as the
+plan. From storage at 6 a year, found 12 yr out, the six launches fly between 10.53
+and 10.31 yr before impact - all within ~80 days, so "6 from storage" needs **six**
+stored impactors with launchers arranged; the only sourced stock (Nuth, Barbee &
+Leung) is **two**, and those are nuclear-capable interceptors, not kinetic impactors.
+"12 built from scratch" likewise assumes twelve impactors built in parallel inside the
+60 months the source gives for one mission. Part 2 is where that stops being free. Every 2-a-year plan that reaches the target is
 flown whole and misses (perigee 20 212-21 261 km, nonlinearity ~2e-4). The shipping
 table (`probe_orbital_assembly`, `ASSEMBLY_ALSO=app`, 211 s): 1/yr **10** (26 276 of
 25 955 km, flown perigee 20 310 km), 2..12 **6**; straight to the rock only, 1/yr
@@ -6732,9 +6744,13 @@ on-the-pad numbers on ON THE PAD and measures FROM SCRATCH too (2/yr falls short
 
 #### What this leaves
 
-- Parts 2-4 of the bullet: a stored stock flying faster than the yearly rate,
-  interceptors waiting in orbit for years (station-keeping stops being small),
-  detection.
+- Parts 2-4 of the bullet. Part 2 is better posed as a **limited stock** (S
+  interceptors ready at the storage delay, the rest no earlier than the build delay)
+  than as "a stock beating the yearly rate" - that is the assumption above, made
+  explicit; the rate is secondary. Then interceptors waiting in orbit for years
+  (station-keeping stops being small), detection.
+- The orbital-assembly height bracket (400 km "on the edge") was measured on the old
+  axes and is moot at 400 km now; not re-run.
 - The plans that fall short at short warning reach arrivals 0.32 yr out, where the
   estimate has few flown neighbours; a short count there is an upper bound.
 - The one-year storage figure is a bound on "much less than a year"; nothing sourced

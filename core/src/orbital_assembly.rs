@@ -88,7 +88,13 @@
 //! the target outright from about
 //! 1 000 km (which leans on an unsourced lift that high, at the edge of the
 //! radiation belts). The user kept 400 km as the cautious default (2026-10-07), so
-//! the shipping answer is "short" and is quoted with this edge.
+//! the shipping answer was "short" and quoted with this edge.
+//!
+//! **Superseded 2026-10-08:** all of the above was measured with launches stopping
+//! 3.6 yr before impact, the launch map's old axis end - a drawing choice that the
+//! 1-a-year plan was pressed against. With the axes stretched (HANDOFF *Standing
+//! defence: when the first rocket can fly*), 1 in any 12 months at 400 km is **10
+//! launches, clear by 1.2 %**. The height bracket has not been re-run there.
 //!
 //! # The escape burn is flown finite ([`crate::departure_burn`])
 //! The OMS-E pushes 26.7 kN against a 26.5 t stack, rated for at most 1 030 s per

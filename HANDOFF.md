@@ -43,7 +43,7 @@ Read this table first, then the session that owns the layer you are touching.
 | **The repair shipped, and the band changed units**: the resonant circle placed on the **change** the flyby makes rather than on the closed form's absolute `a'`, with the arriving orbit read off the flown arc; and a second resonance flown to settle what the leftover error is a constant *in* | **done 2026-09-08**; the 3:4's four doors go from a **767 km ladder** in the deflection lead to an **offset** (+352 to +372 km on the shipping convention, 20.7 km apart at the two extremes), so the worst case the band must cover halves. And the 2:3, flown at two leads on a gradient **ten times** steeper, says the error is a constant of **semi-major axis**, not of b-plane distance: 12× apart in kilometres (the gradient ratio) and overlapping in `a'`, with the measurement's own error bar reading ±3 535 and ±3 540 km of `a'` on the two. So `KEYHOLE_PLACEMENT_KM = 800` becomes `KEYHOLE_PLACEMENT_A_KM = 15 000` km of `a'` — **575 km on the 3:4, 57 km on the 2:3** — and the alert is cut per circle on `exposure = margin − band` | `core/src/{keyhole,keyhole_target}.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/{sim,planner}.gd`, `core/tests/keyhole_prediction_bias.rs` |
 | **The leftover constant, flown on six more resonances**: the error in the change across the flyby measured on 5:7, 7:10, 6:5, 7:8, 5:8 and 7:6 at dialable leads, a separating pair chosen from a census, and the crowded register re-run on the circles as shipped | **done 2026-09-23**; **not one number** - same sign on all twenty-one flights (the map always predicts the post-flyby orbit too large) but 2 831 to 46 806 km of `a'`, with the close orbit-raising 6:5 and 7:6 2-5× the rest at 200 d. So `KEYHOLE_PLACEMENT_A_KM` **15 000 → 51 000** (the 3:4's zone ~575 → ~1 950 km), and the several-doors register is **not reachable** on this rock (needs ~660 000 km of `a'`) - its earlier firing was the retired km band | `core/examples/probe_keyhole_placement.rs`, `godot/scripts/sim.gd`, `godot/rust/src/mission_core.rs`, `godot/tests/test_orrery.gd` |
 | **Standing defence, part 1: when the first rocket can fly** — how long before impact the rock is found plus a sourced delay (decide 172 d; build from scratch 60 months, or 1 yr from storage) sets the first launch; the launch map's axes stretched to 0.97 / 0.99 of the span because the old end was setting a headline | **done 2026-10-08**; found 12 yr out, Falcon Heavy at 6 a year needs **6 launches on the pad, 6 from storage, 12 built from scratch**, and at 2 a year **6 / 7 / falls short** - the level delays only the *first* launch, every later one is assumed ready at the cap rate (from storage at 6 a year, all six fly within ~80 days: a six-impactor stock). And with late launch dates on the map, 1 a year on the pad goes from short by ~1 % to **10 launches, clear** | `core/src/readiness.rs`, `godot/rust/src/mission_core.rs` (`measure_campaign_candidates_from`'s `earliest_launch_tdb`, `estimate_shift`), `godot/scripts/{sim,porkchop,main}.gd` |
-| **Standing defence, part 2: a stock that runs out** — IN STORAGE is a *number* of stored interceptors (sourced: Nuth et al.'s "at least two", nuclear-capable), the rest built from scratch; planned exactly (counted against the rate, or outside it as a what-if) inside the measurement | **done 2026-10-08**; found 12 yr out, 6 a year needs **9 launches with the sourced two, at the line** (12 from scratch, 6 with no limit); found 9 yr out the two buy nothing - it takes three to reach the target at all, at 12 a year | `core/src/{campaign,readiness}.rs` (`plan_campaign_stocked`), `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/{sim,porkchop,main}.gd` |
+| **Standing defence, part 2: a stock that runs out** — IN STORAGE is a *number* of stored interceptors (sourced: Nuth et al.'s "at least two", nuclear-capable), the rest built from scratch; planned exactly (counted against the rate, or outside it as a what-if) inside the measurement | **done 2026-10-08**; found 12 yr out, 6 a year needs **9 launches with the sourced two, at the line** (12 from scratch, 6 with no limit); found 9 yr out the two buy nothing - it takes three to reach the target at all, at 12 a year. Built launches are still unlimited from the build date: "12 built from scratch" is twelve impactors built in parallel inside one 60-month build | `core/src/{campaign,readiness}.rs` (`plan_campaign_stocked`), `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/{sim,porkchop,main}.gd` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -6708,15 +6708,18 @@ delay`). `probe_standing_defence`, 11 dates, 1 497 s:
 |---|---|---|---|---|---|---|
 | 12 (on the pad, found at t = 0) | **10** | 6 | 6 | 6 | 6 | 6 |
 | 11 | short | 6 | 6 | 6 | 6 | 6 |
-| 10.53 (in storage, found at t = 0) | short | 7 | 7 | 6 | 6 | 6 |
+| 10.53 (in storage, found at t = 0) | short | 7 | 7 | 6 (at the line, 0.63 %) | 6 | 6 |
 | 10 | short | 8 | 7 | 7 | 7 | 7 |
-| 9 | short | 11 | 9 | 8 | 7 | 7 |
-| 8 | short | short | 10 | 8 | 7 | 7 |
-| 7 | short | short | short | 15 (at the line) | 12 | 11 |
-| 6.53 (from scratch, found at t = 0) | short | short | short | 16 | 12 | 11 |
+| 9 | short | 11 (at the line, 0.84 %) | 9 | 8 | 7 | 7 |
+| 8 | short | short | 10 | 8 (at the line, 0.71 %) | 7 | 7 |
+| 7 | short | short | short | 15 (at the line, 0.08 %) | 12 | 11 |
+| 6.53 (from scratch, found at t = 0) | short | short | short | 16 (at the line, 0.56 %) | 12 | 11 |
 | 6 | short | short | short | short | 18 | 14 |
 | 5 | short | short | short | short | short | 22 |
-| 4 | short | short | short | short | short | 25 (at the line) |
+| 4 | short | short | short | short | short | 25 (at the line, 0.35 %) |
+
+"At the line" is the panel's rule: within 1 % of the target |B| either side, a count
+is not a clear yes (the margins added 2026-10-08 from the same run's printout).
 
 Read as warning: add 0 / 1.47 / 5.47 yr. So a rock found 12 years out needs, at 6 a
 year, **6 launches if one is on the pad, 6 from storage, 12 built from scratch**; at
@@ -6872,7 +6875,10 @@ used.
 #### What this leaves
 
 - Parts 3-4: interceptors waiting in orbit for years, detection.
-- The stock is one size for one warning; a stock *replenished* by a production line
-  (built launches arriving faster than one build each) is still the cap.
+- **Built launches are still unlimited.** Past the stock, every launch from the build
+  date on is assumed ready whenever the cap allows - so "12 built from scratch" is
+  twelve impactors built in parallel inside the 60 months the source gives for *one*
+  mission. How fast a production line could deliver them is not modelled; the
+  yearly cap is the only limit.
 - The parking height bracket was re-run on the new axes (1/yr 10 at 400-800 km, 9 from
   1 000 km); nothing here depends on it.

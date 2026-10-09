@@ -208,7 +208,8 @@ workspace/
   under a launch-rate cap, orbital assembly (launches parked in orbit that
   leave on a better date), and the first part of standing defense: the first
   launch waits for the warning and a sourced readiness delay (found 12 years out,
-  Falcon Heavy at up to 6 a year needs 12 launches built from scratch), and a
+  Falcon Heavy at up to 6 a year needs 12 launches built from scratch - every
+  built launch assumed ready at that rate, so twelve built in parallel), and a
   stored stock that runs out (the sourced two stored interceptors bring that to 9,
   at the line;
   found 9 years out they are not enough at any rate). Remaining: interceptors

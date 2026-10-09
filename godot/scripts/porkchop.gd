@@ -525,7 +525,7 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 	# conditional on it like on the rate.
 	var st := Sim.campaign_stock_label()
 	if st.is_empty():
-		st = Sim.campaign_built_label(Sim.pork_campaign_first_launch_tdb())
+		st = Sim.campaign_built_label(Sim.pork_campaign_first_built_tdb())
 	if not st.is_empty():
 		_t(Vector2(x, y), st, mid, _fs - 1)
 	y += lh
@@ -561,11 +561,19 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 		elif Sim.pork_campaign_flight_is_current():
 			fl = "FULL-FIELD FLIGHT:  " + Sim.campaign_flight_label()
 			fl_col = bright
+		elif not planned and Sim.campaign_built_binds():
+			# The production line is the limit: no launch rate lifts it.
+			fl = "NOTHING TO FLY AT %d BUILT A YEAR - [0] RAISES IT" % Sim.pork_campaign_built
 		elif not planned:
 			fl = "NOTHING TO FLY AT THIS RATE - [X] RAISES IT"
 		elif not Sim.pork_campaign_flight().is_empty():
-			fl = "[E] FLY (LAST FLIGHT WAS AT %d PER 12 MO)" % int(
-				Sim.pork_campaign_flight().launches_per_year)
+			# Name what differs: the rate, or the production line (", NO BUILD LIMIT"
+			# when the last flight had none and this plan has one).
+			var last := Sim.pork_campaign_flight()
+			var note := Sim.campaign_built_note(last)
+			if note.is_empty() and Sim.campaign_built_binds():
+				note = ", NO BUILD LIMIT"
+			fl = "[E] FLY (LAST FLIGHT WAS AT %d PER 12 MO%s)" % [int(last.launches_per_year), note]
 		y += lh * 0.3
 		_t(Vector2(x, y), fl, fl_col)
 		y += lh

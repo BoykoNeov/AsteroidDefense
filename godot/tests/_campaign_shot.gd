@@ -215,6 +215,8 @@ func _run() -> void:
 	await _settle(1)
 	print("CAMPSHOT  from scratch 6/yr, 3 built/yr: %s" % Sim.campaign_count_label())
 	assert(Sim.campaign_count_label().begins_with("FALLS SHORT"), "3 built a year falls short")
+	# The flight line points at [0], not [X]: no launch rate lifts a production limit.
+	await _shot("campaign_scratch_6_built_3")
 	for _k in 3:
 		main._input(_key(KEY_0))
 	await _settle(1)

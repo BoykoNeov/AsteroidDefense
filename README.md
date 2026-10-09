@@ -214,7 +214,8 @@ workspace/
   not enough at any rate), and a production line for the rest - no source gives
   its rate, so it is a dial: a line finishing 4 a year needs 16 launches from
   scratch, and at 3 a year or fewer no launch rate is enough (with the two stored,
-  3 a year is enough: 11). Remaining: interceptors waiting in orbit, detection.
+  3 a year gets 11 launches to the line - not a clear yes). Remaining: interceptors
+  waiting in orbit, detection.
 
 See [`HANDOFF.md`](HANDOFF.md) for the complete spec, the locked decisions, the
 known hard problems, and the dated record of every batch; [`DEVELOPING.md`](DEVELOPING.md)

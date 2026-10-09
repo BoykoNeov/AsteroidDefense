@@ -3562,33 +3562,47 @@ impl CampaignCandidates {
     }
 
     /// [`plan`](Self::plan) with built impactors coming off a production line,
-    /// `built_per_year` a year: the first lot on the build date (the stock's, or with
-    /// no stock the first launch date - every launch there is built), another each
-    /// year after, a finished one waiting for its launch
-    /// ([`plan_campaign_stocked`]). `UNLIMITED_BUILDS` - or any rate at or above
-    /// `max_launches` - is [`plan`](Self::plan) exactly.
+    /// `built_per_year` a year: the first lot on `first_built_tdb`, another each year
+    /// after, a finished one waiting for its launch ([`plan_campaign_stocked`]).
+    /// `UNLIMITED_BUILDS` - or any rate at or above `max_launches` - is
+    /// [`plan`](Self::plan) exactly.
+    ///
+    /// `first_built_tdb` is the date the first lot is **really** finished: found,
+    /// plus the decision, plus the build ([`Readiness::build_from_tdb`], or
+    /// [`Readiness::first_launch_tdb`] for a level with no stock). It is *not*
+    /// clamped to the map's first launch date the way the measurement's dates are:
+    /// a rock found 20 years out finishes its first lot 14.5 years before impact,
+    /// and by the map's first date, 12 years out, three lots are waiting. Clamping
+    /// it would throw them away. (The stock's "before the build date" cut is the
+    /// same either way - no window lies before the map's first date.)
     ///
     /// Free like [`plan`](Self::plan), and on the same flown windows: they were
     /// chosen with no production limit, for every launch rate up to
     /// [`CAMPAIGN_MAX_RATE`], so the windows a plan at `built_per_year` a year draws
     /// on were flown for that rate - except where waiting pays, which the probe
     /// `probe_production_line` checks against a measurement made under the limit.
+    ///
+    /// [`Readiness::build_from_tdb`]: asteroid_core::readiness::Readiness::build_from_tdb
+    /// [`Readiness::first_launch_tdb`]: asteroid_core::readiness::Readiness::first_launch_tdb
     pub fn plan_built(
         &self,
         max_launches: u32,
         built_per_year: u32,
+        first_built_tdb: f64,
     ) -> Result<CampaignOutcome, ScenarioError> {
         if built_per_year >= max_launches {
             return self.plan(max_launches);
         }
+        let first_built = Epoch::from_tdb_seconds_past_j2000(first_built_tdb);
         let line = match self.stock {
             Some(s) => Stock {
                 built_per_period: built_per_year,
+                build_from: first_built,
                 ..s
             },
             None => Stock {
                 size: 0,
-                build_from: Epoch::from_tdb_seconds_past_j2000(self.launch_span_tdb.0),
+                build_from: first_built,
                 mode: asteroid_core::campaign::StockMode::Counted,
                 built_per_period: built_per_year,
             },
@@ -6540,6 +6554,11 @@ first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown,
                 let build = level
                     .build_from_tdb(impact, w)
                     .map_or(first, |b| b.max(first));
+                // The first lot's true date - before the map's first date for a long
+                // warning, when lots finished earlier are waiting (`plan_built`).
+                let first_built = level
+                    .build_from_tdb(impact, w)
+                    .unwrap_or_else(|| level.first_launch_tdb(impact, w));
                 let stock_with = |per: u32| match level.build_from_tdb(impact, w) {
                     Some(_) => Some(Stock {
                         size: SOURCED_STOCK_SIZE,
@@ -6569,7 +6588,7 @@ first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown,
                     "\nfound {warning_yr} yr out, {}: first launch {:.2} yr, first built {:.2} yr before impact; {} windows ({:.0} s)",
                     level.name,
                     (impact - first) / yr,
-                    (impact - build) / yr,
+                    (impact - first_built) / yr,
                     c.windows.len(),
                     t0.elapsed().as_secs_f64()
                 );
@@ -6580,7 +6599,10 @@ first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown,
                         .map(|&rate| {
                             format!(
                                 "{rate}/yr {}",
-                                describe(&c.plan_built(rate, b).expect("plan"), c.target_b_m)
+                                describe(
+                                    &c.plan_built(rate, b, first_built).expect("plan"),
+                                    c.target_b_m
+                                )
                             )
                         })
                         .collect();
@@ -6592,6 +6614,14 @@ first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown,
                     );
                 }
                 for &b in &remeasure {
+                    // The measurement's dates are clamped to the map; its lots would
+                    // start there, not at the true date, so the two do not compare.
+                    if first_built < map_first {
+                        println!(
+                            "  (no re-measure: the first lot is finished before the map starts)"
+                        );
+                        break;
+                    }
                     let t1 = std::time::Instant::now();
                     let under = measure_campaign_candidates(
                         &scenario,
@@ -6605,8 +6635,10 @@ first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown,
                     let row: Vec<String> = rates
                         .iter()
                         .map(|&rate| {
-                            let free =
-                                describe(&c.plan_built(rate, b).expect("plan"), c.target_b_m);
+                            let free = describe(
+                                &c.plan_built(rate, b, first_built).expect("plan"),
+                                c.target_b_m,
+                            );
                             let made = describe(&under.plan(rate).expect("plan"), under.target_b_m);
                             if free == made {
                                 format!("{rate}/yr {free}")
@@ -6625,7 +6657,9 @@ first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown,
                 }
                 if fly {
                     for &b in &builds {
-                        if let CampaignOutcome::Planned(p) = c.plan_built(6, b).expect("plan") {
+                        if let CampaignOutcome::Planned(p) =
+                            c.plan_built(6, b, first_built).expect("plan")
+                        {
                             let fl = fly_campaign_plan(&scenario, &c, &p, 7, PLACEMENT_BAND_A_KM)
                                 .expect("flight");
                             let perigee = match fl.flown {

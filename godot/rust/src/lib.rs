@@ -1920,7 +1920,8 @@ impl Mission {
         };
         let cap = launches_per_year.clamp(1, 1_000) as u32;
         let built = self.campaign_built(cap, built_per_year);
-        let outcome = match c.plan_built(cap, built) {
+        let first_built = self.campaign_first_built_tdb(c);
+        let outcome = match c.plan_built(cap, built, first_built) {
             Ok(o) => o,
             Err(_) => return d,
         };
@@ -2041,7 +2042,7 @@ impl Mission {
             )
             .filter(|_| parks);
         for (name, alt) in alternatives {
-            let Ok(Ok(o)) = alt.map(|a| a.plan_built(cap, built)) else {
+            let Ok(Ok(o)) = alt.map(|a| a.plan_built(cap, built, first_built)) else {
                 continue;
             };
             let mut row = VarDictionary::new();
@@ -2072,6 +2073,26 @@ impl Mission {
             UNLIMITED_BUILDS
         } else {
             built_per_year as u32
+        }
+    }
+
+    /// The date the held campaign's first built impactor is really finished: found,
+    /// plus the decision, plus the build, **not** clamped to the map's first launch
+    /// date (lots finished before the map starts are waiting - see
+    /// `CampaignCandidates::plan_built`). The measurement's own first date if the
+    /// scenario or the level is gone.
+    fn campaign_first_built_tdb(&self, c: &CampaignCandidates) -> f64 {
+        let (readiness, warning_s) = self.campaign_readiness;
+        let impact = self
+            .core
+            .as_ref()
+            .and_then(|core| core.scenario_arc())
+            .map(|s| s.impact_epoch().tdb_seconds_past_j2000());
+        match (readiness_at(readiness), impact) {
+            (Some(level), Some(impact)) => level
+                .build_from_tdb(impact, warning_s)
+                .unwrap_or_else(|| level.first_launch_tdb(impact, warning_s)),
+            _ => c.launch_span_tdb.0,
         }
     }
 
@@ -2111,7 +2132,7 @@ impl Mission {
         };
         let cap = launches_per_year.clamp(1, 1_000) as u32;
         let built = self.campaign_built(cap, built_per_year);
-        let plan = match c.plan_built(cap, built) {
+        let plan = match c.plan_built(cap, built, self.campaign_first_built_tdb(&c)) {
             Ok(CampaignOutcome::Planned(p)) => p,
             _ => {
                 self.error = "no campaign reaches the target at this rate - nothing to fly".into();

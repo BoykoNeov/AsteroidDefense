@@ -1,12 +1,14 @@
 //! `interval_packing` — the most valuable whole-number packing under caps on runs
 //! of consecutive items, exactly.
 //!
-//! The campaign planner ([`crate::campaign`]) needs it once a launch is limited by
-//! more than one rule at a time: "at most N in any 12 months", "at most S before the
-//! build date", "at most S + k·B before the k-th year of production". Its own chain
-//! programme is exact for the first two and cannot carry the third (one count per
-//! production year, all coupled across chains). This module solves the general
-//! problem the three share.
+//! The campaign planner's **independent check**. Its production-line plans
+//! ([`crate::campaign`], `LotChains`) come from chains with release dates, an
+//! argument about ranks; this module states the same rules the plain way - "at most
+//! N in any 12 months", "at most S before the build date", "at most S + k·B before
+//! the k-th lot" are each a cap on a run of launch windows in date order - and
+//! solves that exactly, by a different route. The campaign tests pin the chains
+//! against it on random cases. It is too slow to plan with: it was tried first, and
+//! took 10-60 s for a row of plans the chains make in a tenth of a second.
 //!
 //! # The problem
 //! Items `0..n` (launch windows in date order), each with a value `vᵢ`; choose

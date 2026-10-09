@@ -2384,6 +2384,32 @@ mod tests {
     }
 
     #[test]
+    fn lots_finished_before_the_first_window_are_all_waiting() {
+        // A rock found long before the first launch date: one built a period, the
+        // first finished 500 days before the only window. Five lots are waiting, so
+        // the window can take the whole cap of 4 at once - and with the build date
+        // moved up to the window itself, only one.
+        let span = 100.0 * DAY;
+        let w = [window(1_000.0, (0.0, 10.0))];
+        let line = |build_days: f64| Stock {
+            size: 0,
+            build_from: Epoch::from_tdb_seconds_past_j2000(build_days * DAY),
+            mode: StockMode::Counted,
+            built_per_period: 1,
+        };
+        let early = planned(
+            plan_campaign_stocked(Vector2::zeros(), 40.0, &w, 4, span, &line(500.0)).unwrap(),
+        );
+        assert_eq!(early.launches, vec![4]);
+        let late =
+            plan_campaign_stocked(Vector2::zeros(), 40.0, &w, 4, span, &line(1_000.0)).unwrap();
+        assert!(
+            matches!(late, CampaignOutcome::Unreachable(ref p) if p.total_launches == 1),
+            "{late:?}"
+        );
+    }
+
+    #[test]
     fn a_finished_impactor_waits_for_a_better_date() {
         // One built a period from day 0, two launches allowed in any period. A weak
         // window inside the first period, a strong one in the second, a weak one in

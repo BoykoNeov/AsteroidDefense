@@ -6990,6 +6990,21 @@ Flown whole at 6 a year, every plan misses: from scratch 16 at 4 built a year (p
 20 500 km) and 12 at 6 (20 269 km); in storage 11 / 10 / 9 at 3 / 4 / 6 (20 187 /
 20 539 / 20 239 km).
 
+#### Lots finished before the map starts (the final review's catch)
+
+The measurement clamps every date to the map's first launch date, 12 years out. The
+first version anchored the lots there too, so a longer warning bought nothing.
+Found 20 years out from scratch, the build ends 14.5 years out, and by the map's
+first date three lots are already waiting. `plan_built` now takes the **true** build
+date (`first_built_tdb`, unclamped). The stock's "before the build date" cut is
+unchanged, since no window lies before the map. A core test pins it: five lots
+waiting let one window take the whole cap at once. Measured (`STANDING_WARNING_YR=17.5,20`,
+792 s): from scratch at 1 built a year, 2-12 a year needs **7** found 17.5 years out
+(first lot 12.03 years out) and **6** found 20 years out (three lots waiting). At 2 or
+more built a year both are 6, the same as no limit, and IN STORAGE is 6 throughout.
+Before the fix, 20 years read the same as 17.5. The re-measure check is skipped
+there, because the measurement's lots would start at the clamped date.
+
 **So:** a rock found 12 years out needs a line that finishes **4 impactors a year
 from scratch** (16 launches), or **3 a year with the two stored** (11, at the line).
 At 3 a year from scratch, or 2 a year with the stock, no launch rate is enough. With
@@ -7006,7 +7021,13 @@ RATE`, or `n A YEAR, A FINISHED ONE WAITS FOR ITS WINDOW`, or for ON THE PAD
 `EVERY LAUNCH ALREADY BUILT AND READY - THE REFERENCE`. The stock line gains `, n A
 YEAR`. The count line gains `, n BUILT/YR` when the limit binds. The flight is keyed
 on the build rate too. `campaign_plan(rate, built)` and `begin_campaign_flight(rate,
-built, ..)` take it; `readiness_builds(i)` is new. `_campaign_shot.gd` (passed, run
+built, ..)` take it; `readiness_builds(i)` is new. The flight line follows the dial:
+short because of the line, it reads `NOTHING TO FLY AT n BUILT A YEAR - [0] RAISES
+IT` (not `[X]`: no launch rate lifts it), and a stale flight names the build rate it
+flew (`LAST FLIGHT WAS AT 6 PER 12 MO, NO BUILD LIMIT`). Cost: under a limit, a plan
+on the biggest measurement seen (6 348 windows, found 17.5 years out) takes ~0.35 s
+against ~0.15 s with none. A dial press replans five times (the plan and four
+what-ifs), so it can take ~1.7 s on the main thread. `_campaign_shot.gd` (passed, run
 through real key events) flies FROM SCRATCH at 6 a year (perigee 20 269 km), then
 steps the dial down: 5, then 4 (`16 LAUNCHES AT UP TO 6 PER 12 MO, 4 BUILT/YR`), then
 3 (falls short, 21 launches get 23 353 of 25 954 km). No solve fires and the flight

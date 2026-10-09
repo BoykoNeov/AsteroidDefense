@@ -2151,8 +2151,8 @@ func request_campaign_step() -> void:
 
 func _fly_campaign() -> void:
 	if str(pork_campaign.get("outcome", "")) != "planned":
-		event_logged.emit("NO CAMPAIGN REACHES THE TARGET AT %d PER 12 MO - NOTHING TO FLY" %
-			pork_campaign_rate)
+		event_logged.emit("NO CAMPAIGN REACHES THE TARGET AT %d PER 12 MO%s - NOTHING TO FLY" % [
+			pork_campaign_rate, campaign_built_note(pork_campaign)])
 		return
 	if pork_campaign_flight_is_current():
 		return
@@ -2377,7 +2377,7 @@ func campaign_stock_label() -> String:
 	var mode := "OUTSIDE THE RATE - WHAT IF, ALL ON ONE DAY" if pork_campaign_stock_outside \
 		else "COUNTED IN THE RATE"
 	var line := "STOCK %s%s, %s - THE REST BUILT FROM %s" % [size, src, mode,
-		date_string((pork_campaign_build_from_tdb() - EPOCH0_TDB) / DAY_S)]
+		date_string((pork_campaign_first_built_tdb() - EPOCH0_TDB) / DAY_S)]
 	if campaign_built_binds():
 		line += ", %d A YEAR" % pork_campaign_built
 	if pork_campaign_is_current() and pork_campaign.has("stock_used"):
@@ -2394,6 +2394,19 @@ func pork_campaign_build_from_tdb() -> float:
 	var build := impact - campaign_warning_yr() * YEAR_S \
 		+ float(mission.readiness_delay_s(from_scratch))
 	return maxf(build, pork_campaign_first_launch_tdb())
+
+
+## The date the first built impactor is really finished, TDB s: found, plus the
+## decision, plus the build - the build-from-scratch level's delay for a level with a
+## stock, the level's own otherwise. NOT clamped to the map's first launch date (the
+## map's dimmed bands are): for a long warning, lots finished before the map starts
+## wait for it, and the core counts them.
+func pork_campaign_first_built_tdb() -> float:
+	var impact := EPOCH0_TDB + T_IMPACT * DAY_S
+	var level := campaign_readiness()
+	if campaign_has_stock():
+		level = int(mission.readiness_count()) - 1
+	return impact - campaign_warning_yr() * YEAR_S + float(mission.readiness_delay_s(level))
 
 
 func pork_campaign_flight() -> Dictionary:
@@ -2427,24 +2440,24 @@ func campaign_count_label() -> String:
 			return "NOMINAL ALREADY MISSES BY THE TARGET - NO LAUNCH NEEDED"
 		"planned":
 			return "%d LAUNCHES AT UP TO %d PER 12 MO%s - PREDICTED |B| %s OF %s KM%s" % [
-				int(c.total_launches), int(c.launches_per_year), _built_note(c),
+				int(c.total_launches), int(c.launches_per_year), campaign_built_note(c),
 				group_num(int(got)), group_num(int(tgt)), "  AT THE LINE" if at_line else ""]
 		"unreachable":
 			# An answer, not a failure: the best this rate can do, and how short.
 			# "Falls short", not "unreachable": how far short moves with the search.
 			if at_line:
 				return "AT THE LINE AT %d PER 12 MO%s - %d LAUNCHES GET |B| %s OF %s KM" % [
-					int(c.launches_per_year), _built_note(c), int(c.total_launches),
+					int(c.launches_per_year), campaign_built_note(c), int(c.total_launches),
 					group_num(int(got)), group_num(int(tgt))]
 			return "FALLS SHORT AT %d PER 12 MO%s - %d LAUNCHES GET |B| %s OF %s KM" % [
-				int(c.launches_per_year), _built_note(c), int(c.total_launches),
+				int(c.launches_per_year), campaign_built_note(c), int(c.total_launches),
 				group_num(int(got)), group_num(int(tgt))]
 	return "UNKNOWN"
 
 
 ## ", 2 BUILT/YR" when the plan was made under a production rate that binds, "" when
 ## it was not (the core reports -1 for no limit).
-func _built_note(c: Dictionary) -> String:
+func campaign_built_note(c: Dictionary) -> String:
 	var b := int(c.get("built_per_year", -1))
 	return "" if b <= 0 else ", %d BUILT/YR" % b
 

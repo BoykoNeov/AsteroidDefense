@@ -77,8 +77,10 @@
 //! [`crate::campaign::StockMode`].
 //! And a launch can only go where the launch map has dates: on the shipping rock the
 //! map starts twelve years before impact, so a warning longer than twelve years plus
-//! the delay buys nothing more here — not because it is worthless, but because the
-//! scenario does not start earlier.
+//! the delay buys no earlier launch here — not because it is worthless, but because
+//! the scenario does not start earlier. It does still buy built impactors: under a
+//! production line, the lots finished before the map starts are waiting at its first
+//! date (the campaign layer reads the build date unclamped for exactly that).
 
 /// Seconds in a Julian year, the unit every duration here is quoted in.
 pub const YEAR_S: f64 = 365.25 * 86_400.0;

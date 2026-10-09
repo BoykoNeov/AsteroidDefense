@@ -3561,6 +3561,48 @@ impl CampaignCandidates {
         .map_err(|e| ScenarioError::Integration(format!("launch campaign: planner: {e}")))
     }
 
+    /// [`plan`](Self::plan) with built impactors coming off a production line,
+    /// `built_per_year` a year: the first lot on the build date (the stock's, or with
+    /// no stock the first launch date - every launch there is built), another each
+    /// year after, a finished one waiting for its launch
+    /// ([`plan_campaign_stocked`]). `UNLIMITED_BUILDS` - or any rate at or above
+    /// `max_launches` - is [`plan`](Self::plan) exactly.
+    ///
+    /// Free like [`plan`](Self::plan), and on the same flown windows: they were
+    /// chosen with no production limit, for every launch rate up to
+    /// [`CAMPAIGN_MAX_RATE`], so the windows a plan at `built_per_year` a year draws
+    /// on were flown for that rate - except where waiting pays, which the probe
+    /// `probe_production_line` checks against a measurement made under the limit.
+    pub fn plan_built(
+        &self,
+        max_launches: u32,
+        built_per_year: u32,
+    ) -> Result<CampaignOutcome, ScenarioError> {
+        if built_per_year >= max_launches {
+            return self.plan(max_launches);
+        }
+        let line = match self.stock {
+            Some(s) => Stock {
+                built_per_period: built_per_year,
+                ..s
+            },
+            None => Stock {
+                size: 0,
+                build_from: Epoch::from_tdb_seconds_past_j2000(self.launch_span_tdb.0),
+                mode: asteroid_core::campaign::StockMode::Counted,
+                built_per_period: built_per_year,
+            },
+        };
+        plan_under(
+            Vector2::new(self.nominal_b_m.0, self.nominal_b_m.1),
+            self.target_b_m,
+            &self.windows,
+            max_launches,
+            Some(&line),
+        )
+        .map_err(|e| ScenarioError::Integration(format!("launch campaign: planner: {e}")))
+    }
+
     /// Plan under the retired rule, at most `launches_per_period` per **fixed**
     /// year counted from [`period_origin_tdb`](Self::period_origin_tdb) — kept for
     /// comparison. A fixed year is itself a 365.25-day window, so this count is a
@@ -6356,6 +6398,7 @@ first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown,
                         size,
                         build_from: Epoch::from_tdb_seconds_past_j2000(build),
                         mode,
+                        built_per_period: asteroid_core::campaign::UNLIMITED_BUILDS,
                     };
                     let t0 = std::time::Instant::now();
                     let c = measure_campaign_candidates(
@@ -6417,6 +6460,290 @@ first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown,
                             );
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// Probe, run by hand (`--ignored --nocapture`): a production line. Found
+    /// `STANDING_WARNING_YR` years out (default 12,9), FROM SCRATCH and IN STORAGE
+    /// with the sourced stock: one measurement each (no production limit, as the app
+    /// makes it), then the count at every launch rate and every build rate
+    /// (`plan_built`, timed). `PRODUCTION_REMEASURE=<rates>` (e.g. `2,3,4`) also
+    /// makes the measurement *under* each build rate - windows chosen for plans that
+    /// wait for their lots - and checks every count at that build rate against it:
+    /// the coverage the app's free dial rests on. `PRODUCTION_FLY=1` flies the 6-a-
+    /// year plan at each build rate whole.
+    #[test]
+    #[ignore]
+    fn probe_production_line() {
+        if !have_kernels() {
+            return;
+        }
+        use asteroid_core::campaign::{StockMode, UNLIMITED_BUILDS};
+        use asteroid_core::launch_vehicle::FALCON_HEAVY_EXPENDABLE;
+        use asteroid_core::readiness::{FROM_SCRATCH, IN_STORAGE, SOURCED_STOCK_SIZE};
+        let vehicle = &FALCON_HEAVY_EXPENDABLE;
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+        let impact = mc.impact_tdb_seconds();
+        let yr = asteroid_core::readiness::YEAR_S;
+        let view = PorkchopView::build(&scenario, 120, 120).expect("grid");
+        let map_first = view.launch_tdb()[0];
+        let list = |key: &str, default: &str| -> Vec<u32> {
+            std::env::var(key)
+                .unwrap_or_else(|_| default.into())
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect()
+        };
+        let warnings: Vec<f64> = std::env::var("STANDING_WARNING_YR")
+            .unwrap_or_else(|_| "12,9".into())
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        let remeasure = list("PRODUCTION_REMEASURE", "");
+        let fly = std::env::var("PRODUCTION_FLY").is_ok_and(|v| v == "1");
+        let rates = [1u32, 2, 3, 4, 6, 12];
+        let builds = [1u32, 2, 3, 4, 6, UNLIMITED_BUILDS];
+        let describe = |o: &CampaignOutcome, target: f64| -> String {
+            match o {
+                CampaignOutcome::Planned(p) => {
+                    let margin = (p.predicted_impact_parameter() - target) / target * 100.0;
+                    if margin < 1.0 {
+                        format!("{} (line {margin:.2}%)", p.total_launches)
+                    } else {
+                        p.total_launches.to_string()
+                    }
+                }
+                CampaignOutcome::Unreachable(p) => format!(
+                    "short {:.1}% ({})",
+                    (target - p.predicted_impact_parameter()) / target * 100.0,
+                    p.total_launches
+                ),
+                CampaignOutcome::AlreadyClear => "clear".into(),
+            }
+        };
+        let label = |b: u32| {
+            if b == UNLIMITED_BUILDS {
+                "no limit".to_string()
+            } else {
+                format!("{b}/yr built")
+            }
+        };
+        for warning_yr in warnings {
+            let w = warning_yr * yr;
+            for level in [FROM_SCRATCH, IN_STORAGE] {
+                let first = level.first_launch_tdb(impact, w).max(map_first);
+                let build = level
+                    .build_from_tdb(impact, w)
+                    .map_or(first, |b| b.max(first));
+                let stock_with = |per: u32| match level.build_from_tdb(impact, w) {
+                    Some(_) => Some(Stock {
+                        size: SOURCED_STOCK_SIZE,
+                        build_from: Epoch::from_tdb_seconds_past_j2000(build),
+                        mode: StockMode::Counted,
+                        built_per_period: per,
+                    }),
+                    None if per == UNLIMITED_BUILDS => None,
+                    None => Some(Stock {
+                        size: 0,
+                        build_from: Epoch::from_tdb_seconds_past_j2000(first),
+                        mode: StockMode::Counted,
+                        built_per_period: per,
+                    }),
+                };
+                let t0 = std::time::Instant::now();
+                let c = measure_campaign_candidates(
+                    &scenario,
+                    &view,
+                    vehicle,
+                    first,
+                    Some(first),
+                    stock_with(UNLIMITED_BUILDS),
+                )
+                .expect("candidates");
+                println!(
+                    "\nfound {warning_yr} yr out, {}: first launch {:.2} yr, first built {:.2} yr before impact; {} windows ({:.0} s)",
+                    level.name,
+                    (impact - first) / yr,
+                    (impact - build) / yr,
+                    c.windows.len(),
+                    t0.elapsed().as_secs_f64()
+                );
+                for &b in &builds {
+                    let t1 = std::time::Instant::now();
+                    let row: Vec<String> = rates
+                        .iter()
+                        .map(|&rate| {
+                            format!(
+                                "{rate}/yr {}",
+                                describe(&c.plan_built(rate, b).expect("plan"), c.target_b_m)
+                            )
+                        })
+                        .collect();
+                    println!(
+                        "  {:>12}: {} ({:.2} s)",
+                        label(b),
+                        row.join(" | "),
+                        t1.elapsed().as_secs_f64()
+                    );
+                }
+                for &b in &remeasure {
+                    let t1 = std::time::Instant::now();
+                    let under = measure_campaign_candidates(
+                        &scenario,
+                        &view,
+                        vehicle,
+                        first,
+                        Some(first),
+                        stock_with(b),
+                    )
+                    .expect("candidates");
+                    let row: Vec<String> = rates
+                        .iter()
+                        .map(|&rate| {
+                            let free =
+                                describe(&c.plan_built(rate, b).expect("plan"), c.target_b_m);
+                            let made = describe(&under.plan(rate).expect("plan"), under.target_b_m);
+                            if free == made {
+                                format!("{rate}/yr {free}")
+                            } else {
+                                format!("{rate}/yr {free} vs {made} DIFFERS")
+                            }
+                        })
+                        .collect();
+                    println!(
+                        "  remeasured under {}: {} windows, {} ({:.0} s)",
+                        label(b),
+                        under.windows.len(),
+                        row.join(" | "),
+                        t1.elapsed().as_secs_f64()
+                    );
+                }
+                if fly {
+                    for &b in &builds {
+                        if let CampaignOutcome::Planned(p) = c.plan_built(6, b).expect("plan") {
+                            let fl = fly_campaign_plan(&scenario, &c, &p, 7, PLACEMENT_BAND_A_KM)
+                                .expect("flight");
+                            let perigee = match fl.flown {
+                                CellVerdict::Encounter {
+                                    perigee_m, is_hit, ..
+                                } => format!(
+                                    "perigee {:.0} km{}",
+                                    perigee_m / 1e3,
+                                    if is_hit { " HIT" } else { "" }
+                                ),
+                                other => format!("{other:?}"),
+                            };
+                            println!(
+                                "    flown 6/yr at {}: {} launches, {perigee}",
+                                label(b),
+                                p.total_launches
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Probe, run by hand (`--ignored --nocapture`): when the built launches fly. Found
+    /// `STANDING_WARNING_YR` years out (default 12), FROM SCRATCH and IN STORAGE with
+    /// the sourced stock: every launch of each rate's plan, in years after the date the
+    /// first built impactor is ready - how many built impactors a plan wants and how
+    /// soon after that date, which is what a production limit would bind.
+    #[test]
+    #[ignore]
+    fn probe_build_dates() {
+        if !have_kernels() {
+            return;
+        }
+        use asteroid_core::campaign::StockMode;
+        use asteroid_core::launch_vehicle::FALCON_HEAVY_EXPENDABLE;
+        use asteroid_core::readiness::{FROM_SCRATCH, IN_STORAGE, SOURCED_STOCK_SIZE};
+        let vehicle = &FALCON_HEAVY_EXPENDABLE;
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+        let impact = mc.impact_tdb_seconds();
+        let yr = asteroid_core::readiness::YEAR_S;
+        let view = PorkchopView::build(&scenario, 120, 120).expect("grid");
+        let map_first = view.launch_tdb()[0];
+        let warnings: Vec<f64> = std::env::var("STANDING_WARNING_YR")
+            .unwrap_or_else(|_| "12".into())
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        for warning_yr in warnings {
+            let w = warning_yr * yr;
+            for level in [FROM_SCRATCH, IN_STORAGE] {
+                let first = level.first_launch_tdb(impact, w).max(map_first);
+                let build = level
+                    .build_from_tdb(impact, w)
+                    .map_or(first, |b| b.max(first));
+                let stock = level.build_from_tdb(impact, w).map(|_| Stock {
+                    size: SOURCED_STOCK_SIZE,
+                    build_from: Epoch::from_tdb_seconds_past_j2000(build),
+                    mode: StockMode::Counted,
+                    built_per_period: asteroid_core::campaign::UNLIMITED_BUILDS,
+                });
+                let t0 = std::time::Instant::now();
+                let c = measure_campaign_candidates(
+                    &scenario,
+                    &view,
+                    vehicle,
+                    first,
+                    Some(first),
+                    stock,
+                )
+                .expect("candidates");
+                println!(
+                    "\nfound {warning_yr} yr out, {}: first built ready {:.2} yr before impact ({:.0} s)",
+                    level.name,
+                    (impact - build) / yr,
+                    t0.elapsed().as_secs_f64()
+                );
+                for rate in [1u32, 2, 3, 4, 6, 12] {
+                    let o = c.plan(rate).expect("plan");
+                    let (p, tag) = match &o {
+                        CampaignOutcome::Planned(p) => (p, "clear"),
+                        CampaignOutcome::Unreachable(p) => (p, "SHORT"),
+                        CampaignOutcome::AlreadyClear => continue,
+                    };
+                    let mut dates: Vec<(f64, u32, bool)> = c
+                        .candidates
+                        .iter()
+                        .zip(&p.launches)
+                        .filter(|(_, &n)| n > 0)
+                        .map(|(k, &n)| ((k.launch_tdb - build) / yr, n, k.parked))
+                        .collect();
+                    dates.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    let built: u32 = dates.iter().filter(|d| d.0 >= 0.0).map(|d| d.1).sum();
+                    let list: Vec<String> = dates
+                        .iter()
+                        .map(|(t, n, parked)| {
+                            format!(
+                                "{t:+.2}{}{}",
+                                if *n > 1 {
+                                    format!("x{n}")
+                                } else {
+                                    String::new()
+                                },
+                                if *parked { "p" } else { "" }
+                            )
+                        })
+                        .collect();
+                    println!(
+                        "  {rate:2}/yr {tag} {} launches ({built} built; |B| {:.0} of {:.0} km): {}",
+                        p.total_launches,
+                        p.predicted_impact_parameter() / 1e3,
+                        c.target_b_m / 1e3,
+                        list.join(" ")
+                    );
                 }
             }
         }

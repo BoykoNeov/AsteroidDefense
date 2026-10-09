@@ -43,7 +43,8 @@ Read this table first, then the session that owns the layer you are touching.
 | **The repair shipped, and the band changed units**: the resonant circle placed on the **change** the flyby makes rather than on the closed form's absolute `a'`, with the arriving orbit read off the flown arc; and a second resonance flown to settle what the leftover error is a constant *in* | **done 2026-09-08**; the 3:4's four doors go from a **767 km ladder** in the deflection lead to an **offset** (+352 to +372 km on the shipping convention, 20.7 km apart at the two extremes), so the worst case the band must cover halves. And the 2:3, flown at two leads on a gradient **ten times** steeper, says the error is a constant of **semi-major axis**, not of b-plane distance: 12× apart in kilometres (the gradient ratio) and overlapping in `a'`, with the measurement's own error bar reading ±3 535 and ±3 540 km of `a'` on the two. So `KEYHOLE_PLACEMENT_KM = 800` becomes `KEYHOLE_PLACEMENT_A_KM = 15 000` km of `a'` — **575 km on the 3:4, 57 km on the 2:3** — and the alert is cut per circle on `exposure = margin − band` | `core/src/{keyhole,keyhole_target}.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/{sim,planner}.gd`, `core/tests/keyhole_prediction_bias.rs` |
 | **The leftover constant, flown on six more resonances**: the error in the change across the flyby measured on 5:7, 7:10, 6:5, 7:8, 5:8 and 7:6 at dialable leads, a separating pair chosen from a census, and the crowded register re-run on the circles as shipped | **done 2026-09-23**; **not one number** - same sign on all twenty-one flights (the map always predicts the post-flyby orbit too large) but 2 831 to 46 806 km of `a'`, with the close orbit-raising 6:5 and 7:6 2-5× the rest at 200 d. So `KEYHOLE_PLACEMENT_A_KM` **15 000 → 51 000** (the 3:4's zone ~575 → ~1 950 km), and the several-doors register is **not reachable** on this rock (needs ~660 000 km of `a'`) - its earlier firing was the retired km band | `core/examples/probe_keyhole_placement.rs`, `godot/scripts/sim.gd`, `godot/rust/src/mission_core.rs`, `godot/tests/test_orrery.gd` |
 | **Standing defence, part 1: when the first rocket can fly** — how long before impact the rock is found plus a sourced delay (decide 172 d; build from scratch 60 months, or 1 yr from storage) sets the first launch; the launch map's axes stretched to 0.97 / 0.99 of the span because the old end was setting a headline | **done 2026-10-08**; found 12 yr out, Falcon Heavy at 6 a year needs **6 launches on the pad, 6 from storage, 12 built from scratch**, and at 2 a year **6 / 7 / falls short** - the level delays only the *first* launch, every later one is assumed ready at the cap rate (from storage at 6 a year, all six fly within ~80 days: a six-impactor stock). And with late launch dates on the map, 1 a year on the pad goes from short by ~1 % to **10 launches, clear** | `core/src/readiness.rs`, `godot/rust/src/mission_core.rs` (`measure_campaign_candidates_from`'s `earliest_launch_tdb`, `estimate_shift`), `godot/scripts/{sim,porkchop,main}.gd` |
-| **Standing defence, part 2: a stock that runs out** — IN STORAGE is a *number* of stored interceptors (sourced: Nuth et al.'s "at least two", nuclear-capable), the rest built from scratch; planned exactly (counted against the rate, or outside it as a what-if) inside the measurement | **done 2026-10-08**; found 12 yr out, 6 a year needs **9 launches with the sourced two, at the line** (12 from scratch, 6 with no limit); found 9 yr out the two buy nothing - it takes three to reach the target at all, at 12 a year. Built launches are still unlimited from the build date: "12 built from scratch" is twelve impactors built in parallel inside one 60-month build | `core/src/{campaign,readiness}.rs` (`plan_campaign_stocked`), `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/{sim,porkchop,main}.gd` |
+| **Standing defence, part 2: a stock that runs out** — IN STORAGE is a *number* of stored interceptors (sourced: Nuth et al.'s "at least two", nuclear-capable), the rest built from scratch; planned exactly (counted against the rate, or outside it as a what-if) inside the measurement | **done 2026-10-08**; found 12 yr out, 6 a year needs **9 launches with the sourced two, at the line** (12 from scratch, 6 with no limit); found 9 yr out the two buy nothing - it takes three to reach the target at all, at 12 a year. These counts let built launches go unlimited from the build date ("12 built from scratch" is twelve built in parallel inside one 60-month build) - part 2b below adds the production limit | `core/src/{campaign,readiness}.rs` (`plan_campaign_stocked`), `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/{sim,porkchop,main}.gd` |
+| **Standing defence, part 2b: a production line** — built impactors come in lots, `B` a year from the build date, a finished one waiting for its window; no source gives `B`, so it is a free dial defaulting to the launch rate (today's counts unchanged), planned exactly by chains with rank release dates | **done 2026-10-09**; found 12 yr out, 6 a year needs **16 from scratch at 4 built a year** (12 at 6) and **falls short at 3 or fewer at any launch rate**; with the sourced two stored, **11 at 3 built a year** (at the line), short at 2. Coverage: re-measured under the limit, all 96 counts identical | `core/src/{campaign,interval_packing,readiness}.rs`, `godot/rust/src/{mission_core,lib}.rs`, `godot/scripts/{sim,porkchop,main}.gd`, `godot/project.godot` |
 | Engineering: CI (fmt, clippy, kernel-free suite, then the physics with kernels cached), kernel fetcher, `DEVELOPING.md` | new 2026-09-02 | `.github/workflows/ci.yml`, `tools/` |
 
 ### What is next, in order
@@ -318,8 +319,12 @@ Read this table first, then the session that owns the layer you are touching.
    assumed ready at the rate). See *Standing defence: when the first rocket
    can fly*. **Part 2: DONE 2026-10-08** - the stock runs out: the sourced two
    stored, the rest built; found 12 yr out, 6 a year needs 9 (*Standing defence,
-   part 2: a stock that runs out*). Still open: interceptors waiting in orbit for
-   years, and detection.
+   part 2: a stock that runs out*). **Part 2b: DONE 2026-10-09** - built impactors
+   come off a production line, a free dial with no sourced default (it starts at the
+   launch rate, so nothing above moves): found 12 yr out, 6 a year needs 16 from
+   scratch at 4 built a year and falls short at 3 or fewer; with the stored two, 11
+   at 3 a year (*Standing defence, part 2b: a production line*). Still open:
+   interceptors waiting in orbit for years, and detection.
 
 ---
 
@@ -6875,10 +6880,144 @@ used.
 #### What this leaves
 
 - Parts 3-4: interceptors waiting in orbit for years, detection.
-- **Built launches are still unlimited.** Past the stock, every launch from the build
-  date on is assumed ready whenever the cap allows - so "12 built from scratch" is
-  twelve impactors built in parallel inside the 60 months the source gives for *one*
-  mission. How fast a production line could deliver them is not modelled; the
-  yearly cap is the only limit.
+- ~~**Built launches are still unlimited.**~~ **Done 2026-10-09** - a production-line
+  dial, planned exactly; see *Standing defence, part 2b: a production line*.
 - The parking height bracket was re-run on the new axes (1/yr 10 at 400-800 km, 9 from
   1 000 km); nothing here depends on it.
+
+### Standing defence, part 2b: a production line - 2026-10-09 session
+
+Part 2's own review said what its counts still assumed: past the stock, every built
+impactor was ready whenever the cap allowed, so "12 built from scratch" was twelve
+impactors finished in parallel inside the 60 months the source gives for *one*
+mission.
+
+#### No source gives a rate
+
+Searched before modelling, as the advisor asked. Barbee et al. 2018 (the HAMMER
+study, *Acta Astronautica* 143, 37-61; NTRS 20205000654) sizes campaigns of 7 to 53
+Delta IV Heavy launches against Bennu. It says building several "certainly costs time
+in building the vehicles". It says the infrastructure to launch many in a short time
+"is not currently available" and that the minimum time between launches "is not
+currently known". It also gives 64 months to build and prepare *one* vehicle. The
+2021 PDC exercise says rapid-launch capability does not exist yet. Nuth et al. 2018
+names two stored interceptors and no production line. So the rate is a **dial with no
+sourced default**. The user chose: a "built per year" dial whose default equals the
+launch rate. That keeps every earlier count, and the panel now states the assumption.
+
+#### What binds, measured first (`probe_build_dates`)
+
+Found 12 yr out, from scratch, the shipping plans fly their built impactors in a lump
+right after the build date: 6 a year sends 6 at +0.18 yr and 6 at +1.19 yr; 12 a year
+sends 11 at +0.18 yr. So the count hinges on how many are finished **by the end of the
+first build**, and the follow-on rate only matters a year later.
+
+#### The model and the planner (`core::campaign`, `Stock::built_per_period`)
+
+Built impactors come in lots: `B` when the build ends, `B` more each year after. A
+finished one waits for its window, so lots add up: before lot `k+1` arrives, at most
+`stock + (k+1)·B` launches have gone. It is planned **exactly**:
+
+- **Rank release dates.** That rule is the same as "the `n`-th launch in date order
+  goes no earlier than the lot that finishes impactor `n`". The rolling planner already
+  deals sorted launches round-robin into `cap` chains a year apart. Under that dealing
+  the ranks stay put: chain `r`'s `m`-th launch is rank `r+1+(m−1)·cap`. So each chain
+  carries fixed release dates, and the chains are independent again, just no longer
+  identical (`LotChains`: one table per chain, then the usual split across chains).
+  Chains that respect their own releases always merge into a plan that respects the
+  lots, whatever their sizes, because the ranks they own are disjoint.
+- **The first attempt was a min-cost flow, and it was too slow.** Every rule is a cap
+  on a run of windows in date order. That is an interval matrix, totally unimodular,
+  so the dual of a min-cost flow solves it exactly. It took 10-60 s per row of six
+  rates on the 789-window measurement, against 0.03 s for the chains. It ships as
+  `core::interval_packing`, the **independent oracle** the chain planner is pinned
+  against (exact against brute force on 400 random cases, refusals included).
+- **At `B` ≥ the cap the lots are provably no constraint**, so the old planners run
+  unchanged. A lot is read as arriving `k·ROLLING_SLACK_S` early, the slack the rolling
+  cap reads "a period apart" with. Without that slack the proof fails, and a test with
+  dates a tenth of a millisecond short of a whole period catches it.
+- **Pinned four ways:**
+  - brute force with lots binding, in both stock modes (a counter per mode);
+  - the flow oracle on 300 random non-collinear cases at every count 1..12, with the
+    chains' arrangement re-checked against every run;
+  - at `B` = cap against the chains, on whole outcomes;
+  - the sandwich "no limit ≤ lots ≤ no saving", plus a hand case where saving pays
+    (two launches through a strong date a year in, not one wasted on a weak date).
+
+  Mutation-tested: off-by-one lot size, no slack, wrong rank formula, stock rank
+  off-by-one. Each fails 3-5 tests.
+- **ON THE PAD builds nothing** (`Readiness::built_after_go_ahead`). It stays the
+  unlimited reference, and the panel says so.
+
+#### Applied at plan time; coverage measured
+
+The dial is **free**, unlike the stock. `CampaignCandidates::plan_built(cap, B)`
+replans the held measurement. Its windows were chosen with no production limit, but
+for every launch rate 1..12, so a plan at `B` a year draws on windows flown for that
+rate. Waiting can want others, so `probe_production_line` re-measured under `B` =
+1..4 at both warnings and both levels: **every count identical, all 96** (the
+re-measures flew up to 100 extra windows and none changed an answer).
+
+#### The numbers (Falcon Heavy expendable, `probe_production_line`, 1 965 s)
+
+Found 12 yr out. FROM SCRATCH (first built 6.53 yr before impact):
+
+| Built a year | 1/yr | 2/yr | 3/yr | 4/yr | 6/yr | 12/yr |
+|---|---|---|---|---|---|---|
+| 1 | short 59 % | short 58 % | short 58 % | short 58 % | short 58 % | short 58 % |
+| 2 | short 59 % | short 39 % | short 37 % | short 35 % | short 35 % | short 35 % |
+| 3 | short 59 % | short 39 % | short 16 % | short 14 % | short 10 % | short 10 % |
+| 4 | short 59 % | short 39 % | short 16 % | 16 (at the line 0.56 %) | **16** | 16 |
+| 6 | short 59 % | short 39 % | short 16 % | 16 (at the line) | **12** | 12 |
+| no limit | short 59 % | short 39 % | short 16 % | 16 (at the line) | 12 | 11 |
+
+IN STORAGE with the sourced two (stock from 10.53 yr, built from 6.53 yr):
+
+| Built a year | 1/yr | 2/yr | 3/yr | 4/yr | 6/yr | 12/yr |
+|---|---|---|---|---|---|---|
+| 1 | short 34 % | short 30 % | short 30 % | short 30 % | short 30 % | short 30 % |
+| 2 | short 34 % | short 9 % | short 7 % | short 5 % | short 5 % | short 5 % |
+| 3 | short 34 % | short 9 % | 11 (at the line 0.75 %) | 11 (line) | **11** (line) | 11 (line) |
+| 4 | short 34 % | short 9 % | 11 (line) | 10 | **10** | 10 |
+| 6 | short 34 % | short 9 % | 11 (line) | 10 | **9** (at the line 0.95 %) | 9 (line) |
+| no limit | short 34 % | short 9 % | 11 (line) | 10 | 9 (line) | 9 |
+
+Found 9 yr out, every cell at every build rate falls short, as it did with no limit.
+A limit only takes away: from scratch at 12 a year goes from short 22 % (48 launches)
+to short 47 % at 6 built a year.
+
+Flown whole at 6 a year, every plan misses: from scratch 16 at 4 built a year (perigee
+20 500 km) and 12 at 6 (20 269 km); in storage 11 / 10 / 9 at 3 / 4 / 6 (20 187 /
+20 539 / 20 239 km).
+
+**So:** a rock found 12 years out needs a line that finishes **4 impactors a year
+from scratch** (16 launches), or **3 a year with the two stored** (11, at the line).
+At 3 a year from scratch, or 2 a year with the stock, no launch rate is enough. With
+the stock, the line can be one slower, so the two stored interceptors are worth a
+production rate as well as a head start.
+
+#### The frontend
+
+`[9]` / `[0]` step the dial (every letter is taken; 1-4 are views). Only values that
+bind are offered: down from no limit goes to one below the launch rate, and up past it
+comes back. The third panel line, empty for levels with no stock, now says how built
+impactors come: `BUILT FROM <date>: AS MANY AS THE RATE LAUNCHES - NO SOURCE GIVES A
+RATE`, or `n A YEAR, A FINISHED ONE WAITS FOR ITS WINDOW`, or for ON THE PAD
+`EVERY LAUNCH ALREADY BUILT AND READY - THE REFERENCE`. The stock line gains `, n A
+YEAR`. The count line gains `, n BUILT/YR` when the limit binds. The flight is keyed
+on the build rate too. `campaign_plan(rate, built)` and `begin_campaign_flight(rate,
+built, ..)` take it; `readiness_builds(i)` is new. `_campaign_shot.gd` (passed, run
+through real key events) flies FROM SCRATCH at 6 a year (perigee 20 269 km), then
+steps the dial down: 5, then 4 (`16 LAUNCHES AT UP TO 6 PER 12 MO, 4 BUILT/YR`), then
+3 (falls short, 21 launches get 23 353 of 25 954 km). No solve fires and the flight
+greys; three `[0]` presses come back to no limit, with the flight current again. At
+4 a year the shot shows the waiting: two lots held back for a double in 2036
+(`2035-08 2X 2036-04 2X 2036-10 4X`).
+
+#### What this leaves
+
+- Parts 3-4: interceptors waiting in orbit for years, and detection.
+- The lot model is one shape. Lots a year apart from the build date is the simplest
+  reading of "B more each year". A line that ramps up, or a first batch bigger than
+  the later ones, would need its own release schedule; `lot_release` is the one
+  place to change.

@@ -518,7 +518,8 @@ pub enum StockMode {
 }
 
 /// A limited stock: `size` interceptors ready from the windows' own first date, and
-/// every other launch no earlier than `build_from` (the build-from-scratch date).
+/// every other launch no earlier than `build_from` (the build-from-scratch date) -
+/// built ones, which come `built_per_period` at a time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Stock {
     /// How many launches can go before `build_from`. `u32::MAX` is "every launch".
@@ -527,7 +528,16 @@ pub struct Stock {
     pub build_from: Epoch,
     /// Counted against the cap, or outside it.
     pub mode: StockMode,
+    /// How many built impactors a production line finishes per period: the first
+    /// lot at `build_from`, another lot each period after. A finished impactor waits
+    /// for its launch, so lots add up. [`UNLIMITED_BUILDS`] is no limit; any value at
+    /// or above the launch cap is the same (see [`plan_campaign_stocked`]).
+    pub built_per_period: u32,
 }
+
+/// [`Stock::built_per_period`] with no limit: every built launch is ready from
+/// `build_from` on, whenever the cap allows.
+pub const UNLIMITED_BUILDS: u32 = u32::MAX;
 
 /// [`plan_campaign_rolling`] with a limited stock: launches dated before
 /// `stock.build_from` must come from the stock, and at most `stock.size` of them
@@ -550,6 +560,20 @@ pub struct Stock {
 /// Outside the cap, `k <= size` stocked launches through the best window (along the
 /// direction) are added to the best built-only plan of the remaining launches, and
 /// each total is checked with the arrangement that pushes furthest along it.
+///
+/// # A production line, exactly, by chains with release dates
+/// With `built_per_period` below the cap, built impactors arrive in lots: `B` at
+/// `build_from`, `B` more each period after, and a finished one can wait for a
+/// better date - so before the `k+1`-th lot arrives at most `size + (k+1)·B`
+/// launches can have gone. That is a release date on each launch's *rank* in date
+/// order, and dealt to chains the ranks stay put, so the chains are independent
+/// again - `cap` different ones instead of `cap` copies of one (see `LotChains`).
+/// Exact, and pinned three ways: against brute force, against an independent exact
+/// solver ([`crate::interval_packing`], which reads every rule as a cap on a run of
+/// windows in date order), and at `B` = the cap against the chains above. A lot is
+/// counted as arriving `k·ROLLING_SLACK_S` early, the slack the rolling cap reads "a
+/// period apart" with, so that at `B` = the cap the lots are provably no constraint
+/// - and below it the chain planners above are not used.
 pub fn plan_campaign_stocked(
     nominal_b: Vector2<f64>,
     target_b: f64,
@@ -568,6 +592,18 @@ pub fn plan_campaign_stocked(
         return Ok(CampaignOutcome::AlreadyClear);
     }
     let build_from = stock.build_from.tdb_seconds_past_j2000();
+    // A production line slower than the cap: the lots bind, and only the exact
+    // packing carries them. (A stock of every launch never needs a built one.)
+    if stock.built_per_period < max_launches && stock.size != u32::MAX {
+        return Ok(plan_with_lots(
+            nominal_b,
+            target_b,
+            windows,
+            max_launches,
+            window_s,
+            stock,
+        ));
+    }
     // A stock no plan can exhaust is no constraint: the rolling planner, exactly.
     // One chain holds at most one launch per period before `build_from`, so `cap`
     // chains hold at most `cap` per period of the early span.
@@ -920,6 +956,289 @@ fn outside_cap_along(
             (_, 0) => vec![0; windows.len()],
             (Some(b), rest) => b.launches(windows.len(), rest),
             (None, _) => continue,
+        };
+        if let Some((i, _)) = best {
+            launches[i] += k as u32;
+        }
+        let p = plan_of(nominal_b, windows, launches);
+        if p.predicted_impact_parameter() >= target_b {
+            return (p, true);
+        }
+        if p.predicted_impact_parameter() > furthest.predicted_impact_parameter() {
+            furthest = p;
+        }
+    }
+    (furthest, false)
+}
+
+// --- A production line --------------------------------------------------------
+
+/// [`plan_campaign_stocked`] with built impactors arriving in lots - for any
+/// `built_per_period`, though the public planner only sends it here below the cap
+/// (at or above it the lots are no constraint, and the tests pin that this route
+/// then agrees with the chains it would otherwise take).
+fn plan_with_lots(
+    nominal_b: Vector2<f64>,
+    target_b: f64,
+    windows: &[CampaignWindow],
+    cap: u32,
+    window_s: f64,
+    stock: &Stock,
+) -> CampaignOutcome {
+    best_over_directions(nominal_b, windows, |u| {
+        let lots = LotChains::build(windows, cap, window_s, u, stock);
+        match stock.mode {
+            StockMode::Counted => counted_lots_along(nominal_b, target_b, windows, lots),
+            StockMode::OutsideCap => {
+                outside_cap_lots_along(nominal_b, target_b, windows, lots, u, stock)
+            }
+        }
+    })
+}
+
+/// The first date the `rank`-th launch (1-based, in date order) can go: the stock's
+/// `stocked` from any date, then lot `j` (from 0) of `per` built impactors from
+/// `build_from + j·step`. With no production at all, never.
+fn lot_release(rank: usize, stocked: u64, per: u64, build_from: f64, step: f64) -> f64 {
+    let rank = rank as u64;
+    if rank <= stocked {
+        return f64::NEG_INFINITY;
+    }
+    match (rank - stocked - 1).checked_div(per) {
+        Some(lot) => build_from + lot as f64 * step,
+        None => f64::INFINITY,
+    }
+}
+
+/// One chain's table: `prefix[m-1][k]` and `from[m-1][k]` (see [`LotChains`]).
+type ChainTable = (Vec<Vec<(f64, usize)>>, Vec<Vec<Option<usize>>>);
+
+/// Exact plans under the rolling cap, the stock and a production line, by chains
+/// again - `cap` of them, no longer identical.
+///
+/// # Why chains still work
+/// Sort a plan's launches by date. The lots say: before lot `k+1` arrives at most
+/// `stocked + (k+1)·B` have gone - which is the same as "the `n`-th launch goes no
+/// earlier than the lot that finishes impactor `n`" ([`lot_release`]), a release
+/// date that depends only on the launch's *rank*. Deal the sorted launches to `cap`
+/// chains in turn, as [`plan_campaign_rolling`] does: each chain's launches are a
+/// period apart, and chain `r`'s `m`-th launch is rank `r + 1 + (m−1)·cap` - so it
+/// carries that rank's release. Conversely, chains that each respect their own
+/// releases always merge into a plan that respects the lots, whatever their sizes:
+/// before any lot date, chain `r` can only have launches whose ranks are within that
+/// lot's total, and the ranks the chains own are disjoint, so together they hold at
+/// most that total. So the chains are independent again; they just no longer share
+/// one table, since chain `r` sees the releases of ranks `r+1, r+1+cap, …`.
+struct LotChains {
+    /// Useful windows (indices into the caller's slice), in date order.
+    idx: Vec<usize>,
+    /// Per chain: `prefix[m-1][k]`, (value, window) of the best `m`-launch chain
+    /// ending at or before window `k`; and `from[m-1][k]`, the window it steps back
+    /// to.
+    chains: Vec<ChainTable>,
+    /// `split[c][l]`: best value of the first `c` chains holding `l` launches, and
+    /// how many the `c`-th took.
+    split: Vec<Vec<(f64, usize)>>,
+}
+
+impl LotChains {
+    /// Counted: the stock's `size` are the first ranks. Outside the cap: the built
+    /// launches only, none before `build_from`.
+    fn build(
+        windows: &[CampaignWindow],
+        cap: u32,
+        window_s: f64,
+        u: Vector2<f64>,
+        stock: &Stock,
+    ) -> Self {
+        let when = |i: usize| windows[i].launch_epoch.tdb_seconds_past_j2000();
+        let mut idx: Vec<usize> = (0..windows.len())
+            .filter(|&i| windows[i].shift_per_launch.dot(&u) > 0.0)
+            .collect();
+        idx.sort_by(|&a, &b| when(a).total_cmp(&when(b)));
+        let t: Vec<f64> = idx.iter().map(|&i| when(i)).collect();
+        let v: Vec<f64> = idx
+            .iter()
+            .map(|&i| windows[i].shift_per_launch.dot(&u))
+            .collect();
+        let w = idx.len();
+        let back: Vec<usize> = (0..w)
+            .map(|k| t.partition_point(|&tj| tj <= t[k] - window_s + ROLLING_SLACK_S))
+            .collect();
+        let stocked = match stock.mode {
+            StockMode::Counted => u64::from(stock.size),
+            StockMode::OutsideCap => 0,
+        };
+        let per = u64::from(stock.built_per_period);
+        let build_from = stock.build_from.tdb_seconds_past_j2000();
+        // Lot `j` arrives `j` slacks early, so that at `B` = the cap the lots are
+        // provably no constraint: launches a period apart to the rolling cap's slack
+        // are a period apart here too.
+        let step = window_s - ROLLING_SLACK_S;
+        let release = |rank: usize| lot_release(rank, stocked, per, build_from, step);
+        let prefix_of = |row: &[f64]| -> Vec<(f64, usize)> {
+            let mut acc = (f64::NEG_INFINITY, 0);
+            row.iter()
+                .enumerate()
+                .map(|(k, &x)| {
+                    if x > acc.0 {
+                        acc = (x, k);
+                    }
+                    acc
+                })
+                .collect()
+        };
+        let cap = cap as usize;
+        let mut chains = Vec::with_capacity(cap);
+        for r in 0..cap {
+            let mut prefix: Vec<Vec<(f64, usize)>> = Vec::new();
+            let mut from: Vec<Vec<Option<usize>>> = Vec::new();
+            for m in 1usize.. {
+                let not_before = release(r + 1 + (m - 1) * cap);
+                let (row, link): (Vec<f64>, Vec<Option<usize>>) = (0..w)
+                    .map(|k| {
+                        if t[k] < not_before {
+                            return (f64::NEG_INFINITY, None);
+                        }
+                        if m == 1 {
+                            return (v[k], None);
+                        }
+                        if back[k] == 0 {
+                            return (f64::NEG_INFINITY, None);
+                        }
+                        let (val, j) = prefix[m - 2][back[k] - 1];
+                        if val.is_finite() {
+                            (val + v[k], Some(j))
+                        } else {
+                            (f64::NEG_INFINITY, None)
+                        }
+                    })
+                    .unzip();
+                if !row.iter().any(|x| x.is_finite()) {
+                    break;
+                }
+                prefix.push(prefix_of(&row));
+                from.push(link);
+            }
+            chains.push((prefix, from));
+        }
+        // Combine the chains, each with its own table.
+        let value = |c: usize, m: usize| -> f64 {
+            let prefix = &chains[c].0;
+            if m == 0 {
+                0.0
+            } else if m > prefix.len() || w == 0 {
+                f64::NEG_INFINITY
+            } else {
+                prefix[m - 1][w - 1].0
+            }
+        };
+        let max_l: usize = chains.iter().map(|ch| ch.0.len()).sum();
+        let mut split = vec![vec![(f64::NEG_INFINITY, 0usize); max_l + 1]; cap + 1];
+        split[0][0] = (0.0, 0);
+        for c in 1..=cap {
+            let longest = chains[c - 1].0.len();
+            for l in 0..=max_l {
+                for m in 0..=l.min(longest) {
+                    let rest = split[c - 1][l - m].0;
+                    let here = value(c - 1, m);
+                    if rest.is_finite() && here.is_finite() && rest + here > split[c][l].0 {
+                        split[c][l] = (rest + here, m);
+                    }
+                }
+            }
+        }
+        Self { idx, chains, split }
+    }
+
+    /// The best `l`-launch arrangement, as launches per caller window, and its value
+    /// along the direction - `None` where `l` launches do not fit.
+    fn best(&self, l: usize, n_windows: usize) -> Option<(f64, Vec<u32>)> {
+        let cap = self.chains.len();
+        let (value, _) = *self.split[cap].get(l)?;
+        if !value.is_finite() {
+            return None;
+        }
+        let w = self.idx.len();
+        let mut launches = vec![0u32; n_windows];
+        let mut l = l;
+        for c in (1..=cap).rev() {
+            let m = self.split[c][l].1;
+            if m > 0 {
+                let (prefix, from) = &self.chains[c - 1];
+                let mut k = prefix[m - 1][w - 1].1;
+                launches[self.idx[k]] += 1;
+                for level in (1..m).rev() {
+                    k = from[level][k].expect("a chain of more than one launch steps back");
+                    launches[self.idx[k]] += 1;
+                }
+            }
+            l -= m;
+        }
+        Some((value, launches))
+    }
+}
+
+/// [`plan_with_lots`], counted, along one direction.
+fn counted_lots_along(
+    nominal_b: Vector2<f64>,
+    target_b: f64,
+    windows: &[CampaignWindow],
+    lots: LotChains,
+) -> (CampaignPlan, bool) {
+    let mut furthest = plan_of(nominal_b, windows, vec![0; windows.len()]);
+    // Fewer launches always fit where more do (dropping one only moves the later
+    // ones' releases earlier), so the first misfit ends it.
+    for l in 1usize.. {
+        let Some((_, launches)) = lots.best(l, windows.len()) else {
+            break;
+        };
+        let p = plan_of(nominal_b, windows, launches);
+        if p.predicted_impact_parameter() >= target_b {
+            return (p, true);
+        }
+        if p.predicted_impact_parameter() > furthest.predicted_impact_parameter() {
+            furthest = p;
+        }
+    }
+    (furthest, false)
+}
+
+/// [`plan_with_lots`], outside the cap, along one direction: `outside_cap_along`
+/// with the built launches under the lots.
+fn outside_cap_lots_along(
+    nominal_b: Vector2<f64>,
+    target_b: f64,
+    windows: &[CampaignWindow],
+    built: LotChains,
+    u: Vector2<f64>,
+    stock: &Stock,
+) -> (CampaignPlan, bool) {
+    let best = (0..windows.len())
+        .map(|i| (i, windows[i].shift_per_launch.dot(&u)))
+        .filter(|&(_, x)| x > 0.0)
+        .max_by(|a, b| a.1.total_cmp(&b.1));
+    let stock_max = if best.is_some() {
+        (stock.size as usize).min(10_000)
+    } else {
+        0
+    };
+    let mut furthest = plan_of(nominal_b, windows, vec![0; windows.len()]);
+    for l in 1usize.. {
+        // The split of `l` that pushes furthest along `u`; none at all means no
+        // larger `l` fits either (built launches that fit still fit one fewer).
+        let mut top: Option<(f64, usize, Vec<u32>)> = None;
+        for k in 0..=l.min(stock_max) {
+            let Some((bv, launches)) = built.best(l - k, windows.len()) else {
+                continue;
+            };
+            let val = bv + k as f64 * best.map_or(0.0, |x| x.1);
+            if top.as_ref().is_none_or(|(tv, _, _)| val > *tv) {
+                top = Some((val, k, launches));
+            }
+        }
+        let Some((_, k, mut launches)) = top else {
+            break;
         };
         if let Some((i, _)) = best {
             launches[i] += k as u32;
@@ -1601,6 +1920,7 @@ mod tests {
             size,
             build_from: Epoch::from_tdb_seconds_past_j2000(STOCK_BUILD_DAYS * DAY),
             mode,
+            built_per_period: UNLIMITED_BUILDS,
         }
     }
 
@@ -1790,6 +2110,442 @@ mod tests {
                 }
             }
         }
+    }
+
+    // --- A production line -------------------------------------------------------
+
+    /// `STOCK_SPEC` with every rule a lot-limited plan obeys, by exhaustion: the
+    /// rolling cap, the stock before the build date (counted) or none of the built
+    /// launches there (outside), and at most `stocked + (k+1)·per` launches before
+    /// lot k+1 arrives. Outside the cap, up to `size` stocked launches through any one
+    /// window, uncapped. The fewest launches that reach, or `None`.
+    fn lots_brute(
+        cap: u32,
+        size: u32,
+        per: u32,
+        counted: bool,
+        b0: f64,
+        target: f64,
+    ) -> Option<u32> {
+        let n_w = STOCK_SPEC.len();
+        let span = 100.0 * DAY;
+        let build = STOCK_BUILD_DAYS * DAY;
+        let r = cap + 1;
+        let mut best: Option<u32> = None;
+        for code in 0..r.pow(n_w as u32) {
+            let n: Vec<u32> = (0..n_w).map(|k| (code / r.pow(k as u32)) % r).collect();
+            let list: Vec<(f64, u32)> = (0..n_w)
+                .filter(|&k| n[k] > 0)
+                .map(|k| (STOCK_SPEC[k].0 * DAY, n[k]))
+                .collect();
+            if busiest_rolling_count(&list, span) > cap {
+                continue;
+            }
+            let before = |t: f64| -> u32 {
+                (0..n_w)
+                    .filter(|&k| STOCK_SPEC[k].0 * DAY < t)
+                    .map(|k| n[k])
+                    .sum()
+            };
+            let stocked = if counted { size } else { 0 };
+            if before(build) > stocked {
+                continue;
+            }
+            let lots_ok = (0..10u32).all(|k| {
+                let next = build + f64::from(k + 1) * (span - ROLLING_SLACK_S);
+                before(next) <= stocked + per * (k + 1)
+            });
+            if !lots_ok {
+                continue;
+            }
+            let z = b0
+                + (0..n_w)
+                    .map(|k| f64::from(n[k]) * STOCK_SPEC[k].1)
+                    .sum::<f64>();
+            let total: u32 = n.iter().sum();
+            let extra = if counted { 0 } else { size };
+            for k_stock in 0..=extra {
+                for &(_, sz) in STOCK_SPEC.iter() {
+                    if (z + f64::from(k_stock) * sz).abs() >= target {
+                        let t = total + k_stock;
+                        best = Some(best.map_or(t, |m| m.min(t)));
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    fn lots(size: u32, per: u32, mode: StockMode) -> Stock {
+        Stock {
+            built_per_period: per,
+            ..stock(size, mode)
+        }
+    }
+
+    #[test]
+    fn the_production_line_matches_brute_force() {
+        let w = stock_windows();
+        let span = 100.0 * DAY;
+        let mut binds = [0u32; 2];
+        for counted in [true, false] {
+            let mode = if counted {
+                StockMode::Counted
+            } else {
+                StockMode::OutsideCap
+            };
+            for cap in [2u32, 3] {
+                for per in 1..cap {
+                    for size in [0u32, 1, 2] {
+                        for b0 in [0.0, 400.0] {
+                            for target in [
+                                900.0, 1_300.0, 1_700.0, 2_100.0, 2_600.0, 3_000.0, 3_500.0,
+                                4_200.0, 5_000.0,
+                            ] {
+                                let tag = format!(
+                                    "{mode:?} cap={cap} per={per} size={size} b0={b0} target={target}"
+                                );
+                                let brute = lots_brute(cap, size, per, counted, b0, target);
+                                let free = lots_brute(cap, size, cap, counted, b0, target);
+                                if brute != free {
+                                    binds[usize::from(counted)] += 1;
+                                }
+                                let got = plan_campaign_stocked(
+                                    Vector2::new(0.0, b0),
+                                    target,
+                                    &w,
+                                    cap,
+                                    span,
+                                    &lots(size, per, mode),
+                                )
+                                .unwrap();
+                                match (brute, got) {
+                                    (Some(n), CampaignOutcome::Planned(p)) => assert_eq!(
+                                        p.total_launches, n,
+                                        "{tag}: planner {} vs brute {n}",
+                                        p.total_launches
+                                    ),
+                                    (None, CampaignOutcome::Unreachable(_)) => {}
+                                    (brute, got) => panic!("{tag}: brute {brute:?} vs {got:?}"),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The lots change the answer in both modes, or the brute force never tested
+        // them.
+        assert!(
+            binds.iter().all(|&b| b > 0),
+            "cases where the lots bind (outside, counted): {binds:?}"
+        );
+    }
+
+    /// Random windows with collinear shifts (so `|B|` is a function of the push
+    /// along the one direction, and the planners can be compared on counts), some of
+    /// them a whole number of periods after the build date - exactly, or a tenth of a
+    /// millisecond short, inside the slack the rolling cap reads "a period apart" with.
+    fn random_windows(seed: u64, n: usize, build_days: f64) -> Vec<CampaignWindow> {
+        let mut x = seed;
+        let mut next = move || {
+            x = x
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (x >> 33) as f64 / f64::from(1u32 << 31)
+        };
+        (0..n)
+            .map(|_| {
+                let t = if next() < 0.4 {
+                    let short = if next() < 0.5 { 1.0e-4 / DAY } else { 0.0 };
+                    build_days + 100.0 * (next() * 4.0).floor() - short
+                } else {
+                    next() * 500.0
+                };
+                let s = if next() < 0.2 { -1.0 } else { 1.0 } * (50.0 + next() * 900.0);
+                window(t, (0.0, s))
+            })
+            .collect()
+    }
+
+    fn count(o: &CampaignOutcome) -> Option<u32> {
+        match o {
+            CampaignOutcome::Planned(p) => Some(p.total_launches),
+            CampaignOutcome::AlreadyClear => Some(0),
+            CampaignOutcome::Unreachable(_) => None,
+        }
+    }
+
+    #[test]
+    fn lots_at_the_cap_are_the_chains_exactly() {
+        // The packing route, forced, against the chains at a production rate that
+        // cannot bind: same count, same push, in both modes and at windows sitting
+        // exactly a whole number of periods after the build date.
+        let span = 100.0 * DAY;
+        let build = 140.0;
+        for seed in 0..60u64 {
+            let w = random_windows(seed, 9, build);
+            for cap in [1u32, 2, 3] {
+                for size in [0u32, 1, 3] {
+                    for mode in [StockMode::Counted, StockMode::OutsideCap] {
+                        for target in [700.0, 2_000.0, 4_500.0] {
+                            let free = Stock {
+                                size,
+                                build_from: Epoch::from_tdb_seconds_past_j2000(build * DAY),
+                                mode,
+                                built_per_period: UNLIMITED_BUILDS,
+                            };
+                            let chains = plan_campaign_stocked(
+                                Vector2::zeros(),
+                                target,
+                                &w,
+                                cap,
+                                span,
+                                &free,
+                            )
+                            .unwrap();
+                            let packed = plan_with_lots(
+                                Vector2::zeros(),
+                                target,
+                                &w,
+                                cap,
+                                span,
+                                &Stock {
+                                    built_per_period: cap,
+                                    ..free
+                                },
+                            );
+                            let tag = format!(
+                                "seed={seed} cap={cap} size={size} {mode:?} target={target}"
+                            );
+                            assert_eq!(count(&chains), count(&packed), "{tag}");
+                            if let (
+                                CampaignOutcome::Planned(a) | CampaignOutcome::Unreachable(a),
+                                CampaignOutcome::Planned(b) | CampaignOutcome::Unreachable(b),
+                            ) = (&chains, &packed)
+                            {
+                                let (ia, ib) = (
+                                    a.predicted_impact_parameter(),
+                                    b.predicted_impact_parameter(),
+                                );
+                                assert!((ia - ib).abs() < 1e-6, "{tag}: {ia} vs {ib}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_production_line_sits_between_no_limit_and_no_saving() {
+        // No stock: unlimited building can only need fewer launches, and a cap of `B`
+        // on every launch (built impactors that cannot wait) can only need more.
+        let span = 100.0 * DAY;
+        let build = 0.0;
+        let mut strictly = 0;
+        for seed in 0..200u64 {
+            let w = random_windows(seed, 10, build);
+            for cap in [2u32, 3, 4] {
+                for per in 1..cap {
+                    for target in [1_000.0, 2_500.0, 5_000.0] {
+                        let s = |per: u32| Stock {
+                            size: 0,
+                            build_from: Epoch::from_tdb_seconds_past_j2000(build),
+                            mode: StockMode::Counted,
+                            built_per_period: per,
+                        };
+                        let plan = |c: u32, per: u32| {
+                            plan_campaign_stocked(Vector2::zeros(), target, &w, c, span, &s(per))
+                                .unwrap()
+                        };
+                        let free = count(&plan(cap, UNLIMITED_BUILDS));
+                        let lots = count(&plan(cap, per));
+                        let no_saving = count(&plan(per, UNLIMITED_BUILDS));
+                        let tag = format!("seed={seed} cap={cap} per={per} target={target}");
+                        // `None` (short) sorts above every count.
+                        let key = |c: Option<u32>| c.unwrap_or(u32::MAX);
+                        assert!(key(free) <= key(lots), "{tag}: {free:?} > {lots:?}");
+                        assert!(
+                            key(lots) <= key(no_saving),
+                            "{tag}: {lots:?} > {no_saving:?}"
+                        );
+                        if key(lots) < key(no_saving) {
+                            strictly += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            strictly > 0,
+            "saving never helped - the comparison tests nothing"
+        );
+    }
+
+    #[test]
+    fn a_finished_impactor_waits_for_a_better_date() {
+        // One built a period from day 0, two launches allowed in any period. A weak
+        // window inside the first period, a strong one in the second, a weak one in
+        // the third. Spending the first impactor at once reaches 11 at most; keeping
+        // it for the strong date reaches 20 with the second one beside it.
+        let span = 100.0 * DAY;
+        let w = [
+            window(10.0, (0.0, 1.0)),
+            window(150.0, (0.0, 10.0)),
+            window(260.0, (0.0, 1.0)),
+        ];
+        let line = Stock {
+            size: 0,
+            build_from: Epoch::from_tdb_seconds_past_j2000(0.0),
+            mode: StockMode::Counted,
+            built_per_period: 1,
+        };
+        let p = planned(plan_campaign_stocked(Vector2::zeros(), 20.0, &w, 2, span, &line).unwrap());
+        assert_eq!(p.launches, vec![0, 2, 0]);
+        // Without the wait - one launch a period - the same target is out of reach.
+        let none = Stock {
+            built_per_period: UNLIMITED_BUILDS,
+            ..line
+        };
+        let o = plan_campaign_stocked(Vector2::zeros(), 20.0, &w, 1, span, &none).unwrap();
+        assert!(matches!(o, CampaignOutcome::Unreachable(_)), "{o:?}");
+    }
+
+    /// Every rule a lot-limited plan obeys, as caps on runs of windows in date order
+    /// (the rolling window starting at each date, "before the build date", "before
+    /// lot k+1") - the independent statement [`crate::interval_packing`] solves.
+    fn lot_runs(
+        t: &[f64],
+        cap: u32,
+        window_s: f64,
+        stocked: i64,
+        per: i64,
+        build_from: f64,
+    ) -> Vec<crate::interval_packing::RunCap> {
+        use crate::interval_packing::RunCap;
+        let n = t.len();
+        let mut runs = Vec::new();
+        for s in 0..n {
+            let from = t.partition_point(|&x| x < t[s]);
+            let to = t.partition_point(|&x| x < t[s] + window_s - ROLLING_SLACK_S);
+            runs.push(RunCap {
+                from,
+                to,
+                cap: i64::from(cap),
+            });
+        }
+        runs.push(RunCap {
+            from: 0,
+            to: t.partition_point(|&x| x < build_from),
+            cap: stocked,
+        });
+        for k in 0..20 {
+            let next = build_from + f64::from(k + 1) * (window_s - ROLLING_SLACK_S);
+            runs.push(RunCap {
+                from: 0,
+                to: t.partition_point(|&x| x < next),
+                cap: stocked + per * i64::from(k + 1),
+            });
+        }
+        runs
+    }
+
+    #[test]
+    fn the_lot_chains_match_an_independent_exact_solver() {
+        // Every number of launches, along directions that are not all collinear:
+        // the chains' best value against the run-cap packing's, and the same
+        // launch counts fitting.
+        let span = 100.0 * DAY;
+        let mut x = 11u64;
+        let mut rnd = move || {
+            x = x
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (x >> 33) as f64 / f64::from(1u32 << 31)
+        };
+        let mut compared = 0;
+        let mut bound_by_lots = 0;
+        for case in 0..300 {
+            let n = 4 + (rnd() * 10.0) as usize;
+            let build = (rnd() * 3.0).floor() * 70.0;
+            let w: Vec<CampaignWindow> = (0..n)
+                .map(|_| {
+                    let t = if rnd() < 0.3 {
+                        build + 100.0 * (rnd() * 4.0).floor()
+                            - if rnd() < 0.5 { 1.0e-4 / DAY } else { 0.0 }
+                    } else {
+                        rnd() * 450.0
+                    };
+                    window(t, (rnd() * 200.0 - 50.0, 100.0 + rnd() * 900.0))
+                })
+                .collect();
+            let cap = 1 + (rnd() * 4.0) as u32;
+            let per = 1 + (rnd() * f64::from(cap)) as u32;
+            let size = (rnd() * 3.0) as u32;
+            let u = w[(rnd() * n as f64) as usize].shift_per_launch.normalize();
+            let stock = Stock {
+                size,
+                build_from: Epoch::from_tdb_seconds_past_j2000(build * DAY),
+                mode: StockMode::Counted,
+                built_per_period: per,
+            };
+            let chains = LotChains::build(&w, cap, span, u, &stock);
+            let free = LotChains::build(
+                &w,
+                cap,
+                span,
+                u,
+                &Stock {
+                    built_per_period: UNLIMITED_BUILDS,
+                    ..stock
+                },
+            );
+            // The packing's view: the useful windows in date order.
+            let mut idx: Vec<usize> = (0..n)
+                .filter(|&i| w[i].shift_per_launch.dot(&u) > 0.0)
+                .collect();
+            let when = |i: usize| w[i].launch_epoch.tdb_seconds_past_j2000();
+            idx.sort_by(|&a, &b| when(a).total_cmp(&when(b)));
+            let t: Vec<f64> = idx.iter().map(|&i| when(i)).collect();
+            let v: Vec<f64> = idx.iter().map(|&i| w[i].shift_per_launch.dot(&u)).collect();
+            let runs = lot_runs(&t, cap, span, i64::from(size), i64::from(per), build * DAY);
+            for l in 1..=12usize {
+                let mine = chains.best(l, n);
+                let theirs = crate::interval_packing::best_packing(&v, &runs, l as u32);
+                let tag = format!("case {case} cap={cap} per={per} size={size} l={l}");
+                match (&mine, &theirs) {
+                    (None, None) => {}
+                    (Some((a, launches)), Some(x)) => {
+                        let b: f64 = x.iter().zip(&v).map(|(&k, v)| f64::from(k) * v).sum();
+                        assert!(
+                            (a - b).abs() <= 1e-9 * b.abs().max(1.0),
+                            "{tag}: {a} vs {b}"
+                        );
+                        // The chains' own arrangement obeys every run too.
+                        let mut by_pos = vec![0u32; idx.len()];
+                        for (p, &i) in idx.iter().enumerate() {
+                            by_pos[p] = launches[i];
+                        }
+                        for r in &runs {
+                            let held: i64 =
+                                by_pos[r.from..r.to].iter().map(|&k| i64::from(k)).sum();
+                            assert!(held <= r.cap, "{tag}: run {r:?} holds {held}");
+                        }
+                        compared += 1;
+                        if free.best(l, n).is_some_and(|(f, _)| f > a + 1e-9) {
+                            bound_by_lots += 1;
+                        }
+                    }
+                    _ => panic!("{tag}: chains {mine:?} vs packing {theirs:?}"),
+                }
+            }
+        }
+        // Enough fitting cases, and enough where the lots cost something.
+        assert!(
+            compared > 500 && bound_by_lots > 100,
+            "{compared} compared, {bound_by_lots} bound"
+        );
     }
 
     // --- Through a parking orbit -----------------------------------------------

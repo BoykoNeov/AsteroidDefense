@@ -21,7 +21,7 @@ use std::sync::{mpsc, Arc};
 
 use godot::prelude::*;
 
-use asteroid_core::campaign::{CampaignOutcome, Stock, StockMode};
+use asteroid_core::campaign::{CampaignOutcome, Stock, StockMode, UNLIMITED_BUILDS};
 use asteroid_core::launch_vehicle::LaunchVehicle;
 use asteroid_core::mission::MassSolveOutcome;
 use asteroid_core::scenario::{ImpactorConfig, ScenarioError, SAFE_PERIGEE_TARGET_M};
@@ -196,10 +196,11 @@ struct Mission {
     campaign: Option<(i64, CampaignCandidates)>,
     /// The in-flight whole-campaign flight.
     campaign_fly_build: Option<mpsc::Receiver<Result<CampaignFlight, String>>>,
-    /// Which plan the in-flight flight is for, `(vehicle, launches per year)`.
-    pending_campaign_flight: (i64, u32),
+    /// Which plan the in-flight flight is for, `(vehicle, launches per year, built
+    /// per year)` - the last as the plan used it, [`UNLIMITED_BUILDS`] for none.
+    pending_campaign_flight: (i64, u32, u32),
     /// The last whole-campaign flight and the plan it flew.
-    campaign_flight: Option<(i64, u32, CampaignFlight)>,
+    campaign_flight: Option<(i64, u32, u32, CampaignFlight)>,
     /// The in-flight one-period required-Δv anchor solve — a **seventh** channel.
     ///
     /// Unlike the other six this one is not fired repeatedly: it is asked once per
@@ -1394,6 +1395,13 @@ impl Mission {
         readiness_at(i).is_some_and(|r| r.rest_preparation_s.is_some())
     }
 
+    /// Whether readiness level `i` builds its impactors after the go-ahead, so a
+    /// production rate limits it - every level but ON THE PAD, the reference.
+    #[func]
+    fn readiness_builds(&self, i: i64) -> bool {
+        readiness_at(i).is_some_and(|r| r.built_after_go_ahead)
+    }
+
     /// Readiness level `i`'s label, or `""` past the end.
     #[func]
     fn readiness_name(&self, i: i64) -> GString {
@@ -1806,6 +1814,10 @@ impl Mission {
                 } else {
                     StockMode::Counted
                 },
+                // The windows are chosen with no production limit; the limit is
+                // applied when a plan is read (`campaign_plan`), so its dial needs
+                // no new measurement.
+                built_per_period: asteroid_core::campaign::UNLIMITED_BUILDS,
             }),
             _ => None,
         };
@@ -1894,18 +1906,33 @@ impl Mission {
     ///   the target at this rate. Plus `total_launches` and `predicted_b_km` of the
     ///   plan that got furthest, so the display can say how short it falls.
     /// - `"already_clear"` — the nominal already misses by the target.
+    ///
+    /// `built_per_year`: how many built impactors a production line finishes a year
+    /// (`<= 0`: no limit), applied by arithmetic like the cap
+    /// ([`CampaignCandidates::plan_built`]); ignored at a readiness level that does
+    /// not build (ON THE PAD). Key `built_per_year` is the rate the plan used, `-1`
+    /// for none - at or above the cap it is no limit and reads `-1` too.
     #[func]
-    fn campaign_plan(&self, launches_per_year: i64) -> VarDictionary {
+    fn campaign_plan(&self, launches_per_year: i64, built_per_year: i64) -> VarDictionary {
         let mut d = VarDictionary::new();
         let Some((vehicle, c)) = self.campaign.as_ref() else {
             return d;
         };
         let cap = launches_per_year.clamp(1, 1_000) as u32;
-        let outcome = match c.plan(cap) {
+        let built = self.campaign_built(cap, built_per_year);
+        let outcome = match c.plan_built(cap, built) {
             Ok(o) => o,
             Err(_) => return d,
         };
         d.set("vehicle", *vehicle);
+        d.set(
+            "built_per_year",
+            if built == UNLIMITED_BUILDS {
+                -1
+            } else {
+                i64::from(built)
+            },
+        );
         // What the first launch waited for: the readiness level and the warning
         // the measurement was made at, and the first date that left.
         let (readiness, warning_s) = self.campaign_readiness;
@@ -2014,7 +2041,7 @@ impl Mission {
             )
             .filter(|_| parks);
         for (name, alt) in alternatives {
-            let Ok(Ok(o)) = alt.map(|a| a.plan(cap)) else {
+            let Ok(Ok(o)) = alt.map(|a| a.plan_built(cap, built)) else {
                 continue;
             };
             let mut row = VarDictionary::new();
@@ -2034,6 +2061,20 @@ impl Mission {
         d
     }
 
+    /// The production rate a plan of the held campaign at `cap` uses: none at a
+    /// level that does not build, for `built_per_year <= 0`, or at or above the cap
+    /// (where it cannot bind - the planner's own rule, so a flight and the panel
+    /// agree on which plan they mean).
+    fn campaign_built(&self, cap: u32, built_per_year: i64) -> u32 {
+        let builds =
+            readiness_at(self.campaign_readiness.0).is_some_and(|r| r.built_after_go_ahead);
+        if !builds || built_per_year <= 0 || built_per_year >= i64::from(cap) {
+            UNLIMITED_BUILDS
+        } else {
+            built_per_year as u32
+        }
+    }
+
     /// Fly the campaign planned under `launches_per_year` whole, on a worker — one
     /// full-field propagation, chained through every impulse in arrival order —
     /// and read the keyhole exposure at the flown aim point with the same census
@@ -2042,10 +2083,14 @@ impl Mission {
     /// Returns `false` (with a reason) when a flight is already in flight, no
     /// campaign is held, or the plan at this cap does not reach the target (there
     /// is nothing to check).
+    ///
+    /// `built_per_year` as in [`campaign_plan`](Self::campaign_plan): the plan
+    /// flown is the one shown under the same two dials.
     #[func]
     fn begin_campaign_flight(
         &mut self,
         launches_per_year: i64,
+        built_per_year: i64,
         keyhole_max_years: i64,
         placement_band_a_km: f64,
     ) -> bool {
@@ -2065,7 +2110,8 @@ impl Mission {
             return false;
         };
         let cap = launches_per_year.clamp(1, 1_000) as u32;
-        let plan = match c.plan(cap) {
+        let built = self.campaign_built(cap, built_per_year);
+        let plan = match c.plan_built(cap, built) {
             Ok(CampaignOutcome::Planned(p)) => p,
             _ => {
                 self.error = "no campaign reaches the target at this rate - nothing to fly".into();
@@ -2084,7 +2130,7 @@ impl Mission {
             let _ = tx.send(result);
         });
         self.campaign_fly_build = Some(rx);
-        self.pending_campaign_flight = (vehicle, cap);
+        self.pending_campaign_flight = (vehicle, cap, built);
         self.campaign_flight = None;
         self.error = GString::new();
         true
@@ -2106,11 +2152,11 @@ impl Mission {
             Err(mpsc::TryRecvError::Empty) => true,
             Ok(Ok(f)) => {
                 self.campaign_fly_build = None;
-                let (v, cap) = self.pending_campaign_flight;
+                let (v, cap, built) = self.pending_campaign_flight;
                 // Only kept if the measurement it was planned from is still the
                 // held one — a re-solve in the meantime would otherwise inherit it.
                 if self.campaign.as_ref().is_some_and(|(hv, _)| *hv == v) {
-                    self.campaign_flight = Some((v, cap, f));
+                    self.campaign_flight = Some((v, cap, built, f));
                 }
                 self.error = GString::new();
                 false
@@ -2129,8 +2175,9 @@ impl Mission {
     }
 
     /// The last whole-campaign flight, or an **empty dictionary**. Keys:
-    /// `vehicle` and `launches_per_year` (which plan it flew — the display greys it
-    /// when either no longer matches), `outcome` as in
+    /// `vehicle`, `launches_per_year` and `built_per_year` (which plan it flew,
+    /// `-1` for no production limit — the display greys it when any no longer
+    /// matches), `outcome` as in
     /// [`cell_verdict`](Self::cell_verdict) (`"encounter"` with
     /// `impact_parameter_m`, `capture_radius_m`, `perigee_m`, `earth_radius_m`,
     /// `is_hit`; or `"clean_miss"` / `"not_hyperbolic"`), `nonlinearity` (NaN when
@@ -2139,11 +2186,19 @@ impl Mission {
     #[func]
     fn campaign_flight(&self) -> VarDictionary {
         let mut d = VarDictionary::new();
-        let Some((vehicle, cap, f)) = self.campaign_flight.as_ref() else {
+        let Some((vehicle, cap, built, f)) = self.campaign_flight.as_ref() else {
             return d;
         };
         d.set("vehicle", *vehicle);
         d.set("launches_per_year", *cap as i64);
+        d.set(
+            "built_per_year",
+            if *built == UNLIMITED_BUILDS {
+                -1
+            } else {
+                i64::from(*built)
+            },
+        );
         match f.flown {
             CellVerdict::CleanMiss => d.set("outcome", "clean_miss"),
             CellVerdict::NotHyperbolic => d.set("outcome", "not_hyperbolic"),

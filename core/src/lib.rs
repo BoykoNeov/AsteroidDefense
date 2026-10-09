@@ -34,6 +34,7 @@ pub mod geometry;
 pub mod horizons;
 pub mod impactor_mass;
 pub mod integrator;
+pub mod interval_packing;
 pub mod kernels;
 pub mod keyhole;
 pub mod keyhole_target;

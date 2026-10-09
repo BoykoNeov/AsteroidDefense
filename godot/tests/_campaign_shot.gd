@@ -22,7 +22,9 @@ extends Node
 ##   burn flown finite (8 firings from 400 km). The what-if row says it falls short
 ##   with no parking;
 ## - FROM SCRATCH, found 12 yr out (first launch 6.53 yr before impact), 2/yr FALLS
-##   SHORT and 6/yr needs 12 LAUNCHES, against 6 on the pad;
+##   SHORT and 6/yr needs 12 LAUNCHES, against 6 on the pad - with no production
+##   limit; [9] / [0] step the built-per-year dial for free, and at 4 built a year
+##   6/yr needs 16, at 3 it falls short;
 ## - the parking line names the height, stack, engine and firings, and the plan
 ##   really parks;
 ## - the window boxes sit at their own dates, between the map's cells (look at the
@@ -186,6 +188,39 @@ func _run() -> void:
 	assert(Sim.campaign_count_label().begins_with("12 LAUNCHES"), "built from scratch, 6 a year needs 12")
 	_assert_per_year_cap()
 	await _shot("campaign_scratch_6")
+	# The production line: [9] / [0] step how many built impactors a year, free (a
+	# replan, no solve), and the flight greys - it flew the plan with no limit. Fly
+	# that plan first, so there is a flight to grey.
+	assert(Sim.campaign_built_label(Sim.pork_campaign_first_launch_tdb()).contains("AS MANY AS THE RATE"),
+		"the production line must open on no limit")
+	main._input(_key(KEY_E))
+	var t8 := Time.get_ticks_msec()
+	while Sim.pork_campaign_flying and Time.get_ticks_msec() - t8 < 300000:
+		await get_tree().process_frame
+	assert(Sim.pork_campaign_flight_is_current(), "the 6/yr from-scratch plan must fly")
+	print("CAMPSHOT  from scratch 6/yr flown: %s" % Sim.campaign_flight_label())
+	main._input(_key(KEY_9))
+	await _settle(1)
+	assert(Sim.pork_campaign_built == 5, "[9] from no limit at 6/yr must go to 5 built a year")
+	assert(not Sim.pork_campaign_solving, "the production dial fired a solve")
+	assert(not Sim.pork_campaign_flight_is_current(), "a flight with no production limit shown as this plan's")
+	main._input(_key(KEY_9))
+	await _settle(1)
+	print("CAMPSHOT  from scratch 6/yr, 4 built/yr: %s" % Sim.campaign_count_label())
+	assert(Sim.campaign_count_label().begins_with("16 LAUNCHES AT UP TO 6 PER 12 MO, 4 BUILT/YR"),
+		"built from scratch, 4 a year off the line, 6 a year needs 16")
+	_assert_per_year_cap()
+	await _shot("campaign_scratch_6_built_4")
+	main._input(_key(KEY_9))
+	await _settle(1)
+	print("CAMPSHOT  from scratch 6/yr, 3 built/yr: %s" % Sim.campaign_count_label())
+	assert(Sim.campaign_count_label().begins_with("FALLS SHORT"), "3 built a year falls short")
+	for _k in 3:
+		main._input(_key(KEY_0))
+	await _settle(1)
+	assert(Sim.pork_campaign_built == 0, "[0] past the rate must come back to no limit")
+	assert(Sim.campaign_count_label().begins_with("12 LAUNCHES"), "back to no limit, 12 again")
+	assert(Sim.pork_campaign_flight_is_current(), "back on the flown plan, the flight is current again")
 	for _k in 4:
 		main._input(_key(KEY_Z))
 	await _settle(1)

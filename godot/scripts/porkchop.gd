@@ -520,7 +520,12 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 	# and, for a stored stock, how many and when the rest can.
 	_t(Vector2(x, y), Sim.campaign_readiness_label(), mid, _fs - 1)
 	y += lh
+	# A stock's line names the production rate for the launches past it; with no
+	# stock, the same slot says how built impactors come - every count below is
+	# conditional on it like on the rate.
 	var st := Sim.campaign_stock_label()
+	if st.is_empty():
+		st = Sim.campaign_built_label(Sim.pork_campaign_first_launch_tdb())
 	if not st.is_empty():
 		_t(Vector2(x, y), st, mid, _fs - 1)
 	y += lh
@@ -582,9 +587,9 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 		wi = "NO PARKED LAUNCHES FOR THIS ROCKET - NOTHING PUBLISHED SAYS WHAT ONE PAYLOAD MAY WEIGH" 			if current else 			"PARKING: FALCON HEAVY (EXPENDABLE) ONLY - ITS PUBLISHED 26.5 T PAYLOAD LIMIT, A STORABLE ENGINE"
 	_t(Vector2(x, y), wi, faint, _fs - 3)
 	y += lh
-	var keys := "[Z]/[X] PER 12 MO  [ / ] WARNING  [W] READINESS  [E] MEASURE / FLY  [L] LAUNCHER  [C] WINDOWS  [1] BACK"
+	var keys := "[Z]/[X] PER 12 MO  [9]/[0] BUILT/YR  [ / ] WARNING  [W] READINESS  [E] MEASURE / FLY  [L] LAUNCHER  [C] WINDOWS"
 	if Sim.campaign_has_stock():
-		keys = "[Z]/[X] PER 12 MO  [ / ] WARNING  [W] READINESS  [; / '] STOCK  [Q] STOCK MODE  [E] MEASURE / FLY  [1] BACK"
+		keys = "[Z]/[X] PER 12 MO  [9]/[0] BUILT/YR  [ / ] WARNING  [W] READINESS  [; / '] STOCK  [Q] STOCK MODE  [E] MEASURE / FLY"
 	_t(Vector2(x, y), keys,
 		dim, _fs - 2)
 

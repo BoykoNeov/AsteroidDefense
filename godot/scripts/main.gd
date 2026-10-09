@@ -333,6 +333,13 @@ func _input(event: InputEvent) -> void:
 		Sim.adjust_campaign_stock(1)
 	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_stock_mode"):
 		Sim.toggle_campaign_stock_mode()
+	# The production line: [9] / [0] step how many built impactors are finished a
+	# year. Free - the core replans the held measurement - and inert ON THE PAD.
+	# Digits because every letter is taken; 1-4 are the views, so 9 / 0 sit clear.
+	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_built_down"):
+		Sim.adjust_campaign_built(-1)
+	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_built_up"):
+		Sim.adjust_campaign_built(1)
 	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_verify"):
 		Sim.request_campaign_step()
 	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_required_mass"):

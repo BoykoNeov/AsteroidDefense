@@ -60,6 +60,17 @@
 //! build-from-scratch delay. [`SOURCED_STOCK_SIZE`] is the paper's two; the campaign
 //! layer takes the size as a dial and plans with it ([`crate::campaign::Stock`]).
 //!
+//! # Built ones come off a production line
+//! A level's delay is when the first built impactor is ready, and the 60 months is
+//! the source's figure for building *one* mission. How many more a production line
+//! can finish, and how fast, nothing found here publishes: Barbee et al. 2018 (the
+//! HAMMER study, Acta Astronautica 143, 37-61) sizes campaigns of 7 to 53 launches
+//! and says only that building several "certainly costs time", and that the
+//! infrastructure to launch many in a short time "is not currently available". So
+//! the rate is the campaign's dial ([`crate::campaign::Stock::built_per_period`]),
+//! with no sourced default, and [`Readiness::built_after_go_ahead`] says which
+//! levels it applies to - every one but [`ON_THE_PAD`].
+//!
 //! # What this leaves to the caller
 //! *When* launches can go. How many a year can follow is the campaign's own cap
 //! ([`crate::campaign`]); whether the stock counts against it is the caller's
@@ -103,6 +114,11 @@ pub struct Readiness {
     /// Go-ahead to the first launch *past a limited stock*, s - `None` where every
     /// launch is ready at `preparation_s` (no stock to run out of).
     pub rest_preparation_s: Option<f64>,
+    /// Whether the impactors past any stock are built after the go-ahead, so how
+    /// fast a production line delivers them limits the campaign
+    /// ([`crate::campaign::Stock::built_per_period`]). `false` only for
+    /// [`ON_THE_PAD`], the reference where every launch already stands ready.
+    pub built_after_go_ahead: bool,
 }
 
 impl Readiness {
@@ -140,6 +156,7 @@ pub const ON_THE_PAD: Readiness = Readiness {
     decision_s: 0.0,
     preparation_s: 0.0,
     rest_preparation_s: None,
+    built_after_go_ahead: false,
 };
 
 /// A standing defence: interceptors built in advance and stored, their launchers
@@ -150,6 +167,7 @@ pub const IN_STORAGE: Readiness = Readiness {
     decision_s: PDC23_DECISION_S,
     preparation_s: STORED_PREPARATION_S,
     rest_preparation_s: Some(BUILD_RANGE_S.1),
+    built_after_go_ahead: true,
 };
 
 /// No standing defence: the interceptor is designed and built after the go-ahead.
@@ -159,6 +177,7 @@ pub const FROM_SCRATCH: Readiness = Readiness {
     decision_s: PDC23_DECISION_S,
     preparation_s: BUILD_RANGE_S.1,
     rest_preparation_s: None,
+    built_after_go_ahead: true,
 };
 
 /// Every level a readout offers, the shipping one last.
@@ -224,6 +243,12 @@ mod tests {
         assert_eq!(ON_THE_PAD.build_from_tdb(impact, w), None);
         assert_eq!(FROM_SCRATCH.build_from_tdb(impact, w), None);
         assert_eq!(SOURCED_STOCK_SIZE, 2);
+        // Only the reference stands every launch ready; the others build them.
+        let builds: Vec<bool> = READINESS_LEVELS
+            .iter()
+            .map(|r| r.built_after_go_ahead)
+            .collect();
+        assert_eq!(builds, [false, true, true]);
     }
 
     #[test]

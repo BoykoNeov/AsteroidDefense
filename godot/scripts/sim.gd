@@ -517,6 +517,12 @@ var pork_campaign_warning_yr := -1.0
 const CAMPAIGN_STOCK_MAX := 12
 var pork_campaign_stock := -2
 var pork_campaign_stock_outside := false
+## The production line, for a level that builds (every one but ON THE PAD): how many
+## built impactors are finished a year, the first lot when the build ends, a finished
+## one waiting for its launch. 0 = as many as the rate launches - no limit, the
+## default, because no source gives a rate. [9] / [0] step it; free to dial (the core
+## applies it to the held measurement by arithmetic, like the rate).
+var pork_campaign_built := 0
 
 signal porkchop_changed
 
@@ -2150,7 +2156,7 @@ func _fly_campaign() -> void:
 		return
 	if pork_campaign_flight_is_current():
 		return
-	if mission.begin_campaign_flight(pork_campaign_rate, KEYHOLE_MAX_YEARS,
+	if mission.begin_campaign_flight(pork_campaign_rate, pork_campaign_built, KEYHOLE_MAX_YEARS,
 			KEYHOLE_PLACEMENT_A_KM):
 		pork_campaign_flying = true
 		event_logged.emit(_stamp(t) + "  CAMPAIGN: FLYING THE WHOLE PLAN IN THE FULL FIELD")
@@ -2172,7 +2178,58 @@ func adjust_campaign_rate(step: int) -> void:
 ## a landed measurement, a rate step, a launcher change — and never per frame:
 ## it marshals a dictionary per window.
 func _refresh_campaign_plan() -> void:
-	pork_campaign = mission.campaign_plan(pork_campaign_rate) if pork_online else {}
+	pork_campaign = mission.campaign_plan(pork_campaign_rate, pork_campaign_built) \
+		if pork_online else {}
+
+
+## Whether the dialled level builds its impactors after the go-ahead, so the
+## production line limits it (every level but ON THE PAD).
+func campaign_builds() -> bool:
+	return mission != null and bool(mission.readiness_builds(campaign_readiness()))
+
+
+## Whether the dialled production rate binds: below the launch rate. At or above it
+## the line finishes every impactor the rate can launch, and it is no limit.
+func campaign_built_binds() -> bool:
+	return campaign_builds() and pork_campaign_built > 0 \
+		and pork_campaign_built < pork_campaign_rate
+
+
+## Step the production rate. Only values that bind are offered: down from no limit
+## goes to one below the launch rate, and up past it comes back to no limit. Free:
+## a replan of the held measurement.
+func adjust_campaign_built(step: int) -> void:
+	if not campaign_builds():
+		return
+	var b := pork_campaign_built
+	if not campaign_built_binds():
+		if step >= 0 or pork_campaign_rate <= 1:
+			return
+		b = pork_campaign_rate - 1
+	else:
+		b += step
+		if b >= pork_campaign_rate:
+			b = 0
+		elif b < 1:
+			b = 1
+	if b == pork_campaign_built:
+		return
+	pork_campaign_built = b
+	_refresh_campaign_plan()
+	porkchop_changed.emit()
+
+
+## The production line in one line - the count is conditional on it like on the
+## rate. `first_built` is the date the first built impactor is ready. ON THE PAD
+## builds nothing, and the line says that its counts carry no production limit.
+func campaign_built_label(first_built: float) -> String:
+	if not campaign_builds():
+		return "EVERY LAUNCH ALREADY BUILT AND READY - THE REFERENCE, NO PRODUCTION LIMIT"
+	var when := date_string((first_built - EPOCH0_TDB) / DAY_S)
+	if not campaign_built_binds():
+		return "BUILT FROM %s: AS MANY AS THE RATE LAUNCHES - NO SOURCE GIVES A RATE" % when
+	return "BUILT FROM %s: %d A YEAR, A FINISHED ONE WAITS FOR ITS WINDOW" % [
+		when, pork_campaign_built]
 
 
 func _poll_campaign() -> void:
@@ -2321,6 +2378,8 @@ func campaign_stock_label() -> String:
 		else "COUNTED IN THE RATE"
 	var line := "STOCK %s%s, %s - THE REST BUILT FROM %s" % [size, src, mode,
 		date_string((pork_campaign_build_from_tdb() - EPOCH0_TDB) / DAY_S)]
+	if campaign_built_binds():
+		line += ", %d A YEAR" % pork_campaign_built
 	if pork_campaign_is_current() and pork_campaign.has("stock_used"):
 		line += "  - %d FROM STOCK" % int(pork_campaign.stock_used)
 	return line
@@ -2348,7 +2407,8 @@ func pork_campaign_flight_is_current() -> bool:
 	var f := pork_campaign_flight()
 	if f.is_empty() or not pork_campaign_is_current():
 		return false
-	return int(f.vehicle) == pork_vehicle and int(f.launches_per_year) == pork_campaign_rate
+	return int(f.vehicle) == pork_vehicle and int(f.launches_per_year) == pork_campaign_rate \
+		and int(f.get("built_per_year", -1)) == int(pork_campaign.get("built_per_year", -1))
 
 
 ## The count in one line, **with the rate it was counted under** — a count
@@ -2366,20 +2426,27 @@ func campaign_count_label() -> String:
 		"already_clear":
 			return "NOMINAL ALREADY MISSES BY THE TARGET - NO LAUNCH NEEDED"
 		"planned":
-			return "%d LAUNCHES AT UP TO %d PER 12 MO - PREDICTED |B| %s OF %s KM%s" % [
-				int(c.total_launches), int(c.launches_per_year),
+			return "%d LAUNCHES AT UP TO %d PER 12 MO%s - PREDICTED |B| %s OF %s KM%s" % [
+				int(c.total_launches), int(c.launches_per_year), _built_note(c),
 				group_num(int(got)), group_num(int(tgt)), "  AT THE LINE" if at_line else ""]
 		"unreachable":
 			# An answer, not a failure: the best this rate can do, and how short.
 			# "Falls short", not "unreachable": how far short moves with the search.
 			if at_line:
-				return "AT THE LINE AT %d PER 12 MO - %d LAUNCHES GET |B| %s OF %s KM" % [
-					int(c.launches_per_year), int(c.total_launches),
+				return "AT THE LINE AT %d PER 12 MO%s - %d LAUNCHES GET |B| %s OF %s KM" % [
+					int(c.launches_per_year), _built_note(c), int(c.total_launches),
 					group_num(int(got)), group_num(int(tgt))]
-			return "FALLS SHORT AT %d PER 12 MO - %d LAUNCHES GET |B| %s OF %s KM" % [
-				int(c.launches_per_year), int(c.total_launches),
+			return "FALLS SHORT AT %d PER 12 MO%s - %d LAUNCHES GET |B| %s OF %s KM" % [
+				int(c.launches_per_year), _built_note(c), int(c.total_launches),
 				group_num(int(got)), group_num(int(tgt))]
 	return "UNKNOWN"
+
+
+## ", 2 BUILT/YR" when the plan was made under a production rate that binds, "" when
+## it was not (the core reports -1 for no limit).
+func _built_note(c: Dictionary) -> String:
+	var b := int(c.get("built_per_year", -1))
+	return "" if b <= 0 else ", %d BUILT/YR" % b
 
 
 ## Which windows the plan uses, as "2031-04 2X" items in launch order - "1P" for a

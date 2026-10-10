@@ -6761,6 +6761,10 @@ is stale, like one for another launcher. The core owns the delays
 on-the-pad numbers on ON THE PAD and measures FROM SCRATCH too (2/yr falls short,
 6/yr 12).
 
+*(2026-10-10: these counts predate the drag now charged on parked waits - see*
+*Standing defence, part 3. Re-measured since: 1/yr on the pad is still 10, now at the*
+*line, 26 196 km; from scratch 6/yr 12 and 2/yr short, by the app's own run.)*
+
 #### What this leaves
 
 - Parts 2-4 of the bullet. Part 2 is better posed as a **limited stock** (S
@@ -6996,6 +7000,10 @@ Flown whole at 6 a year, every plan misses: from scratch 16 at 4 built a year (p
 20 500 km) and 12 at 6 (20 269 km); in storage 11 / 10 / 9 at 3 / 4 / 6 (20 187 /
 20 539 / 20 239 km).
 
+*(2026-10-10: measured before the drag on parked waits - Standing defence, part 3.*
+*The app's own run re-measured, unchanged: from scratch at 6/yr, 12 with no limit, 16*
+*at 4 built a year, short at 3; stock 2 at 6/yr, 9.)*
+
 #### Lots finished before the map starts (the final review's catch)
 
 The measurement clamps every date to the map's first launch date, 12 years out. The
@@ -7139,12 +7147,13 @@ for the windows flown). Shipping: 600 km, worst node, upper-bound area, 10 yr wa
 | | 1/yr | 2/yr | 3/yr | 4/yr | 6/yr | 12/yr |
 |---|---|---|---|---|---|---|
 | found 12 yr, **2 in orbit** | short | short | 12 (line) | 11 | 10 | 9 (line) |
-| found 12 yr, 2 in storage, counted (part 2) | short | short | 11 | 10 | 9 (line) | 9 |
+| found 12 yr, 2 in storage, counted | short | short | 11 | 10 | 9 (line) | 9 |
 | found 12 yr, **6 in orbit** | **7** | 7 | 7 | 7 | 7 | 7 |
-| found 12 yr, 6 in storage, counted (part 2) | short | 7 | 7 | 6 | 6 | 6 |
+| found 12 yr, 6 in storage, counted | short | 7 | 7 | 6 | 6 | 6 |
 | found 9 yr, **2 in orbit** | short | short | short | short | short | short (25 013 km) |
+| found 9 yr, 2 in storage, counted | short | short | short | short | short | short (25 006 km) |
 | found 9 yr, **6 in orbit** | short | short | short | short | 22 (line) | 15 |
-| found 9 yr, 6 in storage, counted (part 2) | short | short | short | short | 22 | 15 |
+| found 9 yr, 6 in storage, counted | short | short | short | short | 22 | 15 |
 
 - **The years barely matter at 600 km:** 0 -> 20 yr waited takes 0.2-0.4 % off |B|; it
   moves one count - found 9 yr, 6 in orbit, 6/yr: 21 at 0-5 yr, 22 at 10-20 (both at
@@ -7155,8 +7164,10 @@ for the windows flown). Shipping: 600 km, worst node, upper-bound area, 10 yr wa
   km. Nonlinearity 2.2-2.8e-4.
 - The probe's "on the ground, outside the cap" row is a stock ready **at the go-ahead**
   with no preparation - a reference, not a level.
-- Part 2's storage rows were measured before the post-warning parked launches paid
-  drag; they were not re-run.
+- **Like for like:** the storage rows are re-measured with the drag charged
+  (`STANDING_STOCK=2,6 STANDING_MODES=counted probe_standing_stock`, 677 s) - and
+  every count is part 2's, unchanged; flown, stock 2 at 6/yr perigee 20 239 km, stock
+  6 at 2 and 6/yr 21 033 / 21 078 km, found 9 yr stock 6 at 6/yr 20 084 km.
 
 #### Drag on the post-warning parked launches (`probe_orbital_assembly`, `ASSEMBLY_ALSO=app`)
 

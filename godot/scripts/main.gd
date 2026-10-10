@@ -340,6 +340,12 @@ func _input(event: InputEvent) -> void:
 		Sim.adjust_campaign_built(-1)
 	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_built_up"):
 		Sim.adjust_campaign_built(1)
+	# A stock in orbit: [7] / [8] step how many years it had been up when the rock was
+	# found. Free (the core re-prices the held stacks), and inert at any other level.
+	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_orbit_years_down"):
+		Sim.adjust_campaign_orbit_years(-1)
+	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_campaign_orbit_years_up"):
+		Sim.adjust_campaign_orbit_years(1)
 	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_verify"):
 		Sim.request_campaign_step()
 	elif pork.visible and Sim.pork_campaign_open and event.is_action_pressed("pork_required_mass"):

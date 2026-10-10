@@ -33,7 +33,7 @@ use mission_core::{
     measure_campaign_candidates, measure_tier2_shifts, mount_small_bodies, probe_tow_plan,
     required_cell_mass, seed_orrery_body, solve_required_dv_anchor,
     tractor_readout as score_tractor_plan, verify_porkchop_cell, BuiltScenario, CampaignCandidates,
-    CampaignFlight, CellVerdict, KeyholePlanRow, MissionCore, OrreryBody, PorkchopView,
+    CampaignFlight, CellVerdict, KeyholePlanRow, MissionCore, OrbitStock, OrreryBody, PorkchopView,
     ThreatOrbitKnobs, Tier2Shifts, Tier3View, TractorPlan, CAMPAIGN_PERIOD_S,
     REQUIRED_DV_LAW_MIN_PERIODS, SB441_BODIES, THREAT_RADIUS_M, TRACTOR_HOVER_RADII,
 };
@@ -191,6 +191,13 @@ struct Mission {
     /// the in-flight and the held measurement - used only by a level with a stock.
     pending_campaign_stock: (i64, bool),
     campaign_stock: (i64, bool),
+    /// How many years a stock in orbit had waited when the rock was found (IN
+    /// ORBIT): `None` until first set, then the core's default. A free dial - it
+    /// re-prices the held campaign's stacks by arithmetic.
+    campaign_orbit_years: Option<f64>,
+    /// The years the held campaign's stacks are priced at (what the last
+    /// measurement or dial applied), for the readout.
+    campaign_orbit_years_held: Option<f64>,
     /// The held campaign measurement and its launcher. Cap-independent, so the
     /// rate knob replans it for free. Dropped with the grid and the scenario.
     campaign: Option<(i64, CampaignCandidates)>,
@@ -1395,6 +1402,46 @@ impl Mission {
         readiness_at(i).is_some_and(|r| r.rest_preparation_s.is_some())
     }
 
+    /// Whether readiness level `i`'s stock waits **in orbit** (IN ORBIT): no launch
+    /// for it, outside the cap, priced by its years and its plane.
+    #[func]
+    fn readiness_stock_in_orbit(&self, i: i64) -> bool {
+        readiness_at(i).is_some_and(|r| r.stock_in_orbit)
+    }
+
+    /// The years a stock in orbit has waited when the rock is found, as dialled (the
+    /// core's default until set).
+    #[func]
+    fn campaign_orbit_years(&self) -> f64 {
+        self.campaign_orbit_years
+            .unwrap_or(asteroid_core::readiness::IN_ORBIT_YEARS_DEFAULT)
+    }
+
+    /// Dial the years a stock in orbit has waited when the rock is found. Free: the
+    /// held campaign's stacks are re-priced by arithmetic (their escape tables were
+    /// flown on the measurement's worker). Returns `false` for a negative or
+    /// non-finite value.
+    #[func]
+    fn set_campaign_orbit_years(&mut self, years: f64) -> bool {
+        if !(years.is_finite() && years >= 0.0) {
+            return false;
+        }
+        self.campaign_orbit_years = Some(years);
+        let decision = readiness_at(self.campaign_readiness.0)
+            .map_or(asteroid_core::readiness::PDC23_DECISION_S, |r| r.decision_s);
+        if let Some((_, c)) = self.campaign.as_mut() {
+            if let Some(o) = c.orbit_stock {
+                let o = OrbitStock {
+                    in_orbit_at_go_ahead_s: years * asteroid_core::readiness::YEAR_S + decision,
+                    ..o
+                };
+                *c = c.with_orbit_stock(&o);
+                self.campaign_orbit_years_held = Some(years);
+            }
+        }
+        true
+    }
+
     /// Whether readiness level `i` builds its impactors after the go-ahead, so a
     /// production rate limits it - every level but ON THE PAD, the reference.
     #[func]
@@ -1805,11 +1852,15 @@ impl Mission {
         let impact = scenario.impact_epoch().tdb_seconds_past_j2000();
         // The years are counted from the first launch, so the first is a whole one.
         let first = level.first_launch_tdb(impact, warning_s).max(map_first);
+        // A stock in orbit is never counted against the rate (it is not launched):
+        // the windows are measured as for a stock flown outside the cap, and the
+        // stacks priced on them afterwards, on the worker.
+        let outside = stock_outside_cap || level.stock_in_orbit;
         let stock = match (level.build_from_tdb(impact, warning_s), stock_size) {
             (Some(build), size) if size >= 0 => Some(Stock {
                 size: size.min(i64::from(u32::MAX)) as u32,
                 build_from: Epoch::from_tdb_seconds_past_j2000(build.max(first)),
-                mode: if stock_outside_cap {
+                mode: if outside {
                     StockMode::OutsideCap
                 } else {
                     StockMode::Counted
@@ -1821,13 +1872,25 @@ impl Mission {
             }),
             _ => None,
         };
+        let years = self.campaign_orbit_years();
+        let orbit = (level.stock_in_orbit && stock_size >= 0).then(|| OrbitStock {
+            size: stock_size.min(i64::from(u32::MAX)) as u32,
+            go_ahead_tdb: impact - warning_s + level.decision_s,
+            in_orbit_at_go_ahead_s: years * asteroid_core::readiness::YEAR_S + level.decision_s,
+            stack: asteroid_core::station_keeping::SHIPPING_STANDING_STACK,
+        });
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let result =
                 measure_campaign_candidates(&scenario, &view, v, first, Some(first), stock)
+                    .map(|c| match &orbit {
+                        Some(o) => c.with_orbit_stock(o),
+                        None => c,
+                    })
                     .map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
+        self.campaign_orbit_years_held = orbit.map(|_| years);
         self.campaign_build = Some(rx);
         self.pending_campaign_vehicle = vehicle;
         self.pending_campaign_readiness = (readiness, warning_s);
@@ -1860,6 +1923,11 @@ impl Mission {
                 self.campaign = Some((self.pending_campaign_vehicle, c));
                 self.campaign_readiness = self.pending_campaign_readiness;
                 self.campaign_stock = self.pending_campaign_stock;
+                // The years dial moved while it measured: re-price the stacks now.
+                let years = self.campaign_orbit_years();
+                if self.campaign_orbit_years_held.is_some_and(|h| h != years) {
+                    self.set_campaign_orbit_years(years);
+                }
                 self.error = GString::new();
                 false
             }
@@ -1971,8 +2039,31 @@ impl Mission {
                 p.launches.clone()
             }
         };
-        // How many launches the plan takes from the stock (those before the build date).
-        if let Some(st) = c.stock {
+        // How many launches the plan takes from the stock: the stacks in orbit, or
+        // those before the build date.
+        if let Some(o) = c.orbit_stock {
+            let used: i64 = c
+                .candidates
+                .iter()
+                .zip(&launches)
+                .filter(|(k, _)| k.from_orbit)
+                .map(|(_, &n)| i64::from(n))
+                .sum();
+            d.set("stock_used", used);
+            let mut orbit = VarDictionary::new();
+            orbit.set("size", i64::from(o.size));
+            orbit.set(
+                "years_waited",
+                self.campaign_orbit_years_held.unwrap_or(f64::NAN),
+            );
+            orbit.set("altitude_km", o.stack.delivery.parking_altitude_m / 1e3);
+            orbit.set("stack_kg", o.stack.delivery.stack_kg);
+            orbit.set(
+                "departures",
+                c.candidates.iter().filter(|k| k.from_orbit).count() as i64,
+            );
+            d.set("orbit_stock", &orbit);
+        } else if let Some(st) = c.stock {
             let build = st.build_from.tdb_seconds_past_j2000();
             let early: i64 = c
                 .candidates
@@ -2002,13 +2093,16 @@ impl Mission {
             w.set("launches", n as i64);
             w.set("parked", k.parked);
             w.set("departure_tdb", k.departure_tdb);
+            w.set("from_orbit", k.from_orbit);
             arr.push(&w.to_variant());
         }
         d.set("windows", &arr);
+        // Stacks already in orbit are not launches: the cap does not count them.
         let dated: Vec<(f64, u32)> = c
             .candidates
             .iter()
             .zip(&launches_for_rolling)
+            .filter(|(k, _)| !k.from_orbit)
             .map(|(k, &n)| (k.launch_tdb, n))
             .collect();
         d.set("busiest_rolling_year", busiest_rolling_year(&dated) as i64);

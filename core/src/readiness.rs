@@ -71,6 +71,18 @@
 //! with no sourced default, and [`Readiness::built_after_go_ahead`] says which
 //! levels it applies to - every one but [`ON_THE_PAD`].
 //!
+//! # A stock already in orbit
+//! A stock can also wait in orbit instead of on the ground: stacks launched to a
+//! parking orbit years before anyone knew the rock was there, each with its own
+//! departure stage ([`crate::station_keeping::StandingStack`]). Nothing has to be
+//! launched after the go-ahead, so [`IN_ORBIT`] has no preparation delay: a stack can
+//! leave on any departure date after the decision. It pays instead in mass - drag over
+//! all the years it waited, and swinging its plane into line, since it could not have
+//! known which way it would leave ([`crate::station_keeping`]). The stacks already flew,
+//! so the launch cap does not count them. How long they waited has no source: it is
+//! the caller's dial, [`IN_ORBIT_YEARS_DEFAULT`] by default. Launches past the stock are
+//! built from scratch, as for [`IN_STORAGE`].
+//!
 //! # What this leaves to the caller
 //! *When* launches can go. How many a year can follow is the campaign's own cap
 //! ([`crate::campaign`]); whether the stock counts against it is the caller's
@@ -103,6 +115,12 @@ pub const DART_APPROVAL_TO_LAUNCH_S: f64 = 1_615.0 * 86_400.0;
 /// Barbee & Leung 2018, Summary) - nuclear-capable ones.
 pub const SOURCED_STOCK_SIZE: u32 = 2;
 
+/// How long a stock in orbit has waited when the rock is found, years - the
+/// default of a dial, not a sourced figure: no standing system has existed to say.
+/// At the shipping 600 km a decade costs well under one per cent of a stack
+/// ([`crate::station_keeping`]); the plane, not the years, is the larger cost.
+pub const IN_ORBIT_YEARS_DEFAULT: f64 = 10.0;
+
 /// How ready a defence is when a rock is found: the time to decide, and the time
 /// from the go-ahead to the first launch.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,6 +139,11 @@ pub struct Readiness {
     /// ([`crate::campaign::Stock::built_per_period`]). `false` only for
     /// [`ON_THE_PAD`], the reference where every launch already stands ready.
     pub built_after_go_ahead: bool,
+    /// Whether the stock waits **in orbit** ([`IN_ORBIT`]): its stacks are not
+    /// launched after the go-ahead, the cap does not count them, and they pay for
+    /// the wait and the plane ([`crate::station_keeping::StandingStack`]). `false`
+    /// for a stock on the ground.
+    pub stock_in_orbit: bool,
 }
 
 impl Readiness {
@@ -159,6 +182,20 @@ pub const ON_THE_PAD: Readiness = Readiness {
     preparation_s: 0.0,
     rest_preparation_s: None,
     built_after_go_ahead: false,
+    stock_in_orbit: false,
+};
+
+/// A standing defence in orbit: stacks launched to a parking orbit before the rock
+/// was found, waiting; one can leave on any departure after the decision, outside
+/// the launch cap - and the launches past the stock are built from scratch. The
+/// stacks' cost is in their mass, not in a delay (module doc).
+pub const IN_ORBIT: Readiness = Readiness {
+    name: "IN ORBIT",
+    decision_s: PDC23_DECISION_S,
+    preparation_s: 0.0,
+    rest_preparation_s: Some(BUILD_RANGE_S.1),
+    built_after_go_ahead: true,
+    stock_in_orbit: true,
 };
 
 /// A standing defence: interceptors built in advance and stored, their launchers
@@ -170,6 +207,7 @@ pub const IN_STORAGE: Readiness = Readiness {
     preparation_s: STORED_PREPARATION_S,
     rest_preparation_s: Some(BUILD_RANGE_S.1),
     built_after_go_ahead: true,
+    stock_in_orbit: false,
 };
 
 /// No standing defence: the interceptor is designed and built after the go-ahead.
@@ -180,10 +218,11 @@ pub const FROM_SCRATCH: Readiness = Readiness {
     preparation_s: BUILD_RANGE_S.1,
     rest_preparation_s: None,
     built_after_go_ahead: true,
+    stock_in_orbit: false,
 };
 
 /// Every level a readout offers, the shipping one last.
-pub const READINESS_LEVELS: [Readiness; 3] = [ON_THE_PAD, IN_STORAGE, FROM_SCRATCH];
+pub const READINESS_LEVELS: [Readiness; 4] = [ON_THE_PAD, IN_ORBIT, IN_STORAGE, FROM_SCRATCH];
 
 #[cfg(test)]
 mod tests {
@@ -250,7 +289,16 @@ mod tests {
             .iter()
             .map(|r| r.built_after_go_ahead)
             .collect();
-        assert_eq!(builds, [false, true, true]);
+        assert_eq!(builds, [false, true, true, true]);
+        // Only the in-orbit stock flies outside the cap, and it waits for nothing but
+        // the decision.
+        let in_orbit: Vec<bool> = READINESS_LEVELS.iter().map(|r| r.stock_in_orbit).collect();
+        assert_eq!(in_orbit, [false, true, false, false]);
+        assert_eq!(IN_ORBIT.delay_s(), PDC23_DECISION_S);
+        assert_eq!(
+            IN_ORBIT.build_from_tdb(impact, w),
+            IN_STORAGE.build_from_tdb(impact, w)
+        );
     }
 
     #[test]

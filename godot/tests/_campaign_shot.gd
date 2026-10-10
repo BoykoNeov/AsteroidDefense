@@ -12,13 +12,14 @@ extends Node
 ##   than the rate (the core's own count, `busiest_rolling_year`);
 ## - the rate knob is free (no solve fires on [Z]/[X]) and greys the flight line;
 ## - the readiness line: the panel opens on the shipping level (FROM SCRATCH, the
-##   rock found when the scenario starts), [W] and [ / ] are free to dial (no solve
+##   rock found when the scenario starts), [W] (through ON THE PAD, IN ORBIT, IN
+##   STORAGE), [ / ] and IN ORBIT's [7] / [8] years are free to dial (no solve
 ##   fires), and a held campaign measured at another setting is not shown as this
 ##   one's. The ON THE PAD level reproduces every count from before 2026-10-08's
 ##   standing-defence batch, so the checks below that pin those run on it;
 ## - 1/yr on the pad is 10 LAUNCHES since the map's axes were stretched (it fell
 ##   short by ~1 % while launches stopped 3.6 yr before impact; its last launch is
-##   now 2.72 yr out). Launches park in orbit and leave on a later date, the escape
+##   now 2.72 yr out) - AT THE LINE since the parked waits pay drag (2026-10-10). Launches park in orbit and leave on a later date, the escape
 ##   burn flown finite (8 firings from 400 km). The what-if row says it falls short
 ##   with no parking;
 ## - FROM SCRATCH, found 12 yr out (first launch 6.53 yr before impact), 2/yr FALLS
@@ -122,8 +123,11 @@ func _run() -> void:
 	await _settle(4)
 	await _shot("campaign_flown")
 
-	# The rate knob: free, and it greys the flight.
+	# The rate knob: free, and it greys the flight. Timed: it replans on the main
+	# thread (the plan and every what-if), so a slow planner freezes the window.
+	var tz := Time.get_ticks_msec()
 	main._input(_key(KEY_Z))
+	print("CAMPSHOT  [Z] replanned in %d ms" % (Time.get_ticks_msec() - tz))
 	await _settle(2)
 	assert(Sim.pork_campaign_rate == 1, "[Z] must step the rate down")
 	assert(not Sim.pork_campaign_solving and not Sim.pork_campaign_flying, "[Z] fired a solve")
@@ -134,6 +138,10 @@ func _run() -> void:
 	print("CAMPSHOT  %s" % Sim.campaign_what_if_label())
 	assert(Sim.campaign_count_label().begins_with("10 LAUNCHES"),
 		"1 in any 12 months on the pad is 10 launches once late launch dates are on the map")
+	# Clear by 1.2 % until the wait in orbit was charged (2026-10-10, drag at 400 km):
+	# 26 196 of 25 955 km, inside the 1 % band.
+	assert(Sim.campaign_count_label().contains("AT THE LINE"),
+		"with drag charged on the parked waits, 1/yr on the pad is at the line")
 	assert(Sim.campaign_what_if_label().contains("NO PARKING SHORT"),
 		"with no parking, 1 in any 12 months falls short")
 	assert(Sim.campaign_parking_label().contains("LONGEST WAIT"), "the 1/yr plan parks")
@@ -159,11 +167,65 @@ func _run() -> void:
 	assert(not main.planner.visible, "[M] opened the planner over the campaign panel")
 	assert(not Sim.pork_mass_solving, "[M] started a mass solve the campaign panel does not show")
 
+	# IN ORBIT, next after ON THE PAD: a stock already up, outside the rate. Its
+	# years dial is free (no solve) and moves the stock line.
+	main._input(_key(KEY_W))
+	await _settle(1)
+	assert(Sim.campaign_readiness_label().contains("IN ORBIT"), "[W] must step from ON THE PAD to IN ORBIT")
+	assert(Sim.campaign_stock_label().contains("IN ORBIT AT 600 KM, UP 10 YR"),
+		"the stock line must name the orbit and the default years: " + Sim.campaign_stock_label())
+	main._input(_key(KEY_8))
+	await _settle(1)
+	assert(not Sim.pork_campaign_solving, "the years dial fired a solve")
+	assert(Sim.campaign_stock_label().contains("UP 15 YR"), "[8] must step the years up: " + Sim.campaign_stock_label())
+	main._input(_key(KEY_7))
+	await _settle(1)
+	assert(Sim.campaign_stock_label().contains("UP 10 YR"), "[7] must step them back")
+	print("CAMPSHOT  %s" % Sim.campaign_stock_label())
+	await _shot("campaign_orbit_unsolved")
+	# Measured: two stacks in orbit, found 12 yr out (probe_standing_orbit: short at
+	# 2/yr, 10 at 6/yr - one more than two in storage).
+	main._input(_key(KEY_E))
+	assert(Sim.pork_campaign_solving, "[E] must measure the stock in orbit")
+	var to := Time.get_ticks_msec()
+	while Sim.pork_campaign_solving and Time.get_ticks_msec() - to < 900000:
+		await get_tree().process_frame
+	assert(Sim.pork_campaign_is_current(), "the in-orbit campaign must land: " + str(Sim.mission.last_error()))
+	while Sim.pork_campaign_flying and Time.get_ticks_msec() - to < 1200000:
+		await get_tree().process_frame
+	print("CAMPSHOT  in orbit, measured in %d ms, %d/yr: %s" % [Time.get_ticks_msec() - to,
+		Sim.pork_campaign_rate, Sim.campaign_count_label()])
+	assert(Sim.campaign_count_label().begins_with("FALLS SHORT"), "two in orbit, 2 a year falls short")
+	for _k in 4:
+		main._input(_key(KEY_X))
+	await _settle(2)
+	print("CAMPSHOT  in orbit %d/yr: %s | %s" % [Sim.pork_campaign_rate, Sim.campaign_count_label(),
+		Sim.campaign_stock_label()])
+	print("CAMPSHOT  %s" % Sim.campaign_windows_label())
+	assert(Sim.campaign_count_label().begins_with("10 LAUNCHES"), "two in orbit, 6 a year needs 10")
+	assert(Sim.campaign_stock_label().ends_with("2 FROM ORBIT"), "the plan must use both stacks")
+	assert(Sim.campaign_windows_label().contains("2O"), "the window list must mark the stacks")
+	_assert_per_year_cap()
+	# The years dial re-prices the held stacks for free: 30 years up, no solve.
+	for _k in 3:
+		main._input(_key(KEY_8))
+	await _settle(2)
+	assert(not Sim.pork_campaign_solving, "the years dial fired a solve")
+	assert(Sim.pork_campaign_is_current(), "a re-priced campaign is still this setting's")
+	print("CAMPSHOT  in orbit, 30 yr up, 6/yr: %s" % Sim.campaign_count_label())
+	assert(Sim.campaign_stock_label().contains("UP 30 YR"), "[8] three times must reach 30 years")
+	for _k in 3:
+		main._input(_key(KEY_7))
+	await _settle(2)
+	await _shot("campaign_orbit_6")
+	for _k in 4:
+		main._input(_key(KEY_Z))
+	await _settle(1)
 	# FROM SCRATCH: the same rock, the first launch 5.5 yr later.
 	main._input(_key(KEY_W))
 	main._input(_key(KEY_W))
 	await _settle(2)
-	assert(Sim.campaign_readiness_label().contains("FROM SCRATCH"), "[W] twice must come back round")
+	assert(Sim.campaign_readiness_label().contains("FROM SCRATCH"), "[W] round the levels must come back to FROM SCRATCH")
 	assert(not Sim.pork_campaign_is_current(), "a campaign measured on the pad shown as FROM SCRATCH's")
 	await _shot("campaign_scratch_unsolved")
 	main._input(_key(KEY_E))
@@ -228,7 +290,9 @@ func _run() -> void:
 	await _settle(1)
 
 	# IN STORAGE with the sourced stock: two interceptors from the storage date, the
-	# rest built. [W] from FROM SCRATCH wraps to ON THE PAD, then IN STORAGE.
+	# rest built. [W] from FROM SCRATCH wraps to ON THE PAD, then IN ORBIT, then IN
+	# STORAGE.
+	main._input(_key(KEY_W))
 	main._input(_key(KEY_W))
 	main._input(_key(KEY_W))
 	await _settle(1)
@@ -286,7 +350,8 @@ func _run() -> void:
 func _assert_per_year_cap() -> void:
 	var dated: Array = []
 	for w: Dictionary in Sim.pork_campaign.windows:
-		if int(w.launches) > 0:
+		# A stack already in orbit is not a launch: the cap does not count it.
+		if int(w.launches) > 0 and not bool(w.get("from_orbit", false)):
 			dated.append([float(w.launch_tdb), int(w.launches)])
 	var year_s := 365.25 * 86400.0
 	for a in dated:

@@ -523,6 +523,12 @@ var pork_campaign_stock_outside := false
 ## default, because no source gives a rate. [9] / [0] step it; free to dial (the core
 ## applies it to the held measurement by arithmetic, like the rate).
 var pork_campaign_built := 0
+## A stock waiting in orbit (IN ORBIT): how many years the stacks had been up when
+## the rock was found. No source gives it; -1 until first read, then the core's
+## default. [7] / [8] step it through CAMPAIGN_ORBIT_YEARS; free (the core re-prices
+## the held stacks by arithmetic).
+const CAMPAIGN_ORBIT_YEARS := [0.0, 1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0]
+var pork_campaign_orbit_years := -1.0
 
 signal porkchop_changed
 
@@ -2270,13 +2276,48 @@ func pork_campaign_is_current() -> bool:
 	# The stock only means something for a level that has one.
 	if not campaign_has_stock():
 		return true
+	# A stock in orbit is never counted against the rate: the mode does not apply.
+	if campaign_stock_in_orbit():
+		return int(pork_campaign.get("stock_size", -3)) == campaign_stock()
 	return int(pork_campaign.get("stock_size", -3)) == campaign_stock() \
 		and bool(pork_campaign.get("stock_outside_cap", false)) == pork_campaign_stock_outside
 
 
-## Whether the dialled level has a stock that can run out (IN STORAGE).
+## Whether the dialled level has a stock that can run out (IN ORBIT, IN STORAGE).
 func campaign_has_stock() -> bool:
 	return mission != null and bool(mission.readiness_has_stock(campaign_readiness()))
+
+
+## Whether the dialled level's stock waits in orbit (IN ORBIT): not launched, so
+## outside the rate, and priced by its years and its plane.
+func campaign_stock_in_orbit() -> bool:
+	return mission != null and bool(mission.readiness_stock_in_orbit(campaign_readiness()))
+
+
+## The years a stock in orbit had waited when the rock was found, as dialled.
+func campaign_orbit_years() -> float:
+	if pork_campaign_orbit_years < 0.0 and mission != null:
+		pork_campaign_orbit_years = float(mission.campaign_orbit_years())
+	return pork_campaign_orbit_years
+
+
+## Step the years waited through CAMPAIGN_ORBIT_YEARS. Free: the core re-prices the
+## held stacks, and the plan is re-read.
+func adjust_campaign_orbit_years(step: int) -> void:
+	if not campaign_stock_in_orbit():
+		return
+	var y := campaign_orbit_years()
+	var i := 0
+	for k in CAMPAIGN_ORBIT_YEARS.size():
+		if absf(float(CAMPAIGN_ORBIT_YEARS[k]) - y) < absf(float(CAMPAIGN_ORBIT_YEARS[i]) - y):
+			i = k
+	i = clampi(i + step, 0, CAMPAIGN_ORBIT_YEARS.size() - 1)
+	if float(CAMPAIGN_ORBIT_YEARS[i]) == y:
+		return
+	pork_campaign_orbit_years = float(CAMPAIGN_ORBIT_YEARS[i])
+	mission.set_campaign_orbit_years(pork_campaign_orbit_years)
+	_refresh_campaign_plan()
+	porkchop_changed.emit()
 
 
 ## The dialled stock size; -1 is no limit.
@@ -2298,8 +2339,9 @@ func adjust_campaign_stock(step: int) -> void:
 
 
 ## Toggle whether the stock counts against the launch-rate cap. Free to dial.
+## Inert for a stock in orbit, which is never launched and so never counted.
 func toggle_campaign_stock_mode() -> void:
-	if not campaign_has_stock():
+	if not campaign_has_stock() or campaign_stock_in_orbit():
 		return
 	pork_campaign_stock_outside = not pork_campaign_stock_outside
 	porkchop_changed.emit()
@@ -2359,6 +2401,13 @@ func campaign_readiness_label() -> String:
 		campaign_warning_yr(), str(mission.readiness_name(r)),
 		float(mission.readiness_delay_s(r)) / YEAR_S,
 		date_string((first - EPOCH0_TDB) / DAY_S)]
+	# A stock in orbit launches nothing: its delay is the decision, then a stack can
+	# leave on any departure.
+	if campaign_stock_in_orbit():
+		line = "FOUND %.1f YR BEFORE IMPACT  %s, %.1f YR TO THE GO-AHEAD  ->  STACKS LEAVE FROM %s" % [
+			campaign_warning_yr(), str(mission.readiness_name(r)),
+			float(mission.readiness_delay_s(r)) / YEAR_S,
+			date_string((first - EPOCH0_TDB) / DAY_S)]
 	if pork_launch_tdb.size() > 0 and first >= pork_launch_tdb[pork_launch_tdb.size() - 1]:
 		line += "  - AFTER THE MAP'S LAST LAUNCH DATE"
 	elif pork_launch_tdb.size() > 0 and first <= pork_launch_tdb[0]:
@@ -2373,6 +2422,20 @@ func campaign_stock_label() -> String:
 		return ""
 	var s := campaign_stock()
 	var size := "NO LIMIT" if s < 0 else str(s)
+	if campaign_stock_in_orbit():
+		var ob: Dictionary = pork_campaign.get("orbit_stock", {}) if pork_campaign_is_current() else {}
+		# Kept short: with "- n FROM ORBIT" on the end it must fit the panel (the
+		# first wording ran off its right edge on the 6/yr shot).
+		var line := "STOCK %s IN ORBIT AT %d KM, UP %s YR WHEN FOUND, OUTSIDE THE RATE, WORST-CASE PLANE - REST BUILT FROM %s" % [
+			size, int(round(float(ob.get("altitude_km", 600.0)))),
+			str(int(campaign_orbit_years())) if campaign_orbit_years() == floorf(campaign_orbit_years()) \
+				else "%.1f" % campaign_orbit_years(),
+			date_string((pork_campaign_first_built_tdb() - EPOCH0_TDB) / DAY_S)]
+		if campaign_built_binds():
+			line += ", %d A YEAR" % pork_campaign_built
+		if pork_campaign_is_current() and pork_campaign.has("stock_used"):
+			line += "  - %d FROM ORBIT" % int(pork_campaign.stock_used)
+		return line
 	var src := " (SOURCED: 2 NUCLEAR-CAPABLE)" if s == int(mission.sourced_stock_size()) else ""
 	var mode := "OUTSIDE THE RATE - WHAT IF, ALL ON ONE DAY" if pork_campaign_stock_outside \
 		else "COUNTED IN THE RATE"
@@ -2464,7 +2527,8 @@ func campaign_built_note(c: Dictionary) -> String:
 
 ## Which windows the plan uses, as "2031-04 2X" items in launch order - "1P" for a
 ## launch that goes up to a parking orbit that month and leaves on a later date
-## (the map marks it on the date it leaves).
+## (the map marks it on the date it leaves), "1O" for a stack already in orbit
+## leaving that month (no launch at all).
 func campaign_windows_label() -> String:
 	var c := pork_campaign
 	if c.is_empty():
@@ -2479,7 +2543,8 @@ func campaign_windows_label() -> String:
 	for w: Dictionary in used:
 		parts.append("%s %d%s" % [
 			date_string((float(w.launch_tdb) - EPOCH0_TDB) / DAY_S).substr(0, 7),
-			int(w.launches), "P" if bool(w.get("parked", false)) else "X"])
+			int(w.launches), "O" if bool(w.get("from_orbit", false)) \
+				else ("P" if bool(w.get("parked", false)) else "X")])
 	if parts.is_empty():
 		return ""
 	# Direction first and one space between items: at 1/yr the plan uses every
@@ -2500,7 +2565,7 @@ func campaign_parking_label() -> String:
 		return ""
 	var wait_d := 0.0
 	for w: Dictionary in c.windows:
-		if int(w.launches) > 0 and bool(w.get("parked", false)):
+		if int(w.launches) > 0 and bool(w.get("parked", false)) and not bool(w.get("from_orbit", false)):
 			wait_d = maxf(wait_d, (float(w.departure_tdb) - float(w.launch_tdb)) / DAY_S)
 	var s := "nP = PARKED AT %d KM: %.1f T STACK, %s %d S" % [
 		int(round(float(p.get("altitude_km", 0.0)))), float(p.stack_kg) / 1000.0,

@@ -323,8 +323,14 @@ Read this table first, then the session that owns the layer you are touching.
    come off a production line, a free dial with no sourced default (it starts at the
    launch rate, so nothing above moves): found 12 yr out, 6 a year needs 16 from
    scratch at 4 built a year and falls short at 3 or fewer; with the stored two, 11
-   at 3 a year (*Standing defence, part 2b: a production line*). Still open:
-   interceptors waiting in orbit for years, and detection.
+   at 3 a year (*Standing defence, part 2b: a production line*). **Part 3: DONE
+   2026-10-10** - a stock waiting in orbit (600 km, years a free dial, the plane
+   priced for the worst node) is worth *less* than the same stock in storage at long
+   warning (found 12 yr, two: 10 vs 9 launches at 6 a year), because a stack carries
+   its own departure stage; six in orbit make 7 at every rate, 1 a year included. And
+   drag is now charged on every parked wait: 1 in any 12 months on the pad is 10
+   launches **at the line** (was clear by 1.2 %) (*Standing defence, part 3: a stock
+   waiting in orbit*). Still open: detection.
 
 ---
 
@@ -651,7 +657,7 @@ That MVP delivers the whole lesson *and* an honest hit→miss flip. Everything b
 
 - Plausible launch vehicles + payload mass budgets — **both DONE** (vehicles 2026-07; mass budget 2026-10-01, *What actually hits the rock*)
 - Orbital assembly (assemble-in-orbit when payload too big for one launch) — **DONE 2026-10-07** as parking: joining buys nothing under a linear push; waiting in orbit for a better date is what pays, at a mass cost (*Orbital assembly: it is parking, not joining*); the escape burn flown finite and the plane checked the same day — 1 a year falls short by ~1 % (*The escape burn flown for real*); a year's second-best departure date offered 2026-10-08, changing nothing (*A parked launch's second-best date*)
-- Standing/ready Earth-defense systems — **parts 1-2 DONE 2026-10-08**: when the first rocket can fly, from the warning and a sourced readiness delay (*Standing defence: when the first rocket can fly*), and a stock that runs out - two stored, the rest built (*Standing defence, part 2: a stock that runs out*). Still open: interceptors waiting in orbit, detection
+- Standing/ready Earth-defense systems — **parts 1-2 DONE 2026-10-08**: when the first rocket can fly, from the warning and a sourced readiness delay (*Standing defence: when the first rocket can fly*), and a stock that runs out - two stored, the rest built (*Standing defence, part 2: a stock that runs out*); **part 3 DONE 2026-10-10**: a stock waiting in orbit, and drag on every parked wait (*Standing defence, part 3: a stock waiting in orbit*). Still open: detection
 - Multi-mission campaigns — **DONE** (2026-09-23 onward, *Several launches against one rock* and after)
 
 ---
@@ -7037,8 +7043,149 @@ greys; three `[0]` presses come back to no limit, with the flight current again.
 
 #### What this leaves
 
-- Parts 3-4: interceptors waiting in orbit for years, and detection.
+- ~~Parts 3-4: interceptors waiting in orbit for years~~ (**done 2026-10-10**, *Standing
+  defence, part 3*), and detection.
 - The lot model is one shape. Lots a year apart from the build date is the simplest
   reading of "B more each year". A line that ramps up, or a first batch bigger than
   the later ones, would need its own release schedule; `lot_release` is the one
   place to change.
+
+### Standing defence, part 3: a stock waiting in orbit - 2026-10-10 session
+
+Part 3 of the Phase 3 bullet: interceptors that wait **in orbit** for years, and what
+that waiting costs. The user's choices (2026-10-10, each the recommended default): the
+plane priced for the **worst** starting node, standing stacks stored at **600 km**,
+drag charged on the **existing** post-warning parked launches too, and the years
+waited before the warning a **free dial, default 10** (no source gives it).
+
+**Headline.** A stack in orbit is worth *less* than the same stock in a warehouse when
+the warning is long. Found 12 yr out, two stacks in orbit need **12 / 11 / 10 / 9**
+launches at 3 / 4 / 6 / 12 a year, against **11 / 10 / 9 / 9** for two in storage. The
+plane and the years are not why: a stack has to carry its own storable departure stage
+(the orbital-assembly finding, "parking carries less than a direct launch below C3
+58"), so through the window 11.1 yr out it delivers **7.0 t where a direct Falcon Heavy
+delivers 10.6 t**. What it buys is a launch slot it does not need: six in orbit make
+**7 launches at every rate, 1 a year included**, where six stored and counted in the
+rate fall short at 1 a year (only "outside the cap" - six pads on one day - made 6).
+Found 9 yr out it ties storage exactly (two: short at every rate; six: 22 at 6/yr, 15
+at 12/yr). And the drag now charged on the post-warning parked launches moves the
+orbital-assembly headline: **1 in any 12 months on the pad is still 10 launches, but
+at the line** (26 196 of 25 955 km, 0.93 %; was 26 276, clear by 1.2 %).
+
+#### The costs, sourced (`core/src/station_keeping.rs`)
+
+- **Air:** NASA TM-4527 (B. J. Anderson, ed., R. E. Smith, comp.; MSFC 1994; NTRS
+  19940031668), Table C-1, the median of the *global maximum* density per F10.7 bin -
+  the whole cycle's column ships, quiet and active are carried. Every row was read off
+  the **page images**: the text layer's 550 km "All" median reads 7.105E-12, another
+  row's number (the page says 4.442E-13). The global maximum is the day-side bulge, so
+  the drag is an upper bound.
+- **Stack:** it fits Falcon's extended fairing, "5.2 m ... overall height of 18.7 m"
+  (Falcon User's Guide 2025-05-09); tumbling, a convex body presents a quarter of its
+  surface (Cauchy): **87 m², shipping, a second upper bound**; nose-on 21 m² is the
+  bracket. `Cd` 2.2, "the default from NASA's Debris Analysis Software (DAS) version
+  3.1" (Shambaugh, 4S 2024, arXiv:2406.08342).
+- **Thrusters:** the OMS-E has 10 rated starts and the escape uses 8, so years of
+  reboosts go on Orion's auxiliary engines: R-4D-11, "489 N ... 310 seconds ... Number
+  of Burns 40" (Belair et al., SP2024_382, Table 3 - the OMS-E's own source).
+- Sizes: drag **~31 m/s a year at 400 km (~1 % of the stack), ~1.5 at 600 km**. Above
+  the table's 1 000 km the 1 000 km density is used (an upper bound); below 350 km
+  nothing is priced (the 185 km bracket row keeps a free wait, labelled).
+
+#### The plane is not free for a stack that went up before the rock was found
+
+A post-warning parked launch pre-aims its plane by its launch time (free, the
+orbital-assembly section). A standing stack could not have known its departure, so its
+node is wherever ~6.4 deg/day of regression left it. Priced for the worst node, the
+cheapest of three ways: **hold** at another height (400-1 000 km) until the node has
+turned, and come back; hold and **leave from there** (50 km grid, each height flies its
+own escape-loss table); or **turn the plane at the far end** of a 100 000 km loop
+(sin phi = sin psi / sin theta_inf, so it turns further than the bare angle - an
+estimate, not a flown manoeuvre). The worst node is not mid-gap: raising and lowering
+cost different amounts per degree, so it is where the cheaper of the two is dearest.
+Measured offline on the flown windows first (the reviewer's point: phasing might make
+the early windows unreachable): **in the first ~2 months after the go-ahead only the
+far-end turn works, ~750 m/s (about a fifth of the stack); from ~5 months, holding
+costs 1-6 %**. A departure steeper than the 28.5 deg orbit is not offered, as for any
+parked launch.
+
+#### The planner: a priced wait parks as late as its chain allows
+
+With drag, a parked launch's push *grows* as its launch date moves later (a shorter
+wait), so `parked_launches` (new `decay_per_s`) dates each one at a departure's date or
+the last launch date minus whole periods (from zero), or a direct window's date minus
+whole periods (from one) - and only those. Pinned by brute force on a 2-day grid, a
+hand-made set and 20 random ones, at two decay rates and two last-launch dates. **Each
+of the three rules is mutation-tested:** the first brute force (coarse targets, every
+window a departure, launches to day 300) passed with *any* of them removed; it took a
+fine target sweep, direct-only windows (scale 0) and a last launch date before some
+departures to make each one necessary. The window choice in the measurement ranks by
+the key times `e^(-k (t_window - span start))` (the common `e^(k t)` drops out). Cost:
+**10 809 parked launches offered** on the shipping map (717-1 361 before), ~0.3 s a
+plan on a synthetic set of the same size (`probe_priced_wait_planner_cost`).
+
+`plan_campaign_orbit_stocked`: `k <= size` stacks through the best of their own
+windows plus the best built-only plan (chains, or the production line). The stacks are
+not launches, so the cap does not count them. Control: handed the launched windows as
+its own, it **is** `plan_campaign_stocked` outside the cap - same count, same |B|,
+same launches folded back - at every size, cap, production rate and target.
+
+#### The numbers (Falcon Heavy, `probe_standing_orbit`, 1 162 s)
+
+The measurement is the stock flown outside the cap from the go-ahead (found + 172 d),
+the rest built from scratch; the stacks are priced on its flown windows (so counts are
+for the windows flown). Shipping: 600 km, worst node, upper-bound area, 10 yr waited.
+
+| | 1/yr | 2/yr | 3/yr | 4/yr | 6/yr | 12/yr |
+|---|---|---|---|---|---|---|
+| found 12 yr, **2 in orbit** | short | short | 12 (line) | 11 | 10 | 9 (line) |
+| found 12 yr, 2 in storage, counted (part 2) | short | short | 11 | 10 | 9 (line) | 9 |
+| found 12 yr, **6 in orbit** | **7** | 7 | 7 | 7 | 7 | 7 |
+| found 12 yr, 6 in storage, counted (part 2) | short | 7 | 7 | 6 | 6 | 6 |
+| found 9 yr, **2 in orbit** | short | short | short | short | short | short (25 013 km) |
+| found 9 yr, **6 in orbit** | short | short | short | short | 22 (line) | 15 |
+| found 9 yr, 6 in storage, counted (part 2) | short | short | short | short | 22 | 15 |
+
+- **The years barely matter at 600 km:** 0 -> 20 yr waited takes 0.2-0.4 % off |B|; it
+  moves one count - found 9 yr, 6 in orbit, 6/yr: 21 at 0-5 yr, 22 at 10-20 (both at
+  the line). **The area barely matters either:** nose-on moves only that count (21 at
+  10 yr).
+- Flown whole: found 12, 2 in orbit, 6/yr (10, 2 from orbit) perigee 20 953 km; 6 in
+  orbit, 2 and 6/yr (7, 6 from orbit) 20 801 km; found 9, 6 in orbit, 6/yr (22) 20 098
+  km. Nonlinearity 2.2-2.8e-4.
+- The probe's "on the ground, outside the cap" row is a stock ready **at the go-ahead**
+  with no preparation - a reference, not a level.
+- Part 2's storage rows were measured before the post-warning parked launches paid
+  drag; they were not re-run.
+
+#### Drag on the post-warning parked launches (`probe_orbital_assembly`, `ASSEMBLY_ALSO=app`)
+
+1 a year: **10 launches, at the line** (26 196 km; the longest wait is 393 d, most
+21-138 d), flown perigee 20 233 km, nonlinearity 2.2e-4. 2..12 a year: **6**,
+unchanged. The height bracket is unchanged in counts (10 from 400 to 800 km, 9 from
+1 000 km up); what-ifs 5-4 / 3 / 2 as before.
+
+#### The frontend
+
+`[W]` now cycles ON THE PAD -> **IN ORBIT** -> IN STORAGE -> FROM SCRATCH (the shipping
+level stays last; the scripts find it as the last, so no index moved under them). At
+IN ORBIT the readiness line reads `... 0.5 YR TO THE GO-AHEAD -> STACKS LEAVE FROM
+<date>`, the stock line `STOCK n IN ORBIT AT 600 KM, UP 10 YR WHEN FOUND, OUTSIDE THE
+RATE, WORST-CASE PLANE - REST BUILT FROM <date> - k FROM ORBIT`, and
+`[7]` / `[8]` step the years (0, 1, 2, 5, 10, 15, 20, 30) for free - the binding
+re-prices the held stacks (`set_campaign_orbit_years`; their escape tables were flown
+on the measurement's worker, and a dial moved during a measurement is applied when it
+lands). `[Q]` is inert there. A stack shows as `nO` in the window list and on the map;
+the busiest-12-months count leaves it out. Binding: `readiness_stock_in_orbit(i)`,
+`campaign_orbit_years()`, and `orbit_stock` / `from_orbit` in `campaign_plan`.
+
+#### What this leaves
+
+- **Part 4: detection** - where the warning comes from.
+- Leaving a few days off a window's best date when the node lines up (every ~28 days)
+  would be cheaper than holding at another height for the worst node; it needs window
+  values off the best date. Hydrogen and the 63.8 t what-ifs are not offered for
+  standing stacks.
+- Stacks are offered only on flown windows (chosen for a stock flown direct outside the
+  cap); flying pool windows by the stacks' own key, as parking does, is not done.
+- Ageing, refuelling and replacement over a service life are not modelled (no source).

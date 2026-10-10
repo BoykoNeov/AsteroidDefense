@@ -421,8 +421,9 @@ func _draw_keys(pos: Vector2, dim: Color) -> void:
 ##
 ## A parked launch is drawn on the transfer it leaves on - the map is a map of
 ## transfers, and the day it went up to orbit has none - as "1P" beside any direct
-## launches through the same window ("2X+1P"). Parked launches the plan does not use
-## are not drawn: they are copies of flown windows, hundreds of them.
+## launches through the same window ("2X+1P"), and a stack already in orbit as "1O".
+## Parked launches the plan does not use are not drawn: they are copies of flown
+## windows, hundreds of them.
 func _draw_campaign_overlay(plot: Rect2, bright: Color, dim: Color, faint: Color) -> void:
 	var c: Dictionary = Sim.pork_campaign
 	if not Sim.pork_campaign_is_current() or Sim.pork_rows < 2 or Sim.pork_cols < 2:
@@ -436,27 +437,29 @@ func _draw_campaign_overlay(plot: Rect2, bright: Color, dim: Color, faint: Color
 	# nearest cell's index, which would put it up to half a cell off.
 	var a0: float = Sim.pork_arrival_tdb[0]
 	var da: float = Sim.pork_arrival_tdb[1] - a0
-	# Launches per map cell of the transfer, [departure, arrival, direct, parked] -
+	# Launches per map cell of the transfer, [departure, arrival, direct, parked,
+	# from orbit] -
 	# by cell, not by exact dates: two transfers days apart (a parked pair leaving
 	# ten days before a direct pair, at 2/yr) drew two labels on top of each other.
 	# A parked launch carries its departure window's cell indices.
 	var on: Dictionary = {}
 	for w: Dictionary in c.windows:
 		var parked := bool(w.get("parked", false))
+		var orbit := bool(w.get("from_orbit", false))
 		var n := int(w.launches)
 		if parked and n <= 0:
 			continue
 		var dep := float(w.get("departure_tdb", w.launch_tdb))
 		var key := "%d|%d" % [int(w.launch_index), int(w.arrival_index)]
-		var tally: Array = on.get(key, [dep, float(w.arrival_tdb), 0, 0])
-		tally[3 if parked else 2] += n
+		var tally: Array = on.get(key, [dep, float(w.arrival_tdb), 0, 0, 0])
+		tally[4 if orbit else (3 if parked else 2)] += n
 		on[key] = tally
 	for key: String in on:
 		var tally: Array = on[key]
 		var p := plot.position + Vector2(
 			(float(tally[1]) - a0) / da * cw, (float(tally[0]) - t0) / dt * ch)
 		var r := Rect2(p - Vector2(2, 2), Vector2(cw + 4.0, ch + 4.0))
-		if int(tally[2]) + int(tally[3]) <= 0:
+		if int(tally[2]) + int(tally[3]) + int(tally[4]) <= 0:
 			draw_rect(r, dim, false, 1.0)
 			continue
 		var label: PackedStringArray = []
@@ -464,6 +467,8 @@ func _draw_campaign_overlay(plot: Rect2, bright: Color, dim: Color, faint: Color
 			label.append("%dX" % int(tally[2]))
 		if int(tally[3]) > 0:
 			label.append("%dP" % int(tally[3]))
+		if int(tally[4]) > 0:
+			label.append("%dO" % int(tally[4]))
 		draw_rect(r.grow(1.0), bright, false, 2.0)
 		_t(Vector2(r.end.x + 4.0, r.position.y + ch + 2.0), "+".join(label), bright, _fs - 2)
 
@@ -596,7 +601,9 @@ func _draw_campaign_panel(origin: Vector2, bright: Color, mid: Color, dim: Color
 	_t(Vector2(x, y), wi, faint, _fs - 3)
 	y += lh
 	var keys := "[Z]/[X] PER 12 MO  [9]/[0] BUILT/YR  [ / ] WARNING  [W] READINESS  [E] MEASURE / FLY  [L] LAUNCHER  [C] WINDOWS"
-	if Sim.campaign_has_stock():
+	if Sim.campaign_stock_in_orbit():
+		keys = "[Z]/[X] PER 12 MO  [9]/[0] BUILT/YR  [ / ] WARNING  [W] READINESS  [; / '] STOCK  [7]/[8] YEARS UP  [E] MEASURE / FLY"
+	elif Sim.campaign_has_stock():
 		keys = "[Z]/[X] PER 12 MO  [9]/[0] BUILT/YR  [ / ] WARNING  [W] READINESS  [; / '] STOCK  [Q] STOCK MODE  [E] MEASURE / FLY"
 	_t(Vector2(x, y), keys,
 		dim, _fs - 2)

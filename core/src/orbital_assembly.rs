@@ -125,11 +125,18 @@
 //! is not sourced here.) Holding the plane on schedule over a year means holding
 //! the altitude - part of the station-keeping below.
 //!
+//! # The wait is charged (2026-10-10)
+//! Drag make-up during the wait is priced by [`crate::station_keeping`]: NASA
+//! TM-4527's density table (the whole solar cycle's median of the day-side
+//! maximum), the stack filling Falcon's extended fairing and tumbling - both upper
+//! bounds - and made up by Orion's auxiliary engines (310 s), not the OMS-E's
+//! spare starts. At 400 km that is ~31 m/s a year, ~1 % of the stack: what is left
+//! after a wait `t` is `e^(-k t)` ([`ParkedDelivery::wait_decay_per_s`]), and the
+//! planner parks each launch as late as its chain allows
+//! ([`crate::campaign::parked_launches`]). The plane trims stay free: the plane is
+//! pre-aimed (above).
+//!
 //! # What this does not model
-//! - **Station-keeping during the wait**: drag make-up at 400 km and the trims that
-//!   keep the plane on schedule. Small at 400 km (a few m/s a year at typical solar
-//!   activity, several times that near solar maximum - an unsourced estimate), and
-//!   a bias toward parking; the two spare starts are for it.
 //! - **The Moon and Sun during the phasing loops**, which the apogee cap keeps
 //!   small, and Earth's oblateness during them.
 //! - **Rendezvous and docking** (two parked launches leaving the same date are
@@ -244,6 +251,9 @@ pub struct ParkedDelivery {
     pub parking_altitude_m: f64,
     /// How the escape burn is flown.
     pub escape: EscapeBurn,
+    /// What waiting in the parking orbit costs ([`crate::station_keeping`]), or
+    /// `None` for a free wait (the model before 2026-10-10, kept for comparison).
+    pub waiting: Option<crate::station_keeping::Waiting>,
 }
 
 /// How a parked stack's escape burn is priced.
@@ -357,6 +367,32 @@ impl ParkedDelivery {
     pub fn impact_mass_kg(&self, c3_km2_s2: f64) -> f64 {
         impact_mass_kg(self.separated_mass_kg(c3_km2_s2))
     }
+
+    /// How fast waiting eats the stack, per second: what is left after `t` seconds
+    /// in the parking orbit is `e^(−k t)` ([`crate::station_keeping::Waiting`]).
+    /// `0` for a free wait. Priced at the full stack mass (see
+    /// [`DragModel::mass_left`](crate::station_keeping::DragModel::mass_left)).
+    ///
+    /// # Panics
+    /// If the parking altitude is outside the density table (350-1 000 km) - a wait
+    /// that cannot be priced is not offered as free.
+    pub fn wait_decay_per_s(&self) -> f64 {
+        self.waiting.map_or(0.0, |w| {
+            w.decay_per_s(self.parking_altitude_m, self.stack_kg)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{}: no density for a {} km parking orbit",
+                        self.name,
+                        self.parking_altitude_m / 1e3
+                    )
+                })
+        })
+    }
+
+    /// [`impact_mass_kg`](Self::impact_mass_kg) after `wait_s` in the parking orbit.
+    pub fn impact_mass_after_wait_kg(&self, c3_km2_s2: f64, wait_s: f64) -> f64 {
+        self.impact_mass_kg(c3_km2_s2) * (-self.wait_decay_per_s() * wait_s.max(0.0)).exp()
+    }
 }
 
 /// The loss table's knot spacing in `C3`, km²/s². Linear between knots is good to
@@ -420,6 +456,7 @@ pub const SHIPPING_PARKED_DELIVERY: ParkedDelivery = ParkedDelivery {
         firings: SHIPPING_ESCAPE_FIRINGS,
         apogee_cap_m: SHIPPING_APOGEE_CAP_M,
     },
+    waiting: Some(crate::station_keeping::SHIPPING_WAITING),
 };
 
 /// The parked delivery `vehicle` can fly, or `None` where nothing sourced says
@@ -449,6 +486,7 @@ pub const WHAT_IF_PARKED_DELIVERIES: [ParkedDelivery; 3] = [
         engine: RL10B_2,
         parking_altitude_m: PARKING_ALTITUDE_M,
         escape: EscapeBurn::Impulsive,
+        waiting: Some(crate::station_keeping::SHIPPING_WAITING),
     },
     ParkedDelivery {
         name: "63.8 t stack, storable",
@@ -456,6 +494,7 @@ pub const WHAT_IF_PARKED_DELIVERIES: [ParkedDelivery; 3] = [
         engine: ORION_OMS_E,
         parking_altitude_m: PARKING_ALTITUDE_M,
         escape: EscapeBurn::Impulsive,
+        waiting: Some(crate::station_keeping::SHIPPING_WAITING),
     },
     ParkedDelivery {
         name: "63.8 t stack, hydrogen",
@@ -463,6 +502,7 @@ pub const WHAT_IF_PARKED_DELIVERIES: [ParkedDelivery; 3] = [
         engine: RL10B_2,
         parking_altitude_m: PARKING_ALTITUDE_M,
         escape: EscapeBurn::Impulsive,
+        waiting: Some(crate::station_keeping::SHIPPING_WAITING),
     },
 ];
 

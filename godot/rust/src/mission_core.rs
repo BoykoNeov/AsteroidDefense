@@ -46,8 +46,8 @@ use nalgebra::{Matrix2, Vector2, Vector3};
 
 use asteroid_core::campaign::{
     best_ahead, campaign_impulses, parked_launch_dates, parked_launches, parked_window,
-    plan_campaign, plan_campaign_rolling, plan_campaign_stocked, CampaignOutcome, CampaignPlan,
-    CampaignWindow, Stock,
+    plan_campaign, plan_campaign_orbit_stocked, plan_campaign_rolling, plan_campaign_stocked,
+    CampaignOutcome, CampaignPlan, CampaignWindow, Stock,
 };
 use asteroid_core::deflection::DeflectionError;
 use asteroid_core::ephemeris::Ephemeris;
@@ -3481,6 +3481,31 @@ pub struct CampaignCandidate {
     pub parked: bool,
     /// When the transfer leaves Earth, TDB s - `launch_tdb` for a direct launch.
     pub departure_tdb: f64,
+    /// Whether this is a stack **already in orbit** when the rock was found
+    /// ([`OrbitStock`]): no launch at all - `launch_tdb` is its departure, the cap
+    /// does not count it, and its masses are what is left after the years, the
+    /// plane and the escape ([`asteroid_core::station_keeping::StandingStack`]). Its
+    /// shift is the departure window's flown shift scaled by the masses' ratio, as
+    /// for a parked launch. These come after every other entry.
+    pub from_orbit: bool,
+}
+
+/// A stock of stacks waiting in orbit when the rock is found
+/// ([`asteroid_core::readiness::IN_ORBIT`]), as applied to a measurement
+/// ([`CampaignCandidates::with_orbit_stock`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OrbitStock {
+    /// How many stacks are up there.
+    pub size: u32,
+    /// The go-ahead, TDB s: found plus the decision - the first date one may leave.
+    /// **Not** clamped to the map's first date: the plane has from here to swing.
+    pub go_ahead_tdb: f64,
+    /// How long the stacks have been in orbit at the go-ahead, s: the years before
+    /// the rock was found (a dial, [`asteroid_core::readiness::IN_ORBIT_YEARS_DEFAULT`])
+    /// plus the decision.
+    pub in_orbit_at_go_ahead_s: f64,
+    /// The stack.
+    pub stack: asteroid_core::station_keeping::StandingStack,
 }
 
 /// The expensive, **cap-independent** half of a campaign: every period's best
@@ -3517,6 +3542,11 @@ pub struct CampaignCandidates {
     /// every launch from the first date on is ready. Part of the measurement: the
     /// windows flown were chosen for plans under it.
     pub stock: Option<Stock>,
+    /// A stock waiting in orbit, or `None`. When set, the `from_orbit` entries at the
+    /// end of `candidates` are its departures, and `stock` holds only the build date
+    /// and production line of the launches past it. Arithmetic on the measurement
+    /// ([`with_orbit_stock`](Self::with_orbit_stock)), so its dials are free.
+    pub orbit_stock: Option<OrbitStock>,
 }
 
 /// The rolling-cap planner, or the stocked one when there is a stock.
@@ -3551,6 +3581,9 @@ impl CampaignCandidates {
     /// rule, free (no propagation): every window it can choose was flown for every
     /// rate up to [`CAMPAIGN_MAX_RATE`] when the candidates were measured.
     pub fn plan(&self, max_launches: u32) -> Result<CampaignOutcome, ScenarioError> {
+        if self.orbit_stock.is_some() {
+            return self.plan_with_orbit(max_launches, self.stock);
+        }
         plan_under(
             Vector2::new(self.nominal_b_m.0, self.nominal_b_m.1),
             self.target_b_m,
@@ -3559,6 +3592,115 @@ impl CampaignCandidates {
             self.stock.as_ref(),
         )
         .map_err(|e| ScenarioError::Integration(format!("launch campaign: planner: {e}")))
+    }
+
+    /// The plan with a stock in orbit ([`plan_campaign_orbit_stocked`]): the
+    /// `from_orbit` entries are its departures, everything else is launched under
+    /// the cap, built from `built`'s date at its production rate (no date: every
+    /// launch ready from the first).
+    fn plan_with_orbit(
+        &self,
+        max_launches: u32,
+        built: Option<Stock>,
+    ) -> Result<CampaignOutcome, ScenarioError> {
+        let o = self
+            .orbit_stock
+            .expect("plan_with_orbit is only called with a stock in orbit");
+        let n = self.candidates.iter().take_while(|k| !k.from_orbit).count();
+        debug_assert!(self.candidates[n..].iter().all(|k| k.from_orbit));
+        let built = built.unwrap_or(Stock {
+            size: 0,
+            build_from: Epoch::from_tdb_seconds_past_j2000(self.launch_span_tdb.0),
+            mode: asteroid_core::campaign::StockMode::OutsideCap,
+            built_per_period: asteroid_core::campaign::UNLIMITED_BUILDS,
+        });
+        plan_campaign_orbit_stocked(
+            Vector2::new(self.nominal_b_m.0, self.nominal_b_m.1),
+            self.target_b_m,
+            &self.windows[..n],
+            &self.windows[n..],
+            max_launches,
+            CAMPAIGN_PERIOD_S,
+            o.size,
+            &built,
+        )
+        .map_err(|e| ScenarioError::Integration(format!("launch campaign: planner: {e}")))
+    }
+
+    /// The same measurement with a stock waiting in orbit (replacing any held):
+    /// every flown direct window dated from the go-ahead on becomes a departure a
+    /// stack can take, pushing the window's flown shift times what is left of the
+    /// stack after its years, its plane and its escape over what a direct launch
+    /// carries ([`asteroid_core::station_keeping::StandingStack::deliver`]).
+    /// Arithmetic, no flight. A window steeper than the stack's orbit, or one no way
+    /// of swinging the plane reaches, is not offered.
+    ///
+    /// The departures are offered on flown windows only - the windows the measurement
+    /// chose for a stock flown straight to the rock outside the cap - so a count is
+    /// for the windows flown, like every count here.
+    pub fn with_orbit_stock(&self, o: &OrbitStock) -> CampaignCandidates {
+        let mut out = self.without_orbit();
+        let n = out.candidates.len();
+        for i in 0..n {
+            let (k, w) = (out.candidates[i], out.windows[i]);
+            if k.parked || k.impact_mass_kg <= 0.0 || k.launch_tdb < o.go_ahead_tdb {
+                continue;
+            }
+            let v = k.v_inf_departure;
+            if v.norm() <= 0.0 {
+                continue;
+            }
+            let dec = (v.z / v.norm()).asin();
+            let hold = k.launch_tdb - o.go_ahead_tdb;
+            let Some(d) = o
+                .stack
+                .deliver(k.c3_km2_s2, dec, o.in_orbit_at_go_ahead_s, hold)
+            else {
+                continue;
+            };
+            let impact = impact_mass_kg(d.separated_kg);
+            let ratio = impact / k.impact_mass_kg;
+            out.candidates.push(CampaignCandidate {
+                payload_kg: d.separated_kg,
+                impact_mass_kg: impact,
+                proxy_along_track_dv_ms: ratio * k.proxy_along_track_dv_ms,
+                shift_per_launch_m: (
+                    ratio * k.shift_per_launch_m.0,
+                    ratio * k.shift_per_launch_m.1,
+                ),
+                parked: true,
+                departure_tdb: k.launch_tdb,
+                from_orbit: true,
+                ..k
+            });
+            out.windows
+                .push(parked_window(&w, ratio, w.launch_epoch, w.period));
+        }
+        out.orbit_stock = Some(*o);
+        out
+    }
+
+    /// Everything but the stock in orbit.
+    fn without_orbit(&self) -> CampaignCandidates {
+        let keep: Vec<bool> = self.candidates.iter().map(|k| !k.from_orbit).collect();
+        CampaignCandidates {
+            candidates: self
+                .candidates
+                .iter()
+                .zip(&keep)
+                .filter(|(_, &y)| y)
+                .map(|(k, _)| *k)
+                .collect(),
+            windows: self
+                .windows
+                .iter()
+                .zip(&keep)
+                .filter(|(_, &y)| y)
+                .map(|(w, _)| *w)
+                .collect(),
+            orbit_stock: None,
+            ..self.clone()
+        }
     }
 
     /// [`plan`](Self::plan) with built impactors coming off a production line,
@@ -3594,6 +3736,17 @@ impl CampaignCandidates {
             return self.plan(max_launches);
         }
         let first_built = Epoch::from_tdb_seconds_past_j2000(first_built_tdb);
+        if self.orbit_stock.is_some() {
+            return self.plan_with_orbit(
+                max_launches,
+                Some(Stock {
+                    size: 0,
+                    build_from: first_built,
+                    mode: asteroid_core::campaign::StockMode::OutsideCap,
+                    built_per_period: built_per_year,
+                }),
+            );
+        }
         let line = match self.stock {
             Some(s) => Stock {
                 built_per_period: built_per_year,
@@ -3635,8 +3788,18 @@ impl CampaignCandidates {
         .map_err(|e| ScenarioError::Integration(format!("launch campaign: planner: {e}")))
     }
 
-    /// The direct launches only - every candidate that was flown, none parked.
+    /// The direct launches only - every candidate that was flown, none parked. A
+    /// stock in orbit is kept (it is not a way of flying a launch).
     pub fn direct_only(&self) -> CampaignCandidates {
+        let out = self.direct_launches();
+        match &self.orbit_stock {
+            Some(o) => out.with_orbit_stock(o),
+            None => out,
+        }
+    }
+
+    /// The flown direct launches alone: no parked launch, no stock in orbit.
+    fn direct_launches(&self) -> CampaignCandidates {
         let keep: Vec<bool> = self.candidates.iter().map(|k| !k.parked).collect();
         CampaignCandidates {
             candidates: self
@@ -3654,6 +3817,7 @@ impl CampaignCandidates {
                 .map(|(w, _)| *w)
                 .collect(),
             parked_delivery: None,
+            orbit_stock: None,
             ..self.clone()
         }
     }
@@ -3675,7 +3839,7 @@ impl CampaignCandidates {
         &self,
         delivery: &ParkedDelivery,
     ) -> Result<CampaignCandidates, ScenarioError> {
-        let mut out = self.direct_only();
+        let mut out = self.direct_launches();
         let scale: Vec<f64> = out
             .candidates
             .iter()
@@ -3690,6 +3854,9 @@ impl CampaignCandidates {
             .collect();
         // Under a limited stock a chain can also start on the build date.
         let also: Vec<Epoch> = self.stock.iter().map(|s| s.build_from).collect();
+        // Waiting in the parking orbit costs drag make-up: what is left after the
+        // wait is `wait_factor` of the stack, and the planner gets the dates that
+        // sit as late as a chain allows (`parked_launches`).
         let choices = parked_launches(
             &out.windows,
             &scale,
@@ -3697,18 +3864,20 @@ impl CampaignCandidates {
             &also,
             Epoch::from_tdb_seconds_past_j2000(self.launch_span_tdb.1),
             CAMPAIGN_PERIOD_S,
+            delivery.wait_decay_per_s(),
         )
         .map_err(|e| ScenarioError::Integration(format!("launch campaign: parking: {e}")))?;
         for ch in choices {
             let i = ch.departs_with;
-            let (k, w, s) = (out.candidates[i], out.windows[i], scale[i]);
+            let f = ch.wait_factor;
+            let (k, w, s) = (out.candidates[i], out.windows[i], scale[i] * f);
             let t = ch.launch_epoch.tdb_seconds_past_j2000();
             let period = campaign_period(t, self.period_origin_tdb);
             out.candidates.push(CampaignCandidate {
                 period,
                 launch_tdb: t,
-                payload_kg: delivery.separated_mass_kg(k.c3_km2_s2),
-                impact_mass_kg: delivery.impact_mass_kg(k.c3_km2_s2),
+                payload_kg: delivery.separated_mass_kg(k.c3_km2_s2) * f,
+                impact_mass_kg: delivery.impact_mass_kg(k.c3_km2_s2) * f,
                 proxy_along_track_dv_ms: s * k.proxy_along_track_dv_ms,
                 shift_per_launch_m: (s * k.shift_per_launch_m.0, s * k.shift_per_launch_m.1),
                 parked: true,
@@ -3719,7 +3888,11 @@ impl CampaignCandidates {
                 .push(parked_window(&w, s, ch.launch_epoch, period));
         }
         out.parked_delivery = Some(*delivery);
-        Ok(out)
+        // A stock in orbit is not a way of flying a launch: it stays, after them.
+        Ok(match &self.orbit_stock {
+            Some(o) => out.with_orbit_stock(o),
+            None => out,
+        })
     }
 }
 
@@ -4483,6 +4656,7 @@ pub fn measure_campaign_candidates_from(
                 shift_per_launch_m: (shift.x, shift.y),
                 parked: false,
                 departure_tdb: w.launch_tdb,
+                from_orbit: false,
             },
             CampaignWindow {
                 launch_epoch: Epoch::from_tdb_seconds_past_j2000(w.launch_tdb),
@@ -4647,9 +4821,31 @@ pub fn measure_campaign_candidates_from(
             .iter()
             .map(|s| s.build_from.tdb_seconds_past_j2000())
             .collect();
-        let launch_dates = parked_launch_dates(&bases, span.0, &also, span.1, CAMPAIGN_PERIOD_S);
+        let free_dates = parked_launch_dates(&bases, span.0, &also, span.1, CAMPAIGN_PERIOD_S);
         let mut fly_pool: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         for d in &measured {
+            // A priced wait: launches sit as late as a chain allows (the dates of
+            // `parked_launches` with a decay), and a window's worth to a launch on
+            // date `t` is its key times `e^(-k (t_window - t))` - the common
+            // `e^(k t)` drops out of the comparison, so `best_ahead` ranks by the
+            // key times `e^(-k (t_window - span start))`.
+            let k_wait = d.wait_decay_per_s();
+            let late_dates;
+            let launch_dates: &[f64] = if k_wait > 0.0 {
+                let mut anchors = bases.clone();
+                anchors.push(span.1);
+                late_dates = asteroid_core::campaign::parked_launch_dates_late(
+                    &anchors,
+                    &bases,
+                    span.0,
+                    span.1,
+                    CAMPAIGN_PERIOD_S,
+                );
+                &late_dates
+            } else {
+                &free_dates
+            };
+            let discount = |t: f64| (-k_wait * (t - span.0)).exp();
             let ratio = |c3: f64, impact_kg: f64, v_inf: Vector3<f64>| {
                 if impact_kg > 0.0 && parking_plane_reaches(v_inf) {
                     d.impact_mass_kg(c3) / impact_kg
@@ -4663,7 +4859,8 @@ pub fn measure_campaign_candidates_from(
                     if (c.proxy_along_track_dv_ms > 0.0) == prograde {
                         let k =
                             campaign_proxy(c.proxy_along_track_dv_ms, impact_tdb - c.arrival_tdb)
-                                * ratio(c.c3_km2_s2, c.impact_mass_kg, c.v_inf_departure);
+                                * ratio(c.c3_km2_s2, c.impact_mass_kg, c.v_inf_departure)
+                                * discount(c.launch_tdb);
                         flown.push((c.launch_tdb, k));
                     }
                 }
@@ -4676,13 +4873,14 @@ pub fn measure_campaign_candidates_from(
                                 w.metrics.c3_km2_s2,
                                 w.delivery.impact_mass_kg,
                                 w.metrics.v_inf_departure,
-                            );
+                            )
+                            * discount(w.launch_tdb);
                         from.push(i);
                         open.push((w.launch_tdb, k));
                     }
                 }
                 fly_pool.extend(
-                    best_ahead(&launch_dates, &flown, &open)
+                    best_ahead(launch_dates, &flown, &open)
                         .into_iter()
                         .map(|j| from[j]),
                 );
@@ -4719,6 +4917,7 @@ pub fn measure_campaign_candidates_from(
         launch_span_tdb: span,
         parked_delivery: None,
         stock,
+        orbit_stock: None,
     };
     match parking {
         Some(p) => direct.with_parking(&p),
@@ -6783,6 +6982,258 @@ first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown,
         }
     }
 
+    /// Probe, run by hand (`--ignored --nocapture`): standing defence, part 3 - a
+    /// stock waiting **in orbit**. Found `STANDING_WARNING_YR` years out (default
+    /// 12,9), for each stock size in `STANDING_STOCK` (default 2,6): one measurement
+    /// (the stock flown outside the cap from the go-ahead, the rest built from
+    /// scratch), then arithmetic - every rate, the years waited before the warning
+    /// (0, 5, 10, 20), the drag on the upper-bound area and nose-on, and the ground
+    /// stock flown outside the cap for comparison. Lists the stacks' departures and
+    /// flies the 6-a-year plan whole.
+    #[test]
+    #[ignore]
+    fn probe_standing_orbit() {
+        if !have_kernels() {
+            return;
+        }
+        use asteroid_core::campaign::{StockMode, UNLIMITED_BUILDS};
+        use asteroid_core::launch_vehicle::FALCON_HEAVY_EXPENDABLE;
+        use asteroid_core::readiness::{IN_ORBIT, YEAR_S};
+        use asteroid_core::station_keeping::{
+            StandingStack, Waiting, NOSE_ON_DRAG, SHIPPING_STANDING_STACK,
+        };
+        let vehicle = &FALCON_HEAVY_EXPENDABLE;
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+        let impact = mc.impact_tdb_seconds();
+        let yr = YEAR_S;
+        let view = PorkchopView::build(&scenario, 120, 120).expect("grid");
+        let map_first = view.launch_tdb()[0];
+        let list = |key: &str, default: &str| -> Vec<f64> {
+            std::env::var(key)
+                .unwrap_or_else(|_| default.into())
+                .split(',')
+                .filter_map(|x| x.trim().parse().ok())
+                .collect()
+        };
+        let rates = [1u32, 2, 3, 4, 6, 12];
+        let describe = |o: &CampaignOutcome, target: f64| -> String {
+            match o {
+                CampaignOutcome::Planned(p) => {
+                    let m = p.predicted_impact_parameter() / target - 1.0;
+                    if m < 0.01 {
+                        format!("{} (line {:+.2}%)", p.total_launches, 100.0 * m)
+                    } else {
+                        format!("{}", p.total_launches)
+                    }
+                }
+                CampaignOutcome::Unreachable(p) => format!(
+                    "short {:.0}/{:.0}",
+                    p.predicted_impact_parameter() / 1e3,
+                    target / 1e3
+                ),
+                CampaignOutcome::AlreadyClear => "clear".into(),
+            }
+        };
+        let nose_on = StandingStack {
+            delivery: asteroid_core::orbital_assembly::ParkedDelivery {
+                waiting: Some(Waiting {
+                    drag: NOSE_ON_DRAG,
+                    ..asteroid_core::station_keeping::SHIPPING_WAITING
+                }),
+                ..SHIPPING_STANDING_STACK.delivery
+            },
+            ..SHIPPING_STANDING_STACK
+        };
+        for warning_yr in list("STANDING_WARNING_YR", "12,9") {
+            let w = warning_yr * yr;
+            let go = impact - w + IN_ORBIT.decision_s;
+            let first = IN_ORBIT.first_launch_tdb(impact, w).max(map_first);
+            let build = IN_ORBIT
+                .build_from_tdb(impact, w)
+                .expect("IN ORBIT builds the rest")
+                .max(first);
+            for size in list("STANDING_STOCK", "2,6") {
+                let size = size as u32;
+                let ground = Stock {
+                    size,
+                    build_from: Epoch::from_tdb_seconds_past_j2000(build),
+                    mode: StockMode::OutsideCap,
+                    built_per_period: UNLIMITED_BUILDS,
+                };
+                let t0 = std::time::Instant::now();
+                let c = measure_campaign_candidates(
+                    &scenario,
+                    &view,
+                    vehicle,
+                    first,
+                    Some(first),
+                    Some(ground),
+                )
+                .expect("candidates");
+                println!(
+                    "\nfound {warning_yr} yr out, stock {size}: go-ahead {:.2} yr before impact, built from {:.2} yr ({} flown windows, {:.0} s)",
+                    (impact - go) / yr,
+                    (impact - build) / yr,
+                    c.candidates.iter().filter(|k| !k.parked).count(),
+                    t0.elapsed().as_secs_f64()
+                );
+                let row = |c: &CampaignCandidates| -> String {
+                    rates
+                        .iter()
+                        .map(|&r| {
+                            format!(
+                                "{r}/yr {}",
+                                describe(&c.plan(r).expect("plan"), c.target_b_m)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                };
+                println!("  on the ground, outside the cap: {}", row(&c));
+                for (label, stack) in [
+                    ("upper-bound area", SHIPPING_STANDING_STACK),
+                    ("nose-on", nose_on),
+                ] {
+                    for years in [0.0, 5.0, 10.0, 20.0] {
+                        let o = OrbitStock {
+                            size,
+                            go_ahead_tdb: go,
+                            in_orbit_at_go_ahead_s: years * yr + IN_ORBIT.decision_s,
+                            stack,
+                        };
+                        let t1 = std::time::Instant::now();
+                        let v = c.with_orbit_stock(&o);
+                        let made = t1.elapsed().as_secs_f64();
+                        println!(
+                            "  in orbit, {label:16} {years:4.0} yr waited ({:.1} s): {}",
+                            made,
+                            row(&v)
+                        );
+                    }
+                }
+                // The shipping setting: where the stacks leave, and the 6-a-year plan flown.
+                let o = OrbitStock {
+                    size,
+                    go_ahead_tdb: go,
+                    in_orbit_at_go_ahead_s: asteroid_core::readiness::IN_ORBIT_YEARS_DEFAULT * yr
+                        + IN_ORBIT.decision_s,
+                    stack: SHIPPING_STANDING_STACK,
+                };
+                let v = c.with_orbit_stock(&o);
+                let n = v.candidates.iter().take_while(|k| !k.from_orbit).count();
+                for (k, cw) in v.candidates[n..].iter().zip(&v.windows[n..]) {
+                    let dec = (k.v_inf_departure.z / k.v_inf_departure.norm())
+                        .asin()
+                        .to_degrees();
+                    let direct = &c
+                        .candidates
+                        .iter()
+                        .find(|d| !d.parked && d.launch_tdb == k.launch_tdb);
+                    println!(
+                        "    stack via {:.2} yr out ({:4.0} d after go-ahead, dec {dec:+5.1}, C3 {:5.1}): {:5.0} kg hits vs {:5.0} direct, shift {:5.0} km",
+                        (impact - k.launch_tdb) / yr,
+                        (k.launch_tdb - go) / 86_400.0,
+                        k.c3_km2_s2,
+                        k.impact_mass_kg,
+                        direct.map_or(f64::NAN, |d| d.impact_mass_kg),
+                        cw.shift_per_launch.norm() / 1e3
+                    );
+                }
+                for rate in [2u32, 6] {
+                    if let CampaignOutcome::Planned(p) = v.plan(rate).expect("plan") {
+                        let from_orbit: u32 = v
+                            .candidates
+                            .iter()
+                            .zip(&p.launches)
+                            .filter(|(k, _)| k.from_orbit)
+                            .map(|(_, &x)| x)
+                            .sum();
+                        let fl = fly_campaign_plan(&scenario, &v, &p, 7, PLACEMENT_BAND_A_KM)
+                            .expect("flight");
+                        let perigee = match fl.flown {
+                            CellVerdict::Encounter {
+                                perigee_m, is_hit, ..
+                            } => format!(
+                                "perigee {:.0} km{}",
+                                perigee_m / 1e3,
+                                if is_hit { " HIT" } else { "" }
+                            ),
+                            other => format!("{other:?}"),
+                        };
+                        println!(
+                            "    flown at {rate}/yr: {} ({from_orbit} from orbit), {perigee}, nonlinearity {:.2e}",
+                            p.total_launches,
+                            fl.nonlinearity.unwrap_or(f64::NAN)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Probe, run by hand (`--ignored --nocapture`): the windows a stack already in
+    /// orbit could leave through. Found `STANDING_WARNING_YR` years out (default
+    /// 12,9), cut at the go-ahead (found + the PDC23 decision): every flown direct
+    /// window as a CSV row `OW,warning,days after go-ahead,yr before impact,
+    /// declination deg,C3,|shift| km,shift xi km,shift zeta km,impact kg,prograde` -
+    /// the inputs the plane-phasing cost is computed from offline.
+    #[test]
+    #[ignore]
+    fn probe_orbit_windows() {
+        if !have_kernels() {
+            return;
+        }
+        use asteroid_core::launch_vehicle::FALCON_HEAVY_EXPENDABLE;
+        use asteroid_core::readiness::PDC23_DECISION_S;
+        let vehicle = &FALCON_HEAVY_EXPENDABLE;
+        let mut mc = MissionCore::load().expect("kernels load");
+        mc.build_scenario(&ImpactorConfig::default())
+            .expect("scenario builds");
+        let scenario = mc.scenario_arc().expect("a built scenario");
+        let impact = mc.impact_tdb_seconds();
+        let yr = asteroid_core::readiness::YEAR_S;
+        let view = PorkchopView::build(&scenario, 120, 120).expect("grid");
+        let map_first = view.launch_tdb()[0];
+        let warnings: Vec<f64> = std::env::var("STANDING_WARNING_YR")
+            .unwrap_or_else(|_| "12,9".into())
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        for warning_yr in warnings {
+            let go = (impact - warning_yr * yr + PDC23_DECISION_S).max(map_first);
+            let t0 = std::time::Instant::now();
+            let c = measure_campaign_candidates(&scenario, &view, vehicle, go, Some(go), None)
+                .expect("candidates");
+            println!(
+                "\nfound {warning_yr} yr out, go-ahead {:.3} yr before impact, target |B| {:.0} km, nominal ({:.0}, {:.0}) km ({:.0} s)",
+                (impact - go) / yr,
+                c.target_b_m / 1e3,
+                c.nominal_b_m.0 / 1e3,
+                c.nominal_b_m.1 / 1e3,
+                t0.elapsed().as_secs_f64()
+            );
+            for k in c.candidates.iter().filter(|k| !k.parked) {
+                let v = k.v_inf_departure;
+                let dec = (v.z / v.norm()).asin().to_degrees();
+                let (sx, sz) = k.shift_per_launch_m;
+                println!(
+                    "OW,{warning_yr},{:.1},{:.3},{dec:.2},{:.2},{:.1},{:.1},{:.1},{:.0},{}",
+                    (k.launch_tdb - go) / 86_400.0,
+                    (impact - k.launch_tdb) / yr,
+                    k.c3_km2_s2,
+                    (sx * sx + sz * sz).sqrt() / 1e3,
+                    sx / 1e3,
+                    sz / 1e3,
+                    k.impact_mass_kg,
+                    k.proxy_along_track_dv_ms > 0.0
+                );
+            }
+        }
+    }
+
     /// Probe, run by hand (`--ignored --nocapture`): orbital assembly. Every launch
     /// may go up to a parking orbit and leave on a later date with its own departure
     /// stage (the shipping parked delivery: the published single-payload limit, a
@@ -7008,9 +7459,16 @@ first launch {:.3} yr before impact (first {:.3}, last {:.3}): {} windows flown,
                     }),
                 );
                 for escape in escapes {
+                    // 185 km is below the density table and decays in weeks: its
+                    // wait stays free here, a comparison row only.
                     let d = asteroid_core::orbital_assembly::ParkedDelivery {
                         parking_altitude_m: alt_km * 1e3,
                         escape,
+                        waiting: if alt_km < 350.0 {
+                            None
+                        } else {
+                            SHIPPING_PARKED_DELIVERY.waiting
+                        },
                         ..SHIPPING_PARKED_DELIVERY
                     };
                     let v = c.with_parking(&d).expect("parking");

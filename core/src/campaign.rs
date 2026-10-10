@@ -971,6 +971,113 @@ fn outside_cap_along(
     (furthest, false)
 }
 
+// --- A stock already in orbit -------------------------------------------------
+
+/// A plan with `size` stacks **already in orbit** when the rock is found
+/// ([`crate::station_keeping::StandingStack`]) beside the launched ones: the stacks
+/// leave through `orbit` - their own windows, each `orbit[j]` a departure with the
+/// push one stack makes through it - and every launch goes through `windows` under
+/// the cap, built no earlier than `built.build_from` and `built.built_per_period` a
+/// year (`built.size` and `built.mode` are ignored: the launched ones have no stock
+/// of their own).
+///
+/// The stacks are not launches - they went up years ago - so the cap does not count
+/// them, and any number can leave on one date. So, as for
+/// [`StockMode::OutsideCap`], `k <= size` of them all leave through the best orbit
+/// window along the push direction, and the rest is the best built-only plan; each
+/// total is checked with the split that pushes furthest. (Outside the cap is a
+/// what-if for a stock on the ground - it would need as many pads as rockets. For a
+/// stack in orbit it is simply true.)
+///
+/// The returned `launches` run over `windows` then `orbit`, in that order.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_campaign_orbit_stocked(
+    nominal_b: Vector2<f64>,
+    target_b: f64,
+    windows: &[CampaignWindow],
+    orbit: &[CampaignWindow],
+    max_launches: u32,
+    window_s: f64,
+    size: u32,
+    built: &Stock,
+) -> Result<CampaignOutcome, CampaignError> {
+    let all: Vec<CampaignWindow> = windows.iter().chain(orbit).copied().collect();
+    validate(nominal_b, target_b, &all, max_launches)?;
+    if !(window_s.is_finite() && window_s > 0.0) {
+        return Err(CampaignError::InvalidInput(format!(
+            "the rolling window must be finite and > 0 s (got {window_s})"
+        )));
+    }
+    if nominal_b.norm() >= target_b {
+        return Ok(CampaignOutcome::AlreadyClear);
+    }
+    let n = windows.len();
+    let built = Stock {
+        size: 0,
+        mode: StockMode::OutsideCap,
+        ..*built
+    };
+    let build_from = built.build_from.tdb_seconds_past_j2000();
+    let lots = built.built_per_period < max_launches;
+    Ok(best_over_directions(nominal_b, &all, |u| {
+        let best = (0..orbit.len())
+            .map(|j| (n + j, orbit[j].shift_per_launch.dot(&u)))
+            .filter(|&(_, x)| x > 0.0)
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        let stock_max = if best.is_some() {
+            (size as usize).min(10_000)
+        } else {
+            0
+        };
+        // The built launches' best `l`-launch arrangement, over `windows` only.
+        let chains = if lots {
+            None
+        } else {
+            StockedChains::build(windows, max_launches, window_s, u, build_from, 0)
+        };
+        let line = lots.then(|| LotChains::build(windows, max_launches, window_s, u, &built));
+        let built_best = |l: usize| -> Option<(f64, Vec<u32>)> {
+            if l == 0 {
+                return Some((0.0, vec![0; n]));
+            }
+            match (&chains, &line) {
+                (Some(c), _) => c.best(l).map(|(v, _)| (v, c.launches(n, l))),
+                (None, Some(lc)) => lc.best(l, n),
+                (None, None) => None,
+            }
+        };
+        let mut furthest = plan_of(nominal_b, &all, vec![0; all.len()]);
+        for l in 1usize.. {
+            let mut top: Option<(f64, usize, Vec<u32>)> = None;
+            for k in 0..=l.min(stock_max) {
+                let Some((bv, launches)) = built_best(l - k) else {
+                    continue;
+                };
+                let val = bv + k as f64 * best.map_or(0.0, |x| x.1);
+                if top.as_ref().is_none_or(|(tv, _, _)| val > *tv) {
+                    top = Some((val, k, launches));
+                }
+            }
+            // Nothing fits at `l`: no larger `l` does either.
+            let Some((_, k, mut launches)) = top else {
+                break;
+            };
+            launches.resize(all.len(), 0);
+            if let Some((i, _)) = best {
+                launches[i] += k as u32;
+            }
+            let p = plan_of(nominal_b, &all, launches);
+            if p.predicted_impact_parameter() >= target_b {
+                return (p, true);
+            }
+            if p.predicted_impact_parameter() > furthest.predicted_impact_parameter() {
+                furthest = p;
+            }
+        }
+        (furthest, false)
+    }))
+}
+
 // --- A production line --------------------------------------------------------
 
 /// [`plan_campaign_stocked`] with built impactors arriving in lots - for any
@@ -1317,6 +1424,11 @@ pub struct ParkedLaunch {
     /// Index into the `windows` the choices were made from: the transfer the stack
     /// leaves on, and the date it leaves.
     pub departs_with: usize,
+    /// What is left of the stack after the wait in orbit, as a fraction:
+    /// `e^(−k · wait)` for the caller's decay rate `k` (drag make-up,
+    /// [`crate::station_keeping`]); `1` with no decay. The push is the departure
+    /// window's scale times this.
+    pub wait_factor: f64,
 }
 
 /// Every parked launch a plan under a rolling cap could need, given the windows a
@@ -1347,6 +1459,23 @@ pub struct ParkedLaunch {
 /// the largest shift along `û`. Over every `û` those are exactly the vertices of the
 /// convex hull of the candidate shifts (with the origin), so only hull vertices are
 /// kept — usually a few per date, where every later window would be dozens.
+///
+/// # Waiting costs: `decay_per_s`
+/// A stack in a low orbit pays drag for every day it waits, so what is left of it
+/// is `e^(−k · wait)` - `k = decay_per_s`, from [`crate::station_keeping`]. With
+/// `k > 0` the dates above are the wrong ones: for a fixed departure, a parked
+/// launch's push now *grows* as its date moves later (a shorter wait), so in a best
+/// arrangement each sits as **late** as its chain allows - on its departure's own
+/// date, or exactly one period before the next launch in its chain, or at
+/// `latest`. Chasing that forward, every date is a departure's date or `latest`
+/// minus whole periods (from zero), or a direct window's date minus whole periods
+/// (from one) - and with `k > 0` those are the only dates generated (the chains
+/// only ever use launches that push along their direction, and for those a later
+/// date is strictly better; brute force pins it). Lower bounds - `earliest`, the
+/// build date, a production line's lots - only ever bind a launch that wants to be
+/// earlier, so `also_from` is not needed then. At each date the hull is taken of
+/// the waits' scaled shifts. `k = 0` is the free wait, exactly as before.
+#[allow(clippy::too_many_arguments)]
 pub fn parked_launches(
     windows: &[CampaignWindow],
     scale: &[f64],
@@ -1354,7 +1483,13 @@ pub fn parked_launches(
     also_from: &[Epoch],
     latest: Epoch,
     period_s: f64,
+    decay_per_s: f64,
 ) -> Result<Vec<ParkedLaunch>, CampaignError> {
+    if !(decay_per_s.is_finite() && decay_per_s >= 0.0) {
+        return Err(CampaignError::InvalidInput(format!(
+            "the wait's decay rate must be finite and >= 0 per s (got {decay_per_s})"
+        )));
+    }
     if scale.len() != windows.len() {
         return Err(CampaignError::InvalidInput(format!(
             "{} scales for {} windows",
@@ -1389,7 +1524,14 @@ pub fn parked_launches(
         .iter()
         .map(|e| e.tdb_seconds_past_j2000())
         .collect();
-    let dates = parked_launch_dates(&all_dates, t_lo, &seeds, t_hi.min(last_out), period_s);
+    let stop = t_hi.min(last_out);
+    let dates = if decay_per_s > 0.0 {
+        let mut anchors: Vec<f64> = departures.iter().map(|&i| when(i)).collect();
+        anchors.push(stop);
+        parked_launch_dates_late(&anchors, &all_dates, t_lo, stop, period_s)
+    } else {
+        parked_launch_dates(&all_dates, t_lo, &seeds, stop, period_s)
+    };
 
     let mut out = Vec::new();
     for t in dates {
@@ -1398,18 +1540,63 @@ pub fn parked_launches(
             .copied()
             .filter(|&i| when(i) >= t)
             .collect();
+        let factor = |i: usize| (-decay_per_s * (when(i) - t)).exp();
         let shifts: Vec<Vector2<f64>> = ahead
             .iter()
-            .map(|&i| scale[i] * windows[i].shift_per_launch)
+            .map(|&i| scale[i] * factor(i) * windows[i].shift_per_launch)
             .collect();
         for k in hull_vertices(&shifts) {
             out.push(ParkedLaunch {
                 launch_epoch: Epoch::from_tdb_seconds_past_j2000(t),
                 departs_with: ahead[k],
+                wait_factor: factor(ahead[k]),
             });
         }
     }
     Ok(out)
+}
+
+/// The dates a parked launch can need when waiting costs mass (see
+/// [`parked_launches`], `decay_per_s > 0`): each of `anchors` (departure dates and
+/// the last launch date) minus whole periods from zero, and each direct window's
+/// date in `window_dates` minus whole periods from one - the window dates are
+/// direct launches, so a parked launch sits one period before them. Only dates from
+/// `earliest` to `stop`, sorted, each once. All TDB s.
+///
+/// A period that is not finite and > 0 gives no dates.
+pub fn parked_launch_dates_late(
+    anchors: &[f64],
+    window_dates: &[f64],
+    earliest: f64,
+    stop: f64,
+    period_s: f64,
+) -> Vec<f64> {
+    if !(period_s.is_finite() && period_s > 0.0) {
+        return Vec::new();
+    }
+    let mut dates: Vec<f64> = Vec::new();
+    let mut back = |base: f64, first: u32| {
+        let mut k = first;
+        loop {
+            let t = base - f64::from(k) * period_s;
+            if t < earliest {
+                break;
+            }
+            if t <= stop {
+                dates.push(t);
+            }
+            k += 1;
+        }
+    };
+    for &t in anchors {
+        back(t, 0);
+    }
+    for &t in window_dates {
+        back(t, 1);
+    }
+    dates.sort_by(f64::total_cmp);
+    dates.dedup();
+    dates
 }
 
 /// Every date a parked launch can need (see [`parked_launches`] for why): `earliest`
@@ -2574,6 +2761,160 @@ mod tests {
         );
     }
 
+    /// Probe, run by hand (`--ignored --nocapture`): what a priced wait costs the
+    /// planner - parked launches offered and time per plan, on a synthetic set the
+    /// size of the shipping one (~180 windows over 12 years), free wait vs the
+    /// shipping 400 km drag rate.
+    #[test]
+    #[ignore]
+    fn probe_priced_wait_planner_cost() {
+        let year = 365.25 * DAY;
+        let mut seed: u64 = 7;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let w: Vec<CampaignWindow> = (0..180)
+            .map(|_| {
+                let t = next() * 11.6 * 365.25;
+                let a = next() * std::f64::consts::TAU;
+                let m = 500.0 + 3_500.0 * next();
+                window(t, (m * a.cos(), m * a.sin()))
+            })
+            .collect();
+        let scale: Vec<f64> = (0..w.len()).map(|_| 0.4 + 0.5 * next()).collect();
+        // 400 km, the shipping tumbling area: ~31 m/s a year at 310 s.
+        let k = 31.0 / (310.0 * 9.806_65) / year;
+        for decay in [0.0, k] {
+            let all = with_parked_decaying(&w, &scale, 0.0, 11.64 * 365.25, year, decay);
+            for cap in [1u32, 2, 6, 12] {
+                let t0 = std::time::Instant::now();
+                let o = plan_campaign_rolling(Vector2::new(0.0, 0.0), 26_000.0, &all, cap, year)
+                    .unwrap();
+                println!(
+                    "decay {decay:.2e}/s: {} parked launches, cap {cap}: {:.3} s ({})",
+                    all.len() - w.len(),
+                    t0.elapsed().as_secs_f64(),
+                    match o {
+                        CampaignOutcome::Planned(p) => format!("{} launches", p.total_launches),
+                        CampaignOutcome::Unreachable(_) => "short".into(),
+                        CampaignOutcome::AlreadyClear => "clear".into(),
+                    }
+                );
+            }
+        }
+    }
+
+    // --- A stock already in orbit -----------------------------------------------
+
+    /// The control: stacks in orbit whose windows are the launched ones, pushing the
+    /// same, are the ground stock flown outside the cap - the same plan, to the
+    /// launch, at every size, cap, production line and target. (The in-orbit stock
+    /// differs only in the windows it is handed: what is left of a stack after the
+    /// wait and the plane, [`crate::station_keeping`].)
+    #[test]
+    fn a_stock_in_orbit_on_the_launched_windows_is_the_outside_cap_stock() {
+        let w: Vec<CampaignWindow> = [
+            (0.0, (300.0, 900.0)),
+            (40.0, (-200.0, 700.0)),
+            (95.0, (500.0, 300.0)),
+            (130.0, (100.0, 1_100.0)),
+            (210.0, (-400.0, 600.0)),
+            (260.0, (250.0, 800.0)),
+            (330.0, (0.0, 950.0)),
+        ]
+        .iter()
+        .map(|&(t, s)| window(t, s))
+        .collect();
+        let span = 100.0 * DAY;
+        let mut compared = 0;
+        for size in [0u32, 1, 2, 5] {
+            for cap in [1u32, 2, 3] {
+                for per in [1u32, 2, UNLIMITED_BUILDS] {
+                    for build_day in [0.0, 120.0] {
+                        let ground = Stock {
+                            size,
+                            build_from: Epoch::from_tdb_seconds_past_j2000(build_day * DAY),
+                            mode: StockMode::OutsideCap,
+                            built_per_period: per,
+                        };
+                        for target in [800.0, 2_000.0, 3_500.0, 6_000.0] {
+                            let b0 = Vector2::new(50.0, -120.0);
+                            let a =
+                                plan_campaign_stocked(b0, target, &w, cap, span, &ground).unwrap();
+                            let o = plan_campaign_orbit_stocked(
+                                b0, target, &w, &w, cap, span, size, &ground,
+                            )
+                            .unwrap();
+                            let what = format!(
+                                "size {size} cap {cap} per {per} build {build_day} target {target}"
+                            );
+                            match (a, o) {
+                                (CampaignOutcome::AlreadyClear, CampaignOutcome::AlreadyClear) => {}
+                                (CampaignOutcome::Planned(x), CampaignOutcome::Planned(y))
+                                | (
+                                    CampaignOutcome::Unreachable(x),
+                                    CampaignOutcome::Unreachable(y),
+                                ) => {
+                                    assert_eq!(x.total_launches, y.total_launches, "{what}");
+                                    assert!(
+                                        (x.predicted_b - y.predicted_b).norm() < 1e-9,
+                                        "{what}"
+                                    );
+                                    // Folded back onto one list of windows: the same launches.
+                                    let folded: Vec<u32> = (0..w.len())
+                                        .map(|i| y.launches[i] + y.launches[w.len() + i])
+                                        .collect();
+                                    assert_eq!(x.launches, folded, "{what}");
+                                    compared += 1;
+                                }
+                                (x, y) => panic!("{what}: {x:?} vs {y:?}"),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(compared > 150, "{compared}");
+    }
+
+    /// The stacks do not count against the cap: at a cap of one a year, five stacks
+    /// leave on one date, and the launched ones still get their own slots.
+    #[test]
+    fn stacks_in_orbit_do_not_count_against_the_cap() {
+        let w = vec![window(0.0, (0.0, 1_000.0)), window(200.0, (0.0, 900.0))];
+        let orbit = vec![window(30.0, (0.0, 800.0))];
+        let span = 100.0 * DAY;
+        let built = Stock {
+            size: 0,
+            build_from: Epoch::from_tdb_seconds_past_j2000(0.0),
+            mode: StockMode::Counted,
+            built_per_period: UNLIMITED_BUILDS,
+        };
+        let plan = |size| {
+            plan_campaign_orbit_stocked(
+                Vector2::zeros(),
+                5_800.0,
+                &w,
+                &orbit,
+                1,
+                span,
+                size,
+                &built,
+            )
+            .unwrap()
+        };
+        let p = match plan(5) {
+            CampaignOutcome::Planned(p) => p,
+            o => panic!("{o:?}"),
+        };
+        // 1 000 + 900 launched, then 5 x 800 from orbit = 5 900.
+        assert_eq!(p.launches, vec![1, 1, 5]);
+        assert_eq!(p.total_launches, 7);
+        // With no stacks it cannot reach.
+        assert!(matches!(plan(0), CampaignOutcome::Unreachable(_)));
+    }
+
     // --- Through a parking orbit -----------------------------------------------
 
     /// The direct windows plus every parked launch, as one list for the planner.
@@ -2584,6 +2925,18 @@ mod tests {
         latest_days: f64,
         period: f64,
     ) -> Vec<CampaignWindow> {
+        with_parked_decaying(w, scale, earliest_days, latest_days, period, 0.0)
+    }
+
+    /// [`with_parked`] with a cost of waiting, `decay_per_s`.
+    fn with_parked_decaying(
+        w: &[CampaignWindow],
+        scale: &[f64],
+        earliest_days: f64,
+        latest_days: f64,
+        period: f64,
+        decay_per_s: f64,
+    ) -> Vec<CampaignWindow> {
         let parked = parked_launches(
             w,
             scale,
@@ -2591,14 +2944,18 @@ mod tests {
             &[],
             Epoch::from_tdb_seconds_past_j2000(latest_days * DAY),
             period,
+            decay_per_s,
         )
         .unwrap();
         let mut all = w.to_vec();
-        all.extend(
-            parked.iter().map(|p| {
-                parked_window(&w[p.departs_with], scale[p.departs_with], p.launch_epoch, 0)
-            }),
-        );
+        all.extend(parked.iter().map(|p| {
+            parked_window(
+                &w[p.departs_with],
+                scale[p.departs_with] * p.wait_factor,
+                p.launch_epoch,
+                0,
+            )
+        }));
         all
     }
 
@@ -2758,6 +3115,7 @@ mod tests {
             &[],
             Epoch::from_tdb_seconds_past_j2000(1_000.0 * DAY),
             100.0 * DAY,
+            0.0,
         )
         .unwrap();
         let days: Vec<(i64, usize)> = p
@@ -2778,7 +3136,8 @@ mod tests {
             Epoch::from_tdb_seconds_past_j2000(0.0),
             &[],
             Epoch::from_tdb_seconds_past_j2000(1.0),
-            DAY
+            DAY,
+            0.0
         )
         .is_err());
         assert!(parked_launches(
@@ -2787,7 +3146,8 @@ mod tests {
             Epoch::from_tdb_seconds_past_j2000(0.0),
             &[],
             Epoch::from_tdb_seconds_past_j2000(1.0),
-            DAY
+            DAY,
+            0.0
         )
         .is_err());
     }
@@ -2846,6 +3206,170 @@ mod tests {
     /// count below the planner's.
     #[test]
     fn the_parked_planner_matches_brute_force() {
+        parked_planner_matches_brute_force(0.0, &[500.0, 1_300.0, 2_200.0, 2_900.0, 3_600.0]);
+    }
+
+    /// The same brute force when waiting costs mass: a stack that waits `d` days
+    /// keeps `e^(−k d)` of itself. Two rates - one gentle (a few per cent over the
+    /// span), one steep enough that leaving later beats a stronger, earlier window.
+    /// The brute force tries every grid date for every parked launch, so it would see
+    /// a late date the generator failed to propose.
+    #[test]
+    fn the_parked_planner_matches_brute_force_when_waiting_costs() {
+        // A fine sweep of targets: with waiting priced, plans differ by a few per
+        // cent, which coarse targets step over (a first cut with the five targets
+        // above passed even with the free-wait dates - mutation-tested).
+        let targets: Vec<f64> = (1..=120).map(|k| 30.0 * f64::from(k)).collect();
+        for per_day in [2.0e-4, 4.0e-3] {
+            parked_planner_matches_brute_force(per_day / DAY, &targets);
+        }
+    }
+
+    /// The sharp version, for a priced wait: irregular dates, windows where a parked
+    /// stack carries more than a direct launch (`scale` > 1, as above `C3` 58 for
+    /// the shipping stack), a 2-day grid, up to three launches - on a hand-made set
+    /// and on 20 random ones. The brute force takes, per launch count, the furthest
+    /// push each way over **every** arrangement on the grid that keeps the cap,
+    /// then reads every target off those, so the target sweep is fine for free.
+    /// Mutation-tested: with the free-wait dates it fails, and with the "one period
+    /// before a direct launch" dates left out it fails - but only once some windows
+    /// are direct-only (scale 0): a window that is also a departure already
+    /// proposes those dates as "a departure minus whole periods". Likewise the last
+    /// launch date's own periods matter only when it falls before a departure, so
+    /// every set also runs with launches stopping at day 230.
+    #[test]
+    fn a_priced_wait_parks_as_late_as_the_chain_allows() {
+        let hand: Vec<(f64, f64, f64)> = vec![
+            (0.0, 640.0, 0.6),
+            (38.0, -910.0, 0.5),
+            (72.0, 370.0, 0.7),
+            (94.0, 820.0, 0.55),
+            (164.0, -150.0, 0.9),
+            (248.0, 450.0, 1.4),
+        ];
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut sets = vec![hand];
+        for _ in 0..20 {
+            let n = 5 + (next() * 3.0) as usize;
+            sets.push(
+                (0..n)
+                    .map(|_| {
+                        let t = 2.0 * (next() * 150.0).floor();
+                        let mag = 100.0 + 2_900.0 * next();
+                        let sign = if next() < 0.75 { 1.0 } else { -1.0 };
+                        // A third are direct-only (a steep asymptote, say): those
+                        // dates are not departures, so only the "one period before a
+                        // direct launch" rule can propose the date before them.
+                        let sc = if next() < 0.33 {
+                            0.0
+                        } else {
+                            0.3 + 1.3 * next()
+                        };
+                        (t, sign * mag, sc)
+                    })
+                    .collect(),
+            );
+        }
+        let mut compared = 0;
+        // Launches up to day 300 (after every window), and up to day 230 - before
+        // some departures, so the last launch date is a date of its own.
+        for spec in &sets {
+            for per_day in [2.0e-3, 1.0e-2] {
+                for latest in [300.0, 230.0] {
+                    compared += priced_wait_case(spec, per_day, latest);
+                }
+            }
+        }
+        assert!(compared > 6_000, "{compared}");
+    }
+
+    /// One set of windows `(day, ζ push, parked scale)` at one decay rate (per day),
+    /// parked launches going up no later than day `latest`: the planner's count
+    /// against the brute force's, over a fine target sweep. Returns how many counts
+    /// were compared.
+    fn priced_wait_case(spec: &[(f64, f64, f64)], per_day: f64, latest: f64) -> usize {
+        let w: Vec<CampaignWindow> = spec.iter().map(|&(t, s, _)| window(t, (0.0, s))).collect();
+        let scale: Vec<f64> = spec.iter().map(|s| s.2).collect();
+        let span = 100.0 * DAY;
+        let grid: Vec<f64> = (0..=150).map(|k| 2.0 * f64::from(k)).collect();
+        let all = with_parked_decaying(&w, &scale, 0.0, latest, span, per_day / DAY);
+        // One launch on grid date d: its furthest push each way.
+        let best: Vec<(f64, f64)> = grid
+            .iter()
+            .map(|&d| {
+                let mut v: Vec<f64> = spec
+                    .iter()
+                    .filter(|s| s.0 >= d && d <= latest)
+                    .map(|s| s.1 * s.2 * (-per_day * (s.0 - d)).exp())
+                    .collect();
+                v.extend(spec.iter().filter(|s| s.0 == d).map(|s| s.1));
+                (
+                    v.iter().copied().fold(0.0, f64::max),
+                    v.iter().copied().fold(0.0, f64::min),
+                )
+            })
+            .collect();
+        let mut compared = 0;
+        for cap in [1u32, 2] {
+            // reach[k] = (furthest up, furthest down) with k launches.
+            let mut reach = [(0.0_f64, 0.0_f64); 4];
+            #[allow(clippy::needless_range_loop)] // k is also the tuple's length
+            for k in 1..=3usize {
+                let mut idx = vec![0usize; k];
+                loop {
+                    let list: Vec<(f64, u32)> = idx.iter().map(|&i| (grid[i] * DAY, 1)).collect();
+                    if busiest_rolling_count(&list, span) <= cap {
+                        let up: f64 = idx.iter().map(|&i| best[i].0).sum();
+                        let down: f64 = idx.iter().map(|&i| best[i].1).sum();
+                        reach[k].0 = reach[k].0.max(up);
+                        reach[k].1 = reach[k].1.min(down);
+                    }
+                    let mut j = k;
+                    while j > 0 && idx[j - 1] == grid.len() - 1 {
+                        j -= 1;
+                    }
+                    if j == 0 {
+                        break;
+                    }
+                    idx[j - 1] += 1;
+                    for m in j..k {
+                        idx[m] = idx[j - 1];
+                    }
+                }
+            }
+            for b0 in [0.0_f64, 300.0, -500.0] {
+                for t in 1..=150 {
+                    let target = 40.0 * f64::from(t);
+                    let brute = (0..=3usize)
+                        .find(|&k| b0 + reach[k].0 >= target || b0 + reach[k].1 <= -target);
+                    let got = plan_campaign_rolling(Vector2::new(0.0, b0), target, &all, cap, span)
+                        .unwrap();
+                    let what = format!(
+                        "{spec:?} k={per_day}/d to {latest} cap={cap} b0={b0} target={target}"
+                    );
+                    match (brute, got) {
+                        (Some(0), CampaignOutcome::AlreadyClear) => {}
+                        (Some(n), CampaignOutcome::Planned(p)) => {
+                            assert_eq!(p.total_launches as usize, n, "{what}");
+                            compared += 1;
+                        }
+                        (None, CampaignOutcome::Planned(p)) => {
+                            assert!(p.total_launches > 3, "{what}: planner {}", p.total_launches)
+                        }
+                        (None, CampaignOutcome::Unreachable(_)) => {}
+                        (brute, got) => panic!("{what}: brute {brute:?} vs {got:?}"),
+                    }
+                }
+            }
+        }
+        compared
+    }
+
+    fn parked_planner_matches_brute_force(decay_per_s: f64, targets: &[f64]) {
         let spec: [(f64, f64, f64); 6] = [
             (0.0, 640.0, 0.6),
             (30.0, -910.0, 0.5),
@@ -2857,14 +3381,14 @@ mod tests {
         let w: Vec<CampaignWindow> = spec.iter().map(|&(t, s, _)| window(t, (0.0, s))).collect();
         let scale: Vec<f64> = spec.iter().map(|s| s.2).collect();
         let span = 100.0 * DAY;
-        let all = with_parked(&w, &scale, 0.0, 300.0, span);
+        let all = with_parked_decaying(&w, &scale, 0.0, 300.0, span, decay_per_s);
         // Per grid date, the most positive and most negative push one launch can make.
         let grid: Vec<f64> = (0..=30).map(|k| f64::from(k) * 10.0).collect();
         let options = |d: f64| -> (f64, f64) {
             let mut v: Vec<f64> = spec
                 .iter()
                 .filter(|s| s.0 >= d)
-                .map(|s| s.1 * s.2)
+                .map(|s| s.1 * s.2 * (-decay_per_s * (s.0 - d) * DAY).exp())
                 .collect();
             v.extend(spec.iter().filter(|s| s.0 == d).map(|s| s.1));
             (
@@ -2875,7 +3399,7 @@ mod tests {
         let best: Vec<(f64, f64)> = grid.iter().map(|&d| options(d)).collect();
         for cap in [1u32, 2] {
             for b0 in [0.0_f64, 400.0, -700.0] {
-                for target in [500.0, 1_300.0, 2_200.0, 2_900.0, 3_600.0] {
+                for &target in targets {
                     // Collinear: |b0 + Σ| clears the target iff the all-positive or the
                     // all-negative choice does, so two sums per arrangement suffice.
                     let mut brute: Option<u32> = if b0.abs() >= target { Some(0) } else { None };
@@ -2914,14 +3438,14 @@ mod tests {
                     if let CampaignOutcome::Planned(p) | CampaignOutcome::Unreachable(p) = &got {
                         assert!(
                             busiest_rolling_count(&launch_list(&all, p), span) <= cap,
-                            "cap={cap} b0={b0} target={target}: plan breaks the cap"
+                            "k={decay_per_s} cap={cap} b0={b0} target={target}: plan breaks the cap"
                         );
                     }
                     match (brute, got) {
                         (Some(0), CampaignOutcome::AlreadyClear) => {}
                         (Some(n), CampaignOutcome::Planned(p)) => assert_eq!(
                             p.total_launches, n,
-                            "cap={cap} b0={b0} target={target}: planner {} vs brute {n}",
+                            "k={decay_per_s} cap={cap} b0={b0} target={target}: planner {} vs brute {n}",
                             p.total_launches
                         ),
                         // Brute force stops at four launches; past that only a planner

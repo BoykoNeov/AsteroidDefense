@@ -48,6 +48,7 @@ pub mod readiness;
 pub mod sbdb;
 pub mod scenario;
 pub mod state;
+pub mod station_keeping;
 pub mod uncertainty;
 
 pub use campaign::{

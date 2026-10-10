@@ -79,7 +79,9 @@ func _draw() -> void:
 	# so they stand down for that view rather than being drawn over a plot they
 	# make unreadable. (The 3D tag layer stands down for the 2D views for the same
 	# reason.) Header, clock, console and the key line stay: those are chrome.
-	if view_name == "LAUNCH WINDOWS":
+	# The sky screen is the same kind of instrument, and its frame is where the
+	# target panel would sit.
+	if view_name == "LAUNCH WINDOWS" or view_name == "SKY OBSERVATION":
 		_console_block(w, h, lh, mid, bright, faint)
 		_help_line(w, h, dim)
 		_bezel(w, h, faint)
@@ -305,6 +307,11 @@ func _clip(line: String, budget: float) -> String:
 
 func _help_line(w: float, h: float, dim: Color) -> void:
 	var line := "[SPC]HOLD [,/.]WARP [B]REV [J]JUMP [M]PLAN [P]FORCES [F]FOCUS:%s" % camera_rig.focus_name
+	# The sky screen owns [B] (blink) and lists its own keys in its panel, so the
+	# global line drops the reverse key there rather than advertise a key that
+	# does something else.
+	if view_name == "SKY OBSERVATION":
+		line = "[SPC]HOLD [,/.]WARP [J]JUMP [M]PLAN [P]FORCES"
 	# [C] only binds while the encounter view is up, so it is only advertised
 	# there — a key listed everywhere that works in one place is its own small lie,
 	# and an unlisted key in the one view that needs it is why the closest-approach
@@ -314,7 +321,7 @@ func _help_line(w: float, h: float, dim: Color) -> void:
 	# Same rule for the launch-window map's keys: they bind only while it is up.
 	if view_name == "LAUNCH WINDOWS":
 		line += " [ARR]WINDOW [L]LAUNCHER [D]METRIC [E]VERIFY"
-	line += " [1]3D [2]MAP [3]ENC [4]WINDOWS [T]PHOSPHOR [I]PERSIST"
+	line += " [1]3D [2]MAP [3]ENC [4]WINDOWS [5]SKY [T]PHOSPHOR [I]PERSIST"
 	_text_r(Vector2(w - MARGIN, h - MARGIN - BOTTOM_RESERVE), line, dim, _fs - 2)
 
 

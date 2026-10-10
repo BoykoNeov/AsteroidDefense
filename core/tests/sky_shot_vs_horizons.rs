@@ -17,7 +17,7 @@ use asteroid_core::ephemeris::Ephemeris;
 use asteroid_core::epoch::Epoch;
 use asteroid_core::horizons::Neo;
 use asteroid_core::sky_shot::{
-    plan_run, shot_seed, sight, take_shot, NightPlan, ShotSpec, Target, G96_SIGMA_DEC_ARCSEC,
+    self, plan_run, shot_seed, sight, take_shot, NightPlan, ShotSpec, Target, G96_SIGMA_DEC_ARCSEC,
     G96_SIGMA_RA_ARCSEC,
 };
 use asteroid_core::star_catalog::{self, StarCatalog};
@@ -37,6 +37,11 @@ fn h_and_g() -> (f64, f64) {
         rest.split_whitespace().next().unwrap().parse().unwrap()
     };
     (num("H="), num("G="))
+}
+
+#[test]
+fn the_shipped_h_and_g_are_horizons_own() {
+    assert_eq!(h_and_g(), (sky_shot::APOPHIS_H, sky_shot::APOPHIS_G));
 }
 
 struct Row {

@@ -441,6 +441,26 @@ const PORK_METRICS := [
 	["dv", "DELIVERED ALONG-TRACK DV", "MM/S", "DELTA-V"],
 ]
 
+# ------------------------------------------------- sky-observation screen [5] ---
+# docs/plans/2026-10-10-sky-observation-screen.md. A real asteroid (Apophis, March
+# 2021) photographed from Mt. Lemmon against Tycho-2 stars. Needs the kernel field
+# only - not the threat solution - so it opens long before the scenario lands.
+
+## The run landed, failed, or was asked for again.
+signal sky_changed
+## Seed for the shots' measurement errors: fixed, so the same pictures come back
+## every session (a player can re-measure a shot and see the same frame).
+const SKY_SEED := 2021
+var sky_online := false                # a landed run is readable
+var sky_building := false              # the worker is planning and shooting
+var sky_error := ""                    # why the last run failed, for the screen
+var sky_info: Dictionary = {}
+## Per shot: {info: Dictionary, stars: PackedFloat64Array [xi, eta, V, ref] x n,
+## labels: PackedStringArray, rock: PackedFloat64Array (empty = outside the field)}.
+var sky_shots: Array = []
+## Per night: {stars, labels} for the wide finder chart.
+var sky_finders: Array = []
+
 var pork_online := false               # a built grid is readable
 var pork_building := false             # the ~0.6 s worker is running
 var pork_rows := 0                     # launch epochs
@@ -860,6 +880,7 @@ func _process(delta: float) -> void:
 	_poll_tow_probe()
 	_poll_anchor_solve()
 	_poll_tier3()
+	_poll_sky_run()
 	_tick_plan_debounce(delta)
 
 	# The clock still advances while a build runs, but not while paused — and note
@@ -1850,6 +1871,58 @@ func j2_miss_shift_km() -> float:
 	if mission == null:
 		return NAN
 	return mission.j2_miss_geometry_shift_km()
+
+
+# ------------------------------------------------- sky-observation screen [5] ---
+
+## Plan and shoot the observing run on a worker. A no-op once a run exists or one
+## is in flight; before the kernel field is up it says so and does nothing (the
+## screen asks again when the field lands).
+func request_sky_run() -> void:
+	if sky_online or sky_building:
+		return
+	if not bodies_online or mission == null:
+		sky_error = "AWAITING EPHEMERIS"
+		return
+	if mission.begin_sky_run(SKY_SEED):
+		sky_building = true
+		sky_error = ""
+		event_logged.emit(_stamp(t) + "  OBSERVING RUN - PLANNING 3 NIGHTS FROM MT. LEMMON")
+	else:
+		sky_error = str(mission.last_error())
+	sky_changed.emit()
+
+
+func _poll_sky_run() -> void:
+	if not sky_building:
+		return
+	if mission.poll_sky_run():
+		return
+	sky_building = false
+	sky_online = mission.has_sky_run()
+	if not sky_online:
+		sky_error = str(mission.last_error())
+		event_logged.emit(_stamp(t) + "  OBSERVING RUN FAILED - " + sky_error)
+		sky_changed.emit()
+		return
+	sky_info = mission.sky_run_info()
+	sky_shots = []
+	for i in range(int(sky_info.get("shots", 0))):
+		sky_shots.append({
+			"info": mission.sky_shot_info(i),
+			"stars": mission.sky_shot_stars(i),
+			"labels": mission.sky_shot_star_labels(i),
+			"rock": mission.sky_shot_rock(i),
+		})
+	sky_finders = []
+	for n in range(int(sky_info.get("nights", 0))):
+		sky_finders.append({
+			"stars": mission.sky_finder_stars(n),
+			"labels": mission.sky_finder_labels(n),
+		})
+	event_logged.emit(_stamp(t) + "  OBSERVING RUN READY - %d SHOTS OVER %d NIGHTS" %
+		[sky_shots.size(), sky_finders.size()])
+	sky_changed.emit()
 
 
 # ------------------------------------------------------- porkchop / delivery ---

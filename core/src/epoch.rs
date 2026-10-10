@@ -70,6 +70,32 @@ impl Epoch {
         Epoch(self.0 + seconds * Unit::Second)
     }
 
+    /// The instant of a **UTC** calendar date and time — for scenario dates that
+    /// are naturally stated in civil time (an observing night). Stored, like
+    /// every `Epoch`, as TDB.
+    pub fn from_utc_gregorian(
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+    ) -> Self {
+        Epoch(HEpoch::from_gregorian_utc(
+            year, month, day, hour, minute, second, 0,
+        ))
+    }
+
+    /// This instant as a UTC calendar string to the nearest second,
+    /// `2021-03-05T07:12:00 UTC` — rounded because a TDB↔UTC round trip carries
+    /// nanoseconds of float noise that would print as `05:39:59.999996661`.
+    pub fn utc_string(&self) -> String {
+        self.0
+            .to_time_scale(TimeScale::UTC)
+            .round(Unit::Second * 1)
+            .to_string()
+    }
+
     /// The underlying [`hifitime::Epoch`], for hifitime-native operations
     /// (formatting, conversion to other time scales, ephemeris queries).
     pub fn as_hifitime(&self) -> HEpoch {

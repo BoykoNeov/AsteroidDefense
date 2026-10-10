@@ -40,6 +40,7 @@ var tags: TagLayer
 var map2d: Map2D
 var enc: EncounterView
 var pork: PorkchopPlot
+var sky: SkyView
 var planner: PlannerPanel
 var tier2_panel: Tier2Panel
 var tractor_panel: TractorPanel
@@ -149,6 +150,11 @@ func _ready() -> void:
 	pork.visible = false
 	viewport.add_child(pork)
 
+	sky = SkyView.new()
+	sky.name = "Sky"
+	sky.visible = false
+	viewport.add_child(sky)
+
 	tags = TagLayer.new()
 	tags.name = "Tags"
 	tags.camera_rig = rig
@@ -187,7 +193,7 @@ func _ready() -> void:
 	boot.finished.connect(func() -> void:
 		hud.visible = true
 		time_bar.visible = true
-		tags.visible = not (map2d.visible or enc.visible or pork.visible))
+		tags.visible = not (map2d.visible or enc.visible or pork.visible or sky.visible))
 	viewport.add_child(boot)
 
 	# Controls parented directly to a SubViewport don't inherit its size via
@@ -223,6 +229,12 @@ func _input(event: InputEvent) -> void:
 		return
 	if is_instance_valid(boot) and boot.is_inside_tree():
 		boot.dismiss()
+		get_viewport().set_input_as_handled()
+		return
+	# The sky screen claims [B] [O] [L] and the arrows while it is up. Checked
+	# before everything else because [B] is also the global time-reverse key: the
+	# screen that is open owns the keys it advertises (the porkchop's rule).
+	if sky.visible and _sky_key(event):
 		get_viewport().set_input_as_handled()
 		return
 	if event.is_action_pressed("sim_pause"):
@@ -274,6 +286,12 @@ func _input(event: InputEvent) -> void:
 			# Opening the map is what pays for the grid — on demand, off the build
 			# path, exactly like the Tier-2 menu. A no-op once it is solved.
 			Sim.request_porkchop()
+	elif event.is_action_pressed("view_sky"):
+		# Needs only the kernel field, not the threat solution: the sky screen is
+		# about a real asteroid. Opening it is what pays for the run (~1 s).
+		_show_view(sky)
+		hud.view_name = "SKY OBSERVATION"
+		Sim.request_sky_run()
 	elif enc.visible and event.is_action_pressed("encounter_ca_jump"):
 		_jump_to_closest_approach()
 	elif enc.visible and event.is_action_pressed("encounter_keyholes"):
@@ -475,6 +493,31 @@ func _input(event: InputEvent) -> void:
 				_close_other_bottom_panels(threat_panel)
 
 
+## The sky screen's keys. `true` if the event was one of them.
+##
+## Reuses actions rather than minting new ones (every letter is taken): [B] is
+## time-reverse elsewhere and BLINK here, [O] a force-menu term elsewhere and
+## OVERLAY here, [L] the launcher elsewhere and LABELS here.
+func _sky_key(event: InputEvent) -> bool:
+	if event.is_action_pressed("pork_cursor_left"):
+		sky.step_shot(-1)
+	elif event.is_action_pressed("pork_cursor_right"):
+		sky.step_shot(1)
+	elif event.is_action_pressed("pork_cursor_up"):
+		sky.zoom(1)
+	elif event.is_action_pressed("pork_cursor_down"):
+		sky.zoom(-1)
+	elif event.is_action_pressed("time_reverse"):
+		sky.toggle_blink()
+	elif event.is_action_pressed("tier2_term_j2"):
+		sky.toggle_stack()
+	elif event.is_action_pressed("pork_vehicle"):
+		sky.toggle_labels()
+	else:
+		return false
+	return true
+
+
 ## Close every bottom-centre overlay except `keep`.
 ##
 ## **Not tidiness.** All three draw at the same origin, and all three claim the
@@ -504,7 +547,7 @@ func _close_other_bottom_panels(keep: Control) -> void:
 ## editing three unrelated branches, and forgetting one leaves two overlays stacked
 ## — the second silently painting over the first.
 func _show_view(which: Control) -> void:
-	for v: Control in [map2d, enc, pork]:
+	for v: Control in [map2d, enc, pork, sky]:
 		v.visible = (v == which)
 	var world_shown: bool = which == null
 	tags.visible = world_shown
@@ -573,7 +616,7 @@ func _sync_overlay_sizes() -> void:
 	# `Camera3D.unproject_position` (the tag layer) lands where the HUD expects.
 	world_vp.size = viewport.size
 	persist_vp.size = viewport.size
-	for c: Control in [world_view, _persist_rect, map2d, enc, pork, tags, hud, planner,
+	for c: Control in [world_view, _persist_rect, map2d, enc, pork, sky, tags, hud, planner,
 			tier2_panel, tractor_panel, threat_panel, boot]:
 		if is_instance_valid(c):
 			c.position = Vector2.ZERO

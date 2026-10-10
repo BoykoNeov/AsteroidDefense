@@ -62,6 +62,14 @@ pub const G96_SIGMA_RA_ARCSEC: f64 = 0.31;
 /// See [`G96_SIGMA_RA_ARCSEC`].
 pub const G96_SIGMA_DEC_ARCSEC: f64 = 0.28;
 
+/// Apophis' absolute magnitude and slope parameter, from JPL Horizons' header
+/// for its 2024-06-25 orbit solution (`H= 19.09  G= .240`), fetched 2026-10-10.
+/// `core/tests/sky_shot_vs_horizons.rs` checks these against the header carried
+/// in its fixture, so the two cannot drift apart silently.
+pub const APOPHIS_H: f64 = 19.09;
+/// See [`APOPHIS_H`].
+pub const APOPHIS_G: f64 = 0.24;
+
 /// The Sun's centre this far below the horizon is astronomical night — the sky
 /// is as dark as it gets.
 pub const ASTRONOMICAL_NIGHT_DEG: f64 = -18.0;

@@ -108,7 +108,11 @@ impl StarName {
     }
 }
 
-/// `alf` → `α`, `eta02` → `η²`; anything unrecognised is returned unchanged.
+/// `alf` → `α`, `eta02` → `η²`, `mu.` → `μ`; anything unrecognised is returned
+/// unchanged. The spellings are the cross index's own (CDS IV/27A): theta is
+/// `the`, and the two-letter names are padded with a dot (`mu.`, `nu.`, `pi.`) —
+/// read off the shipped `names.txt`, where a guessed `tet` had left every θ
+/// star printed as `the Hya`.
 fn greek(abbrev: &str) -> String {
     const LETTERS: [(&str, &str); 24] = [
         ("alf", "α"),
@@ -118,7 +122,7 @@ fn greek(abbrev: &str) -> String {
         ("eps", "ε"),
         ("zet", "ζ"),
         ("eta", "η"),
-        ("tet", "θ"),
+        ("the", "θ"),
         ("iot", "ι"),
         ("kap", "κ"),
         ("lam", "λ"),
@@ -140,7 +144,12 @@ fn greek(abbrev: &str) -> String {
         .chars()
         .take_while(|c| c.is_ascii_alphabetic())
         .collect();
-    let digits: String = abbrev.chars().skip(letters.len()).collect();
+    // Only the component number after the letters; the padding dot is dropped.
+    let digits: String = abbrev
+        .chars()
+        .skip(letters.len())
+        .filter(|c| c.is_ascii_digit())
+        .collect();
     let Some(&(_, g)) = LETTERS.iter().find(|(a, _)| *a == letters) else {
         return abbrev.to_string();
     };
@@ -565,6 +574,9 @@ mod tests {
         assert_eq!(names[&TycId(3105, 2070, 1)].label(), "Vega");
         assert_eq!(names[&TycId(1, 2, 1)].label(), "η² Dor");
         assert_eq!(names[&TycId(5, 6, 1)].label(), "21 And");
+        assert_eq!(greek("the"), "θ");
+        assert_eq!(greek("mu."), "μ");
+        assert_eq!(greek("pi.02"), "π²");
     }
 
     #[test]

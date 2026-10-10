@@ -16,6 +16,9 @@
 //! panic across the FFI boundary.
 
 mod mission_core;
+mod sky_core;
+
+use sky_core::{SkyRunConfig, SkyRunView};
 
 use std::sync::{mpsc, Arc};
 
@@ -253,8 +256,43 @@ struct Mission {
     /// sees a rebuild that blew up as a success and announces a new threat
     /// solution that was never built.
     build_failed: bool,
+    /// The in-flight sky-observation run, if any — see
+    /// [`begin_sky_run`](Mission::begin_sky_run). Needs only the DE field, not the
+    /// scenario: the sky screen is about a real asteroid, not the threat.
+    sky_build: Option<mpsc::Receiver<Result<SkyRunView, String>>>,
+    /// The landed sky run.
+    sky_run: Option<SkyRunView>,
     error: GString,
     base: Base<RefCounted>,
+}
+
+impl Mission {
+    fn sky_shot(&self, i: i64) -> Option<&sky_core::SkyShotView> {
+        self.sky_run.as_ref()?.shots.get(usize::try_from(i).ok()?)
+    }
+
+    fn sky_finder(&self, night: i64) -> Option<&sky_core::SkyFinderView> {
+        self.sky_run
+            .as_ref()?
+            .finders
+            .get(usize::try_from(night).ok()?)
+    }
+}
+
+/// `[ξ″, η″, V, reference(0/1)]` per star, flat — the shape GDScript reads.
+fn flatten_sky_stars(stars: &[sky_core::SkyStarView]) -> PackedFloat64Array {
+    let flat: Vec<f64> = stars
+        .iter()
+        .flat_map(|s| {
+            [
+                s.xi_arcsec,
+                s.eta_arcsec,
+                s.v_mag as f64,
+                if s.reference { 1.0 } else { 0.0 },
+            ]
+        })
+        .collect();
+    PackedFloat64Array::from(flat.as_slice())
 }
 
 #[godot_api]
@@ -1069,6 +1107,174 @@ impl Mission {
     #[func]
     fn has_porkchop(&self) -> bool {
         self.porkchop.is_some()
+    }
+
+    // --- The sky-observation screen (docs/plans/2026-10-10-sky-observation-screen.md)
+
+    /// Build the Apophis 2021 observing run on a worker: nine shots over three
+    /// nights from Mt. Lemmon, and a finder chart per night. Needs the kernel
+    /// field (not the scenario), `kernels/neo/apophis.neo` and the Tycho-2
+    /// catalogue; a missing one lands as an error, never a panic. `seed` fixes the
+    /// shots' measurement errors.
+    #[func]
+    fn begin_sky_run(&mut self, seed: i64) -> bool {
+        if self.sky_build.is_some() {
+            return false; // already building — not an error
+        }
+        let Some(core) = self.core.as_ref() else {
+            self.error = "load() must succeed before begin_sky_run()".into();
+            return false;
+        };
+        let eph = core.ephemeris_arc();
+        let cfg = SkyRunConfig::apophis_2021(seed as u64);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(SkyRunView::build_apophis(&eph, &cfg));
+        });
+        self.sky_build = Some(rx);
+        self.error = GString::new();
+        true
+    }
+
+    /// Pump the sky-run worker: `true` while still running, `false` once landed
+    /// (then [`has_sky_run`](Self::has_sky_run) says whether it succeeded).
+    #[func]
+    fn poll_sky_run(&mut self) -> bool {
+        let Some(rx) = self.sky_build.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Ok(Ok(view)) => {
+                self.sky_build = None;
+                self.sky_run = Some(view);
+                false
+            }
+            Ok(Err(message)) => {
+                self.sky_build = None;
+                self.error = message.as_str().into();
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.sky_build = None;
+                self.error = "the sky-run thread died without reporting".into();
+                false
+            }
+        }
+    }
+
+    /// Whether a sky run is available to read.
+    #[func]
+    fn has_sky_run(&self) -> bool {
+        self.sky_run.is_some()
+    }
+
+    /// The run as a whole: target, site, field size, the error size, and the
+    /// shot and night counts.
+    #[func]
+    fn sky_run_info(&self) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        let Some(run) = self.sky_run.as_ref() else {
+            return d;
+        };
+        d.set("target", run.target.as_str());
+        d.set("site", run.site.as_str());
+        d.set("half_width_arcsec", run.half_width_arcsec);
+        d.set("finder_radius_deg", run.finder_radius_deg);
+        d.set("sigma_ra_arcsec", run.sigma_ra_arcsec);
+        d.set("sigma_dec_arcsec", run.sigma_dec_arcsec);
+        d.set("shots", run.shots.len() as i64);
+        d.set("nights", run.finders.len() as i64);
+        d
+    }
+
+    /// One shot's circumstances (empty for an index out of range).
+    #[func]
+    fn sky_shot_info(&self, i: i64) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        let Some(s) = self.sky_shot(i) else {
+            return d;
+        };
+        d.set("night", s.night as i64);
+        d.set("index_in_night", s.index_in_night as i64);
+        d.set("utc", s.utc.as_str());
+        d.set("epoch_tdb_s", s.epoch_tdb_s);
+        d.set("exposure_s", s.exposure_s);
+        d.set("v_mag", s.v_mag);
+        d.set("alt_deg", s.alt_deg);
+        d.set("sun_alt_deg", s.sun_alt_deg);
+        d.set("delta_au", s.delta_au);
+        d.set("rate_arcsec_min", s.rate_arcsec_min);
+        d.set("pointing_ra_deg", s.pointing_ra_deg);
+        d.set("pointing_dec_deg", s.pointing_dec_deg);
+        d.set("has_rock", s.rock.is_some());
+        d
+    }
+
+    /// A shot's stars, flat: `[ξ″, η″, V, reference(0/1)]` per star.
+    #[func]
+    fn sky_shot_stars(&self, i: i64) -> PackedFloat64Array {
+        self.sky_shot(i)
+            .map(|s| flatten_sky_stars(&s.stars))
+            .unwrap_or_default()
+    }
+
+    /// A shot's star names, one per star in `sky_shot_stars` order (an empty
+    /// string for an unnamed star).
+    #[func]
+    fn sky_shot_star_labels(&self, i: i64) -> PackedStringArray {
+        self.sky_shot(i)
+            .map(|s| {
+                s.stars
+                    .iter()
+                    .map(|x| GString::from(x.label.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The asteroid **as drawn** — `[ξ, η mid, ξ, η trail start, ξ, η trail end,
+    /// V]`, arcseconds — or empty if it is outside the field. The true position is
+    /// deliberately not exposed: the picture carries the measurement error, and
+    /// the truth is for scoring a measurement, later.
+    #[func]
+    fn sky_shot_rock(&self, i: i64) -> PackedFloat64Array {
+        let Some(r) = self.sky_shot(i).and_then(|s| s.rock) else {
+            return PackedFloat64Array::new();
+        };
+        PackedFloat64Array::from(
+            [
+                r.drawn_mid.0,
+                r.drawn_mid.1,
+                r.drawn_start.0,
+                r.drawn_start.1,
+                r.drawn_end.0,
+                r.drawn_end.1,
+                r.v_mag,
+            ]
+            .as_slice(),
+        )
+    }
+
+    /// A night's finder-chart stars, flat as in `sky_shot_stars`.
+    #[func]
+    fn sky_finder_stars(&self, night: i64) -> PackedFloat64Array {
+        self.sky_finder(night)
+            .map(|f| flatten_sky_stars(&f.stars))
+            .unwrap_or_default()
+    }
+
+    /// A night's finder-chart star names, in `sky_finder_stars` order.
+    #[func]
+    fn sky_finder_labels(&self, night: i64) -> PackedStringArray {
+        self.sky_finder(night)
+            .map(|f| {
+                f.stars
+                    .iter()
+                    .map(|x| GString::from(x.label.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     // --- The Tier-3 uncertainty ellipse (HANDOFF §7) ------------------------

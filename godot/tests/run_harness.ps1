@@ -100,7 +100,7 @@ finally {
         }
 }
 
-Get-Content $Log | Where-Object { $_ -match '^(SHOT|PERF|TIER2SHOT|PORKSHOT|THREATSHOT|TRACTORSHOT|PASS|FAIL|SCRIPT ERROR)' }
+Get-Content $Log | Where-Object { $_ -match '^(SHOT|PERF|TIER2SHOT|PORKSHOT|THREATSHOT|TRACTORSHOT|SKYSHOT|PASS|FAIL|SCRIPT ERROR)' }
 if (Test-Path "$Log.err") {
     Get-Content "$Log.err" | Where-Object { $_ -match 'SCRIPT ERROR|ERROR' } | Select-Object -First 20
 }

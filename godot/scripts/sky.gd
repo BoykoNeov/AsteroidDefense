@@ -183,6 +183,12 @@ func _draw() -> void:
 				n += 1
 		else:
 			_draw_rock(frame, px_per_arcsec, shot.rock, "", mid)
+	if Sim.sky_trial_open:
+		if stacked and not finder:
+			for i in _night_members(night):
+				_draw_ghost(frame, px_per_arcsec, i, bright, dim)
+		else:
+			_draw_ghost(frame, px_per_arcsec, shot_idx, bright, dim)
 	_draw_compass(frame, dim)
 	_draw_scale_bar(frame, px_per_arcsec, finder, dim)
 	_draw_panel(Vector2(frame.end.x + 2.0 * MARGIN, TOP_RESERVE), shot, finder, bright, mid, dim, faint)
@@ -220,6 +226,48 @@ func _draw_rock(frame: Rect2, k: float, rock: PackedFloat64Array, tag: String, m
 		draw_line(a, b, col, 1.6)
 	if tag != "":
 		_t((a + b) * 0.5 + Vector2(5.0, -5.0), tag, mid, _fs - 3)
+
+
+## Where the player's trial orbit puts the asteroid in shot `i`: a cross, joined
+## to the asteroid's image by a thin line. Off the frame it becomes an arrow on
+## the frame's edge pointing at it, with how far away it is — so a guess that is
+## degrees out still says which way to go.
+func _draw_ghost(frame: Rect2, k: float, i: int, bright: Color, dim: Color) -> void:
+	var g := Sim.sky_trial_ghosts
+	if g.size() < 6 * (i + 1):
+		return
+	var xi := g[6 * i]
+	var eta := g[6 * i + 1]
+	var sep := g[6 * i + 4]
+	var c := frame.get_center()
+	var rock: PackedFloat64Array = Sim.sky_shots[i].rock
+	var rock_p := c
+	if rock.size() >= 2:
+		rock_p = _to_screen(frame, k, rock[0], rock[1])
+	var p := _to_screen(frame, k, xi, eta) if not (is_nan(xi) or is_nan(eta)) else Vector2(INF, INF)
+	if frame.has_point(p):
+		draw_line(p + Vector2(-5, -5), p + Vector2(5, 5), bright, 1.2)
+		draw_line(p + Vector2(-5, 5), p + Vector2(5, -5), bright, 1.2)
+		if frame.has_point(rock_p) and p.distance_to(rock_p) > 6.0:
+			draw_line(rock_p, p, Color(bright, 0.35), 1.0)
+		_t(p + Vector2(7.0, 12.0), Sim._sky_arcsec_text(sep), bright, _fs - 3)
+		return
+	# Off the frame: an arrow from the centre toward it, clipped to the edge. The
+	# direction is the position angle the core returns (north through east), drawn
+	# with east to the left like everything else here.
+	var pa := deg_to_rad(g[6 * i + 5])
+	var dir := Vector2(-sin(pa), -cos(pa))
+	# Kept 48 px inside the edge, clear of the compass (top right) and the scale
+	# bar (bottom left) that share the corners.
+	var half := frame.size * 0.5 - Vector2(48.0, 48.0)
+	var tx := absf(half.x / dir.x) if absf(dir.x) > 1e-6 else INF
+	var ty := absf(half.y / dir.y) if absf(dir.y) > 1e-6 else INF
+	var tip := c + dir * minf(tx, ty)
+	draw_line(tip - dir * 22.0, tip, bright, 1.5)
+	var side := Vector2(-dir.y, dir.x)
+	draw_line(tip, tip - dir * 8.0 + side * 5.0, bright, 1.5)
+	draw_line(tip, tip - dir * 8.0 - side * 5.0, bright, 1.5)
+	_t(tip - dir * 30.0 + Vector2(-20.0, 4.0), "GUESS " + Sim._sky_arcsec_text(sep), bright, _fs - 3)
 
 
 ## North up, east LEFT: a positive xi (east) is drawn to the left of centre.
@@ -280,6 +328,9 @@ func _draw_panel(at: Vector2, shot: Dictionary, finder: bool, bright: Color, mid
 		_line("HINT: BLINK THE SHOTS - THE STARS STAY PUT,", dim, _fs - 2)
 		_line("ONE FAINT DOT JUMPS. THAT IS THE ASTEROID.", dim, _fs - 2)
 	_py += 6.0
+	if Sim.sky_trial_open:
+		_draw_trial_panel(bright, mid, dim, faint)
+		return
 	_line("GAME CHOICES: THE FIELD SIZE, AND THE POINTING -", faint, _fs - 3)
 	_line("AIMED AT THE TRUE POSITION, WHICH NO OBSERVER", faint, _fs - 3)
 	_line("OF A NEW OBJECT CAN DO.", faint, _fs - 3)
@@ -290,6 +341,35 @@ func _draw_panel(at: Vector2, shot: Dictionary, finder: bool, bright: Color, mid
 	_line("POSITIONS: JPL HORIZONS (APOPHIS), DE440", faint, _fs - 3)
 	_py += 6.0
 	_line("[</>]SHOT [UP/DN]ZOOM [B]BLINK [O]STACK [L]NAMES", dim, _fs - 2)
+	_line("[M]TRY AN ORBIT", dim, _fs - 2)
+
+
+## The trial-orbit block: the six knobs, the miss, the hint and what the selected
+## knob does. Replaces the credits while it is open.
+func _draw_trial_panel(bright: Color, mid: Color, dim: Color, faint: Color) -> void:
+	_line("TRIAL ORBIT - SUN ONLY, ELEMENTS AT %s" % str(Sim.sky_info.get("element_epoch_utc", "")),
+		bright, _fs - 1)
+	for k in range(Sim.SKY_TRIAL_KNOBS.size()):
+		var knob: Array = Sim.SKY_TRIAL_KNOBS[k]
+		var sel := k == Sim.sky_trial_cursor
+		var v := Sim.sky_trial[k] if Sim.sky_trial.size() == 6 else NAN
+		var fmt := "%s %-5s %12.6f %-3s  STEP %s" if k < 2 else "%s %-5s %12.5f %-3s  STEP %s"
+		_line(fmt % [">" if sel else " ", knob[0], v, knob[1], String.num(Sim.sky_trial_step(k), 9)],
+			bright if sel else mid, _fs - 1)
+	_py += 4.0
+	var g := Sim.sky_trial_ghosts
+	if g.size() >= 6 * (shot_idx + 1):
+		_line("MISS IN THIS SHOT      %s" % Sim._sky_arcsec_text(g[6 * shot_idx + 4]), bright)
+	_line("MISS OVER ALL %d SHOTS  %s (RMS)" % [Sim.sky_shots.size(),
+		Sim._sky_arcsec_text(Sim.sky_trial_rms)], bright)
+	_line("THE MEASURING ERROR ALONE LEAVES ~0.4\"", dim, _fs - 2)
+	if Sim.sky_trial_hint_text != "":
+		_line(Sim.sky_trial_hint_text, bright, _fs - 2)
+	_py += 4.0
+	_line(str(Sim.SKY_TRIAL_KNOBS[Sim.sky_trial_cursor][3]), dim, _fs - 2)
+	_py += 4.0
+	_line("[UP/DN]PICK [</>]TURN [-/=]STEP [H]HINT", dim, _fs - 2)
+	_line("[E]JPL'S ORBIT [R]RESTART [Z/X]ZOOM [,/.]SHOT [M]CLOSE", dim, _fs - 2)
 
 
 ## One panel line at the running cursor, which then moves down.

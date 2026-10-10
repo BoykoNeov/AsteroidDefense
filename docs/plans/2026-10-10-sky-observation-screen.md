@@ -17,6 +17,16 @@ This is the start of the roadmap's last open item, **detection**.
 | where it sits | **a standalone screen first** (key `[5]`); hooking it into "when is the threat found" comes later |
 | how far fitting goes | **all three, in order**: guess-and-compare → Gauss three-shot orbit → least-squares best fit whose covariance feeds the existing Tier-3 ellipse (the old roadmap line "covariance ellipse shrinking with observations", never built) |
 
+## Progress (2026-10-10)
+
+| step | state | what it measured |
+|---|---|---|
+| 1 sky position | **done** | Apophis vs Horizons astrometric RA/Dec, 16 dates incl. the 2029 flyby: ≤ 0.085 mas from the geocentre; from Mt. Lemmon (G96) the site model is 2–48 m off Horizons' full IERS model (budget 400 m, UT1−UTC unknowable years ahead). The site is **required**: geocentre vs G96 is 3–78″ at 0.1–1.9 au, up to 9° at the flyby |
+| 2 star catalogue | **done** | all 2 557 501 Tycho-2 stars packed (62 MB, gitignored); VizieR's own cones find the same 44 / 30 / 11 stars (field, across 0h, over the pole); SIMBAD puts Vega / Sirius / Betelgeuse within 10.6 / 0.3 / 4.6 mas. **Polaris is 379 mas off** — Tycho-2 has no motion for 4.3 % of its stars (flag X); those are drawn but never measuring references |
+| 3 shots | **done** | hour by hour vs Horizons from G96 across 2021-03-01..12: position 0.88 mas, rate 0.28″/h, magnitude 0.0006, elevation 0.006°, every night hour dark. Error drawn at Vereš et al. 2017's G96 0.31″/0.28″ (RMS over 400 seeds 0.307/0.294). The rock (V 15.6) is fainter than every Tycho-2 star in its 0.5° field |
+| 4 the `[5]` screen | **done** | built in ~60 ms on a worker; blink / step / stack / zoom to a 12° finder chart with names; seen on `godot/tests/_sky_shot.gd` (Apophis beside Alfard in Hydra) |
+| 5 guess and compare | **done** | two-body prediction measured first: **0.008″ over the run's ±1.5 days**, 1.0″ at ±10 d, 13.6″ at ±30 d — honest for this run, not for an arc of weeks. `[M]` on `[5]` opens six dials (a, e, i, node, perihelion, mean anomaly) with a cross per shot where the guess puts the rock (an edge arrow when off-frame); starts 12.5° out; `[H]` picks the one step that helps most (12.53° → 6.02°); `[E]` sets JPL's orbit and the miss falls to the measuring error (**0.37″ in the game, 0.42″ in the Rust test**, against ~0.42″ expected for 9 shots); `[R]` restarts. Seen on `godot/tests/_sky_shot.gd` — which passed while the dial rows were drawing their raw format string (GDScript has no `%g`), so read the harness's ERROR lines, not only its PASS |
+
 ## Rules this plan inherits
 
 - **Core computes, GDScript draws.** Every position on the screen comes out of

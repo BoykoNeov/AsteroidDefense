@@ -461,6 +461,35 @@ var sky_shots: Array = []
 ## Per night: {stars, labels} for the wide finder chart.
 var sky_finders: Array = []
 
+# The player's trial orbit (step 5): six heliocentric ecliptic elements at the
+# run's middle shot, the ghosts they predict, and the knob state.
+## [name, unit, base step, what it does - for the panel and its hints].
+const SKY_TRIAL_KNOBS: Array = [
+	["a", "AU", 0.01, "SIZE OF THE ORBIT - SETS ITS SPEED ALONG ITS PATH"],
+	["e", "", 0.01, "HOW STRETCHED THE ELLIPSE IS"],
+	["i", "DEG", 0.1, "TILT AGAINST EARTH'S ORBIT - MOVES IT NORTH/SOUTH"],
+	["NODE", "DEG", 1.0, "WHERE IT CROSSES EARTH'S ORBIT PLANE GOING NORTH"],
+	["PERI", "DEG", 1.0, "WHICH WAY THE ELLIPSE POINTS (PERIHELION)"],
+	["M", "DEG", 1.0, "WHERE ON THE ORBIT IT IS AT THE EPOCH"],
+]
+## The steps are base x 10^exp; [-]/[=] move exp. Down to 1e-5 because a 1 deg
+## change of M moves this ghost ~6 deg on the sky at 0.11 au, and the shots are
+## measured to 0.3 arcsec.
+const SKY_TRIAL_EXP_MIN := -5
+const SKY_TRIAL_EXP_MAX := 1
+var sky_trial_open := false
+var sky_trial: PackedFloat64Array = PackedFloat64Array()
+var sky_trial_start: PackedFloat64Array = PackedFloat64Array()
+var sky_trial_cursor := 0
+var sky_trial_exp := 0
+## Per shot [xi, eta, dxi, deta, sep_arcsec, pa_deg] (see Mission.sky_trial_ghosts).
+var sky_trial_ghosts: PackedFloat64Array = PackedFloat64Array()
+var sky_trial_rms := NAN
+var sky_trial_hint_text := ""
+var sky_trial_revealed := false
+## The guess [E] put aside, restored when [E] is pressed again.
+var sky_trial_before_reveal: PackedFloat64Array = PackedFloat64Array()
+
 var pork_online := false               # a built grid is readable
 var pork_building := false             # the ~0.6 s worker is running
 var pork_rows := 0                     # launch epochs
@@ -1922,7 +1951,111 @@ func _poll_sky_run() -> void:
 		})
 	event_logged.emit(_stamp(t) + "  OBSERVING RUN READY - %d SHOTS OVER %d NIGHTS" %
 		[sky_shots.size(), sky_finders.size()])
+	sky_trial_start = mission.sky_trial_start()
+	sky_trial = sky_trial_start.duplicate()
+	_sky_trial_update()
 	sky_changed.emit()
+
+
+## Recompute the ghosts for the current trial orbit (synchronous: nine two-body
+## sightings, well under a millisecond).
+func _sky_trial_update() -> void:
+	if not sky_online or sky_trial.size() != 6:
+		return
+	if mission.sky_trial_set(sky_trial):
+		sky_trial_ghosts = mission.sky_trial_ghosts()
+		sky_trial_rms = mission.sky_trial_rms_arcsec()
+	else:
+		sky_trial_ghosts = PackedFloat64Array()
+		sky_trial_rms = NAN
+		sky_trial_hint_text = "NOT AN ORBIT: " + str(mission.last_error()).to_upper()
+	sky_changed.emit()
+
+
+func sky_trial_step(k: int) -> float:
+	return float(SKY_TRIAL_KNOBS[k][2]) * pow(10.0, sky_trial_exp)
+
+
+func move_sky_trial_cursor(d: int) -> void:
+	sky_trial_cursor = posmod(sky_trial_cursor + d, SKY_TRIAL_KNOBS.size())
+	sky_changed.emit()
+
+
+func adjust_sky_trial(d: int) -> void:
+	if sky_trial.size() != 6:
+		return
+	var k := sky_trial_cursor
+	var v := sky_trial[k] + d * sky_trial_step(k)
+	# e stays an ellipse, a stays positive, i stays in [0, 180]; the angles wrap.
+	match k:
+		0: v = maxf(v, 0.05)
+		1: v = clampf(v, 0.0, 0.99)
+		2: v = clampf(v, 0.0, 180.0)
+		_: v = fposmod(v, 360.0)
+	sky_trial[k] = v
+	# Once a knob turns it is the player's orbit again, not JPL's: [E] then
+	# reveals afresh instead of throwing this edit away.
+	sky_trial_revealed = false
+	sky_trial_hint_text = ""
+	_sky_trial_update()
+
+
+func scale_sky_trial_step(d: int) -> void:
+	sky_trial_exp = clampi(sky_trial_exp + d, SKY_TRIAL_EXP_MIN, SKY_TRIAL_EXP_MAX)
+	sky_changed.emit()
+
+
+## The hint: which one knob, turned one step at the current step size, shrinks
+## the miss most - computed by the core trying each in both directions.
+func sky_trial_hint() -> void:
+	if sky_trial.size() != 6:
+		return
+	var steps := PackedFloat64Array()
+	for k in range(6):
+		steps.append(sky_trial_step(k))
+	var h: PackedFloat64Array = mission.sky_trial_hint(sky_trial, steps)
+	if h.size() < 3 or int(h[0]) < 0:
+		sky_trial_hint_text = "HINT: NO SINGLE STEP HELPS - TRY A FINER STEP [-]"
+	else:
+		var k := int(h[0])
+		sky_trial_cursor = k
+		sky_trial_hint_text = "HINT: %s %s ONE STEP -> MISS %s" % [
+			"RAISE" if h[1] > 0.0 else "LOWER", SKY_TRIAL_KNOBS[k][0], _sky_arcsec_text(h[2])]
+	sky_changed.emit()
+
+
+## Show JPL's own orbit: the trial is set to it and the ghosts land on the shots,
+## to within the measurement error. Pressing again goes back to the guess.
+func toggle_sky_trial_reveal() -> void:
+	if not sky_online:
+		return
+	sky_trial_revealed = not sky_trial_revealed
+	if sky_trial_revealed:
+		sky_trial_before_reveal = sky_trial.duplicate()
+		sky_trial = mission.sky_truth_elements()
+		sky_trial_hint_text = "JPL'S ORBIT - THE MISS LEFT IS THE MEASURING ERROR"
+	else:
+		sky_trial = sky_trial_before_reveal.duplicate()
+		sky_trial_hint_text = ""
+	_sky_trial_update()
+
+
+func reset_sky_trial() -> void:
+	sky_trial = sky_trial_start.duplicate()
+	sky_trial_revealed = false
+	sky_trial_hint_text = ""
+	_sky_trial_update()
+
+
+## An angle in arcseconds as the panel prints it: arcsec, arcmin or degrees.
+func _sky_arcsec_text(a: float) -> String:
+	if is_nan(a):
+		return "-"
+	if a < 60.0:
+		return "%.2f\"" % a
+	if a < 3600.0:
+		return "%.1f'" % (a / 60.0)
+	return "%.2f DEG" % (a / 3600.0)
 
 
 # ------------------------------------------------------- porkchop / delivery ---

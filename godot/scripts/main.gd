@@ -497,8 +497,58 @@ func _input(event: InputEvent) -> void:
 ##
 ## Reuses actions rather than minting new ones (every letter is taken): [B] is
 ## time-reverse elsewhere and BLINK here, [O] a force-menu term elsewhere and
-## OVERLAY here, [L] the launcher elsewhere and LABELS here.
+## OVERLAY here, [L] the launcher elsewhere and LABELS here, [M] the planner
+## elsewhere and the TRIAL ORBIT here (with [H] hint, [E] JPL's orbit, [R]
+## restart, [-/=] step while it is open). [,/.] and [Z/X] step shots and zoom
+## always, because the trial orbit takes the arrows.
 func _sky_key(event: InputEvent) -> bool:
+	# Keys that work whether or not the trial orbit is open.
+	if event.is_action_pressed("plan_toggle"):
+		Sim.sky_trial_open = not Sim.sky_trial_open
+		Sim.sky_changed.emit()
+		return true
+	if event.is_action_pressed("encounter_sigma_down"):
+		sky.zoom(-1)
+		return true
+	if event.is_action_pressed("encounter_sigma_up"):
+		sky.zoom(1)
+		return true
+	if event.is_action_pressed("warp_down"):
+		sky.step_shot(-1)
+		return true
+	if event.is_action_pressed("warp_up"):
+		sky.step_shot(1)
+		return true
+	# The trial orbit claims the arrows while it is open: up/down pick an element,
+	# left/right turn it - the tractor bench's one-cursor pattern.
+	if Sim.sky_trial_open:
+		if event.is_action_pressed("pork_cursor_up"):
+			Sim.move_sky_trial_cursor(-1)
+		elif event.is_action_pressed("pork_cursor_down"):
+			Sim.move_sky_trial_cursor(1)
+		elif event.is_action_pressed("pork_cursor_left"):
+			Sim.adjust_sky_trial(-1)
+		elif event.is_action_pressed("pork_cursor_right"):
+			Sim.adjust_sky_trial(1)
+		elif event.is_action_pressed("plan_dv_down"):
+			Sim.scale_sky_trial_step(-1)
+		elif event.is_action_pressed("plan_dv_up"):
+			Sim.scale_sky_trial_step(1)
+		elif event.is_action_pressed("encounter_keyholes"):
+			Sim.sky_trial_hint()
+		elif event.is_action_pressed("pork_verify"):
+			Sim.toggle_sky_trial_reveal()
+		elif event.is_action_pressed("time_reset"):
+			Sim.reset_sky_trial()
+		elif event.is_action_pressed("time_reverse"):
+			sky.toggle_blink()
+		elif event.is_action_pressed("tier2_term_j2"):
+			sky.toggle_stack()
+		elif event.is_action_pressed("pork_vehicle"):
+			sky.toggle_labels()
+		else:
+			return false
+		return true
 	if event.is_action_pressed("pork_cursor_left"):
 		sky.step_shot(-1)
 	elif event.is_action_pressed("pork_cursor_right"):

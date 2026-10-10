@@ -107,6 +107,48 @@ func _run() -> void:
 	await _settle(3)
 	await _shot("sky_telescope_n3s3")
 
+	# The trial orbit: [M] opens it on the rough starting guess, degrees out.
+	main.sky.zoom_idx = 1
+	main.sky.shot_idx = 4
+	main._input(_key(KEY_M))
+	await _settle(3)
+	print("SKYSHOT  [M] -> trial open %s, start RMS %.1f arcsec" % [Sim.sky_trial_open, Sim.sky_trial_rms])
+	assert(Sim.sky_trial_open, "[M] must open the trial orbit on the sky screen")
+	assert(not main.planner.visible, "[M] must not open the mission planner here")
+	assert(Sim.sky_trial_rms > 3600.0, "the starting guess should be degrees out")
+	await _shot("sky_trial_start")
+	main.sky.zoom_idx = 0
+	await _settle(3)
+	await _shot("sky_trial_start_finder")
+	# [H]: the hint names a knob and a direction, and following it helps.
+	var before: float = Sim.sky_trial_rms
+	main._input(_key(KEY_H))
+	print("SKYSHOT  [H] -> '%s' (cursor %d)" % [Sim.sky_trial_hint_text, Sim.sky_trial_cursor])
+	var hint_sign := 1 if Sim.sky_trial_hint_text.begins_with("HINT: RAISE") else -1
+	main._input(_key(KEY_RIGHT if hint_sign > 0 else KEY_LEFT))
+	print("SKYSHOT  followed the hint: RMS %.1f -> %.1f arcsec" % [before, Sim.sky_trial_rms])
+	assert(Sim.sky_trial_rms < before, "following the hint must shrink the miss")
+	await _settle(3)
+	await _shot("sky_trial_after_hint")
+	# [E]: JPL's orbit. The ghosts land on the asteroid to within the measuring error.
+	main._input(_key(KEY_E))
+	print("SKYSHOT  [E] -> JPL orbit, RMS %.3f arcsec" % Sim.sky_trial_rms)
+	assert(Sim.sky_trial_rms < 1.0, "JPL's orbit must land within the measuring error")
+	main.sky.zoom_idx = 3
+	main.sky.stacked = true
+	await _settle(3)
+	await _shot("sky_trial_jpl_zoom4_stacked")
+	# Turning a knob makes it the player's orbit again: [E] then reveals JPL's
+	# afresh rather than throwing the edit away for the pre-reveal guess.
+	main._input(_key(KEY_RIGHT))
+	main._input(_key(KEY_E))
+	print("SKYSHOT  knob turned, [E] again -> RMS %.3f arcsec" % Sim.sky_trial_rms)
+	assert(Sim.sky_trial_rms < 1.0, "[E] after an edit must reveal JPL's orbit again")
+	# [R] restarts from the rough guess.
+	main._input(_key(KEY_R))
+	print("SKYSHOT  [R] -> RMS %.1f arcsec (back to the start)" % Sim.sky_trial_rms)
+	assert(Sim.sky_trial_rms > 3600.0, "[R] must restart the guess")
+
 	print("SKYSHOT  PASS")
 	get_tree().quit(0)
 

@@ -262,6 +262,9 @@ struct Mission {
     sky_build: Option<mpsc::Receiver<Result<SkyRunView, String>>>,
     /// The landed sky run.
     sky_run: Option<SkyRunView>,
+    /// The ghosts of the last trial orbit set with
+    /// [`sky_trial_set`](Mission::sky_trial_set).
+    sky_trial: Vec<sky_core::Ghost>,
     error: GString,
     base: Base<RefCounted>,
 }
@@ -277,6 +280,12 @@ impl Mission {
             .finders
             .get(usize::try_from(night).ok()?)
     }
+}
+
+/// Six numbers from GDScript as trial elements, or `None` for the wrong length.
+fn trial_of(a: &PackedFloat64Array) -> Option<sky_core::TrialElements> {
+    let v = a.as_slice();
+    (v.len() == 6).then(|| [v[0], v[1], v[2], v[3], v[4], v[5]])
 }
 
 /// `[ξ″, η″, V, reference(0/1)]` per star, flat — the shape GDScript reads.
@@ -1185,7 +1194,100 @@ impl Mission {
         d.set("sigma_dec_arcsec", run.sigma_dec_arcsec);
         d.set("shots", run.shots.len() as i64);
         d.set("nights", run.finders.len() as i64);
+        d.set("element_epoch_utc", run.element_epoch_utc.as_str());
         d
+    }
+
+    /// The trial orbit the player starts from — JPL's orbit knocked off in every
+    /// element (`sky_core::START_OFFSET`) — as `[a au, e, i, node, peri, M]`,
+    /// degrees.
+    #[func]
+    fn sky_trial_start(&self) -> PackedFloat64Array {
+        self.sky_run
+            .as_ref()
+            .map(|r| PackedFloat64Array::from(r.start.as_slice()))
+            .unwrap_or_default()
+    }
+
+    /// JPL's own orbit at the element epoch, in the same six numbers.
+    #[func]
+    fn sky_truth_elements(&self) -> PackedFloat64Array {
+        self.sky_run
+            .as_ref()
+            .map(|r| PackedFloat64Array::from(r.truth.as_slice()))
+            .unwrap_or_default()
+    }
+
+    /// Predict every shot from a trial orbit (`[a au, e, i, node, peri, M]`,
+    /// degrees, ecliptic, Sun only). Synchronous — nine two-body sightings.
+    /// `false` with a reason in [`last_error`](Self::last_error) if it is not an
+    /// orbit.
+    #[func]
+    fn sky_trial_set(&mut self, el: PackedFloat64Array) -> bool {
+        let (Some(run), Some(core)) = (self.sky_run.as_ref(), self.core.as_ref()) else {
+            self.error = "no sky run to predict".into();
+            return false;
+        };
+        let Some(el) = trial_of(&el) else {
+            self.error = "a trial orbit is six numbers".into();
+            return false;
+        };
+        match run.ghosts(&core.ephemeris_arc(), &el) {
+            Ok(g) => {
+                self.sky_trial = g;
+                true
+            }
+            Err(e) => {
+                self.sky_trial.clear();
+                self.error = e.as_str().into();
+                false
+            }
+        }
+    }
+
+    /// The last trial's ghosts, flat: `[ξ, η, Δξ, Δη, miss, position angle]` per
+    /// shot — arcseconds, and degrees north through east for the angle.
+    #[func]
+    fn sky_trial_ghosts(&self) -> PackedFloat64Array {
+        let flat: Vec<f64> = self
+            .sky_trial
+            .iter()
+            .flat_map(|g| [g.xi_arcsec, g.eta_arcsec, g.dxi_arcsec, g.deta_arcsec, g.sep_arcsec, g.pa_deg])
+            .collect();
+        PackedFloat64Array::from(flat.as_slice())
+    }
+
+    /// The last trial's RMS miss over the shots, arcseconds.
+    #[func]
+    fn sky_trial_rms_arcsec(&self) -> f64 {
+        SkyRunView::rms_arcsec(&self.sky_trial)
+    }
+
+    /// The single step that shrinks the miss most: `[element, ±1, rms after]`,
+    /// or `[-1, 0, rms now]` when no single step at these sizes helps.
+    #[func]
+    fn sky_trial_hint(&mut self, el: PackedFloat64Array, steps: PackedFloat64Array) -> PackedFloat64Array {
+        let (Some(run), Some(core)) = (self.sky_run.as_ref(), self.core.as_ref()) else {
+            return PackedFloat64Array::new();
+        };
+        let (Some(el), Some(steps)) = (trial_of(&el), trial_of(&steps)) else {
+            return PackedFloat64Array::new();
+        };
+        let eph = core.ephemeris_arc();
+        match run.hint(&eph, &el, &steps) {
+            Ok(Some((k, sign, rms))) => PackedFloat64Array::from([k as f64, sign, rms].as_slice()),
+            Ok(None) => {
+                let now = run
+                    .ghosts(&eph, &el)
+                    .map(|g| SkyRunView::rms_arcsec(&g))
+                    .unwrap_or(f64::NAN);
+                PackedFloat64Array::from([-1.0, 0.0, now].as_slice())
+            }
+            Err(e) => {
+                self.error = e.as_str().into();
+                PackedFloat64Array::new()
+            }
+        }
     }
 
     /// One shot's circumstances (empty for an index out of range).

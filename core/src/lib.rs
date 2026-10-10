@@ -20,6 +20,7 @@
 //! and [`keyhole`] (the pinned Öpik ξ,ζ frame, resonant-return circles and
 //! keyhole widths).
 
+pub mod astrometry;
 pub mod campaign;
 pub mod clock;
 pub mod close_approach;

@@ -293,18 +293,15 @@ mod tests {
             );
             assert!(s.utc.starts_with("2021-03-0"), "{}", s.utc);
         }
-        for f in &view.finders {
+        for (night, f) in view.finders.iter().enumerate() {
             let named = f.stars.iter().filter(|s| !s.label.is_empty()).count();
             println!(
-                "  night {}: finder {} stars, {} named",
-                f.night,
-                f.stars.len(),
-                named
+                "  night {night}: finder {} stars, {named} named",
+                f.stars.len()
             );
             assert!(
                 named >= 3,
-                "night {}: only {named} named stars in the finder",
-                f.night
+                "night {night}: only {named} named stars in the finder"
             );
         }
         // Same seed, same picture.

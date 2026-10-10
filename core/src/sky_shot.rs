@@ -53,6 +53,8 @@ use crate::astrometry::{self, AstrometryError, SkyPosition, RAD_TO_ARCSEC};
 use crate::earth_orientation::Site;
 use crate::ephemeris::Ephemeris;
 use crate::epoch::Epoch;
+use crate::frames::ecliptic_to_icrf;
+use crate::propagator::{KeplerPropagator, Propagator};
 use crate::rng::NormalRng;
 use crate::star_catalog::{StarCatalog, StarCatalogError, TycId};
 
@@ -86,6 +88,34 @@ pub struct Target<'a> {
     pub g: f64,
     /// Barycentric ICRF position, metres, at TDB seconds past J2000.
     pub ssb_m: Box<dyn Fn(f64) -> Option<Vector3<f64>> + 'a>,
+}
+
+impl<'a> Target<'a> {
+    /// A target on a **two-body heliocentric orbit**: the Kepler ellipse of
+    /// `orbit` (elements in the ecliptic-J2000 frame, about the Sun), placed in the
+    /// barycentric frame by DE440's Sun. This is what a trial orbit — the
+    /// player's guess, or a fitted one — predicts. It ignores the planets; how
+    /// much that costs over an observing arc is measured in
+    /// `core/tests/sky_two_body_vs_truth.rs`.
+    pub fn two_body(
+        name: impl Into<String>,
+        h: f64,
+        g: f64,
+        orbit: KeplerPropagator,
+        eph: &'a Ephemeris,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            h,
+            g,
+            ssb_m: Box::new(move |t| {
+                let epoch = Epoch::from_tdb_seconds_past_j2000(t);
+                let helio_ecl = orbit.state_at(epoch).ok()?.position;
+                let sun = eph.sun_ssb_km(epoch.as_hifitime()).ok()? * 1000.0;
+                Some(ecliptic_to_icrf(helio_ecl) + sun)
+            }),
+        }
+    }
 }
 
 /// Apparent magnitude in the IAU H-G system (Bowell et al. 1989, in *Asteroids

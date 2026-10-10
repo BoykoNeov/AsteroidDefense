@@ -33,6 +33,7 @@
 
 use nalgebra::Vector3;
 
+use crate::earth_orientation::Site;
 use crate::ephemeris::{Ephemeris, EphemerisError};
 use crate::epoch::Epoch;
 use crate::forces::relativity::SPEED_OF_LIGHT_M_S;
@@ -164,6 +165,27 @@ where
 {
     let earth_m = eph.geocenter_ssb_km(epoch.as_hifitime())? * 1000.0;
     astrometric(earth_m, epoch.tdb_seconds_past_j2000(), target_ssb_m)
+}
+
+/// [`astrometric`] from an observatory on the ground — the geocentre plus the
+/// site's position from [`earth_orientation`](crate::earth_orientation). This is
+/// what a telescope records; [`geocentric`] differs from it by up to `R⊕/Δ`
+/// (8.8″ at 1 au, 88″ at 0.1 au).
+pub fn topocentric<F>(
+    eph: &Ephemeris,
+    site: &Site,
+    epoch: Epoch,
+    target_ssb_m: F,
+) -> Result<SkyPosition, AstrometryError>
+where
+    F: FnMut(f64) -> Option<Vector3<f64>>,
+{
+    let earth_m = eph.geocenter_ssb_km(epoch.as_hifitime())? * 1000.0;
+    astrometric(
+        earth_m + site.gcrs_m(epoch),
+        epoch.tdb_seconds_past_j2000(),
+        target_ssb_m,
+    )
 }
 
 /// Right ascension in `[0, 2π)` and declination of a direction. The vector need

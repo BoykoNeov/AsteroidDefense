@@ -26,6 +26,7 @@ pub mod clock;
 pub mod close_approach;
 pub mod deflection;
 pub mod departure_burn;
+pub mod earth_orientation;
 pub mod elements;
 pub mod ephemeris;
 pub mod epoch;

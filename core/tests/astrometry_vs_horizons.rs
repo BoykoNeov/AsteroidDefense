@@ -53,13 +53,16 @@ struct Row {
     delta_au: f64,
     pos_km: Vector3<f64>,
     vel_km_s: Vector3<f64>,
+    g96_ra_deg: f64,
+    g96_dec_deg: f64,
+    g96_delta_au: f64,
 }
 
 fn rows() -> Vec<Row> {
     let mut lines = FIXTURE.lines();
     assert_eq!(
         lines.next(),
-        Some("# asteroid-astrometry-oracle 1"),
+        Some("# asteroid-astrometry-oracle 2"),
         "fixture header"
     );
     lines
@@ -69,7 +72,7 @@ fn rows() -> Vec<Row> {
                 .split_whitespace()
                 .map(|x| x.parse().expect("number"))
                 .collect();
-            assert_eq!(f.len(), 10, "row: {l}");
+            assert_eq!(f.len(), 13, "row: {l}");
             Row {
                 jd_tt: f[0],
                 ra_deg: f[1],
@@ -77,6 +80,9 @@ fn rows() -> Vec<Row> {
                 delta_au: f[3],
                 pos_km: Vector3::new(f[4], f[5], f[6]),
                 vel_km_s: Vector3::new(f[7], f[8], f[9]),
+                g96_ra_deg: f[10],
+                g96_dec_deg: f[11],
+                g96_delta_au: f[12],
             }
         })
         .collect()
@@ -164,4 +170,83 @@ fn dropping_light_time_misses_horizons_by_arcseconds() {
     let miss_arcsec = astrometry::separation_rad(&geometric, &horizons) * RAD_TO_ARCSEC;
     println!("  no light time: {miss_arcsec:.2} arcsec off Horizons");
     assert!(miss_arcsec > 1.0, "{miss_arcsec} arcsec");
+}
+
+/// The same sixteen dates from Mt. Lemmon (G96). This measures the site chain in
+/// `earth_orientation.rs` against Horizons' full IERS model. The miss is quoted
+/// as the **site displacement that would cause it** (`miss × range`), because
+/// that is what the simplified chain gets wrong and it does not depend on how
+/// far away the rock is.
+///
+/// The budget, from the terms the chain leaves out: UT1 − UTC ≤ 0.9 s, which is
+/// ≤ 354 m of site motion at Mt. Lemmon's 393 m/s; polar motion ≤ 0.5″, ≤ 16 m;
+/// truncated nutation and frame bias, ≤ 1 m. So 400 m.
+///
+/// Measured 2026-10-10: **2 to 48 m** on every date (2–28 m on the 2021-22 dates
+/// inside Horizons' measured Earth-orientation data), i.e. 0.01–0.17 mas at
+/// ordinary distances and ≤ 0.26″ at the flyby's closest. The last column says
+/// why the site is not optional: geocentre and Mt. Lemmon differ by **3–78″**
+/// at 0.1–1.9 au and by up to **9°** at the flyby.
+#[test]
+fn apophis_from_mt_lemmon_matches_horizons() {
+    let Some(k) = asteroid_core::kernels::resolve_for_test("topocentric astrometry vs Horizons")
+    else {
+        return;
+    };
+    let (bsp, pca) = k.as_strs();
+    let eph = Ephemeris::load(bsp)
+        .and_then(|e| e.with_constants(pca))
+        .expect("load DE pair");
+    let mu_sun = eph.sun_gm_m3_s2().expect("sun gm");
+    const SITE_TOLERANCE_M: f64 = 400.0;
+
+    println!("  date (JD TT)      range au   miss mas   site-equiv m   geocentric-vs-site arcsec");
+    let mut failures = Vec::new();
+    for r in &rows() {
+        let epoch = Epoch::from(HEpoch::from_jde_in_time_scale(r.jd_tt, TimeScale::TT));
+        let t0 = epoch.tdb_seconds_past_j2000();
+        let (p0, v0) = (r.pos_km * 1000.0, r.vel_km_s * 1000.0);
+        let sun_m = eph.sun_ssb_km(epoch.as_hifitime()).unwrap() * 1000.0;
+        let to_sun = sun_m - p0;
+        let a0 = to_sun * (mu_sun / to_sun.norm().powi(3));
+        let target = |t: f64| {
+            let dt = t - t0;
+            Some(p0 + v0 * dt + a0 * (0.5 * dt * dt))
+        };
+        let s = astrometry::topocentric(&eph, &astrometry_site(), epoch, target).unwrap();
+        let geo = astrometry::geocentric(&eph, epoch, target).unwrap();
+
+        let horizons = astrometry::unit_of(r.g96_ra_deg.to_radians(), r.g96_dec_deg.to_radians());
+        let miss = astrometry::separation_rad(&s.unit_icrf, &horizons);
+        let range_m = r.g96_delta_au * AU_KM * 1000.0;
+        let site_equiv_m = miss * range_m;
+        let parallax = astrometry::separation_rad(&s.unit_icrf, &geo.unit_icrf) * RAD_TO_ARCSEC;
+        println!(
+            "  {:.5}  {:>10.6}  {:>9.3}  {:>12.1}  {:>12.2}",
+            r.jd_tt,
+            r.g96_delta_au,
+            miss * RAD_TO_ARCSEC * 1e3,
+            site_equiv_m,
+            parallax
+        );
+        if site_equiv_m >= SITE_TOLERANCE_M {
+            failures.push(format!(
+                "JD {}: site-equivalent {site_equiv_m:.1} m",
+                r.jd_tt
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "off Horizons:
+{}",
+        failures.join(
+            "
+"
+        )
+    );
+}
+
+fn astrometry_site() -> asteroid_core::earth_orientation::Site {
+    asteroid_core::earth_orientation::MT_LEMMON
 }

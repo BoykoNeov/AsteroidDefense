@@ -119,22 +119,39 @@ def main() -> None:
             }
         )
     )
-    if len(observer) != len(EPOCHS_JD_TT) or len(vectors) != len(EPOCHS_JD_TT):
-        raise SystemExit(f"expected {len(EPOCHS_JD_TT)} rows, got {len(observer)} / {len(vectors)}")
+    # The same dates from a real telescope: Mt. Lemmon Survey (MPC G96). Horizons
+    # places the site with the full IERS Earth model (its EOP data runs to early
+    # 2027 and is a prediction after that), which is what the core's simpler
+    # chain in `core/src/earth_orientation.rs` is measured against.
+    site = rows(
+        query(
+            {
+                "EPHEM_TYPE": "OBSERVER",
+                "CENTER": "'G96@399'",
+                "QUANTITIES": "'1,20'",
+                "ANG_FORMAT": "DEG",
+                "EXTRA_PREC": "YES",
+                "TLIST": tlist,
+            }
+        )
+    )
+    if not (len(observer) == len(vectors) == len(site) == len(EPOCHS_JD_TT)):
+        raise SystemExit(f"expected {len(EPOCHS_JD_TT)} rows, got {len(observer)} / {len(vectors)} / {len(site)}")
 
     lines = [
-        "# asteroid-astrometry-oracle 1",
+        "# asteroid-astrometry-oracle 2",
         "# 99942 Apophis, JPL Horizons, fetched by pyref/fetch_horizons_astrometry.py",
         "# observer 500@399 (geocentre), quantity 1 = astrometric RA/Dec (ICRF, light-time only)",
         "# state 500@0 (SSB), ICRF, km and km/s, at the same TT instant",
-        "# jd_tt ra_deg dec_deg delta_au x y z vx vy vz",
+        "# then the same quantities from G96 (Mt. Lemmon Survey), Horizons' full Earth model",
+        "# jd_tt ra_deg dec_deg delta_au x y z vx vy vz g96_ra_deg g96_dec_deg g96_delta_au",
     ]
-    for jd, obs, vec in zip(EPOCHS_JD_TT, observer, vectors):
+    for jd, obs, vec, top in zip(EPOCHS_JD_TT, observer, vectors, site):
         if abs(float(vec[0]) - jd) > 1e-9:
             raise SystemExit(f"vector row {vec[0]} is not epoch {jd}")
         ra, dec, delta = obs[3], obs[4], obs[5]
         state = vec[2:8]
-        lines.append(" ".join([f"{jd:.6f}", ra, dec, delta, *state]))
+        lines.append(" ".join([f"{jd:.6f}", ra, dec, delta, *state, top[3], top[4], top[5]]))
 
     OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"wrote {OUT} ({len(EPOCHS_JD_TT)} epochs)")

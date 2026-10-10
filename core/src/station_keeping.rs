@@ -751,11 +751,11 @@ mod tests {
         assert!(steep > flat);
     }
 
-    /// The standing stack, at the sizes the offline calculation gave (the session's
-    /// `phasing.py` on the flown windows): a window two months after the go-ahead
-    /// only by the apogee turn, ~750 m/s; one ~half a year out by holding, a few
-    /// per cent; a decade of waiting at 600 km costs well under one per cent; a
-    /// steeper departure than the orbit is not offered.
+    /// The standing stack, at the sizes the offline calculation gave
+    /// (`tools/standing_plane_cost.py` on the flown windows): a window two months
+    /// after the go-ahead only by the apogee turn, ~750 m/s; one ~half a year out by
+    /// holding, a few per cent; a decade of waiting at 600 km costs well under one
+    /// per cent; a steeper departure than the orbit is not offered.
     #[test]
     fn a_standing_stack_pays_for_its_plane_and_its_years() {
         let s = SHIPPING_STANDING_STACK;

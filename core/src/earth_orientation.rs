@@ -55,18 +55,24 @@ pub struct Site {
     pub dxy_m: f64,
     /// Height above the equatorial plane, metres (north positive).
     pub dz_m: f64,
+    /// Geodetic latitude, radians — the direction of the local vertical, which
+    /// is what "altitude above the horizon" is measured from. It differs from
+    /// the geocentric latitude `atan(dz/dxy)` by up to 0.19°.
+    pub geodetic_lat_rad: f64,
 }
 
 /// Mt. Lemmon Survey (MPC code G96), part of the Catalina Sky Survey — one of
 /// the most productive near-Earth-asteroid discovery telescopes. Coordinates
 /// from JPL Horizons' site header for `G96@399` (fetched 2026-10-10):
-/// E-lon 249.2113°, Dxy 5390.20576 km, Dz 3403.44132 km, ITRF93.
+/// E-lon 249.2113°, Dxy 5390.20576 km, Dz 3403.44132 km, geodetic latitude
+/// 32.4427201°, ITRF93.
 pub const MT_LEMMON: Site = Site {
     code: "G96",
     name: "Mt. Lemmon Survey",
     east_lon_rad: 249.2113 * std::f64::consts::PI / 180.0,
     dxy_m: 5_390_205.76,
     dz_m: 3_403_441.32,
+    geodetic_lat_rad: 32.442_720_1 * std::f64::consts::PI / 180.0,
 };
 
 impl Site {
@@ -79,6 +85,13 @@ impl Site {
     /// The site relative to the geocentre, ICRF (GCRS) axes, metres, at `epoch`.
     pub fn gcrs_m(&self, epoch: Epoch) -> Vector3<f64> {
         itrs_to_gcrs(epoch) * self.itrs_m()
+    }
+
+    /// The local vertical (geodetic "up"), ICRF axes, unit length, at `epoch`.
+    pub fn zenith_gcrs(&self, epoch: Epoch) -> Vector3<f64> {
+        let (sl, cl) = self.east_lon_rad.sin_cos();
+        let (sp, cp) = self.geodetic_lat_rad.sin_cos();
+        itrs_to_gcrs(epoch) * Vector3::new(cp * cl, cp * sl, sp)
     }
 }
 

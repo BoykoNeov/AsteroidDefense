@@ -49,9 +49,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: kernels
-          key: kernels-${{ hashFiles('tools/fetch_kernels.py', 'pyref/fetch_horizons_neo.py') }}
-      - name: fetch kernels (DE440 + pck11 + Horizons NEO tables)
+          key: kernels-${{ hashFiles('tools/fetch_kernels.py', 'pyref/fetch_horizons_neo.py', 'tools/fetch_tycho2.py') }}
+      - name: fetch kernels (DE440 + pck11 + Horizons NEO tables + Tycho-2 stars)
         if: steps.kernels.outputs.cache-hit != 'true'
-        run: python tools/fetch_kernels.py --neo
+        run: python tools/fetch_kernels.py --neo && python tools/fetch_tycho2.py
       - name: core physics (kernels required)
         run: ASTEROID_REQUIRE_KERNELS=1 cargo test -p asteroid_core -p validation --release

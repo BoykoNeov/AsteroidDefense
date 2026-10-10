@@ -49,6 +49,7 @@ pub mod propagator;
 pub mod readiness;
 pub mod sbdb;
 pub mod scenario;
+pub mod star_catalog;
 pub mod state;
 pub mod station_keeping;
 pub mod uncertainty;

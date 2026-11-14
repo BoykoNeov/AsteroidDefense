@@ -95,7 +95,9 @@ output.
 - **egui (MVP):** `cargo run -p viewer --release` (needs the kernels; the
   Δv-vs-lead curve is cached in `curve.json`, built once by
   `cargo run -p viewer --release --bin curve`, ~8–11 min).
-- **Godot (Phase 2):** build the binding with `cargo build -p asteroid_gdext`
+- **Godot (Phase 2):** `Start.cmd` in the repo root does the whole thing on
+  Windows (tool and kernel checks, debug build of the binding, launch). By hand:
+  build the binding with `cargo build -p asteroid_gdext`
   (debug — that is the DLL the editor loads; the core is optimised in dev
   builds), open `godot/` in Godot 4.7. Keys are listed on the HUD; the b-plane
   view is `[3]`, `[H]` toggles the keyhole map on it, `[C]` snaps to closest

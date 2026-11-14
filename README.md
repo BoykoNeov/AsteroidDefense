@@ -19,6 +19,16 @@ professional planetary-defense work uses.
 
 ---
 
+## Run it
+
+On Windows, double-click **`Start.cmd`** in the repo root. It checks that Rust
+and Godot 4.7 are installed, offers to download the JPL kernels into `kernels\`
+if they are missing (needs Python), builds the physics binding, and opens the
+simulator. The first build takes a few minutes; later starts take seconds. If
+Godot is not on your `PATH` as `godot`, set `GODOT` to its full path first.
+
+---
+
 ## Status
 
 **The physics is complete through Tier 3.** The MVP (a validated Tier-1 encounter,

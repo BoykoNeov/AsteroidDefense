@@ -27,11 +27,20 @@ repository = "https://github.com/BoykoNeov/AsteroidDefense"
 # asteroid_core is named explicitly: it is a workspace member, and `"*"` covers
 # only non-workspace dependencies (anise, nalgebra, hifitime), so relying on the
 # glob alone would silently leave the hot crate at opt-level 0.
+#
+# Debug info is trimmed for the same optimized crates (disk, not speed): full
+# debug info on opt-level-3 code is gigabytes nobody steps through — on
+# 2026-11-22 the debug build had grown to 7 GB, ~2.6 GB of it third-party
+# libraries' debug data. Dependencies get none; the core keeps line tables so a
+# panic backtrace still names file:line. `asteroid_gdext` is not listed, so it
+# keeps the dev default (full debug info) and stays debuggable as intended.
 [profile.dev.package.asteroid_core]
 opt-level = 3
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 [workspace.dependencies]
 # Shared, version-pinned once here; member crates opt in via `.workspace = true`.

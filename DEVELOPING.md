@@ -54,6 +54,15 @@ binding ~14 min at `--test-threads=2` (34 tests, most solving real plans), the
 ~40× slower unoptimised (the workspace already sets `opt-level = 3` for the core
 in dev builds for the same reason).
 
+**Disk use.** Cargo never deletes old builds from `target/`: every toolchain
+update, dependency bump or profile change leaves the previous copies behind, so
+the folder only grows (it reached 9.7 GB by November 2026). `cargo clean` is
+always safe — it removes nothing but regenerable build output; the next build
+takes a few minutes, and Godot needs `cargo build -p asteroid_gdext` again
+before it can load the binding. Do it every few weeks or after a toolchain
+update. The workspace `Cargo.toml` already keeps debug info off the optimized
+crates, which is where most of the growth per build came from.
+
 CI (`.github/workflows/ci.yml`) runs fmt, clippy and the kernel-free suite on
 every push, then fetches and caches the kernels and runs the core physics with
 `ASTEROID_REQUIRE_KERNELS=1`.

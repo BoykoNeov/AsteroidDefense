@@ -60,8 +60,8 @@ the folder only grows (it reached 9.7 GB by November 2026). `cargo clean` is
 always safe — it removes nothing but regenerable build output; the next build
 takes a few minutes, and Godot needs `cargo build -p asteroid_gdext` again
 before it can load the binding. Do it every few weeks or after a toolchain
-update. The workspace `Cargo.toml` already keeps debug info off the optimized
-crates, which is where most of the growth per build came from.
+update. The workspace `Cargo.toml` also keeps debug info off the optimized
+crates in dev builds (a fresh `asteroid_gdext` debug build measured 1.3 GB).
 
 CI (`.github/workflows/ci.yml`) runs fmt, clippy and the kernel-free suite on
 every push, then fetches and caches the kernels and runs the core physics with

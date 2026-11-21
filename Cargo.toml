@@ -30,8 +30,8 @@ repository = "https://github.com/BoykoNeov/AsteroidDefense"
 #
 # Debug info is trimmed for the same optimized crates (disk, not speed): full
 # debug info on opt-level-3 code is gigabytes nobody steps through — on
-# 2026-11-22 the debug build had grown to 7 GB, ~2.6 GB of it third-party
-# libraries' debug data. Dependencies get none; the core keeps line tables so a
+# 2026-11-22 the debug build had grown to 7 GB, 2.57 GB of it compiled
+# libraries (.rlib, old copies included), much of that debug info. Dependencies get none; the core keeps line tables so a
 # panic backtrace still names file:line. `asteroid_gdext` is not listed, so it
 # keeps the dev default (full debug info) and stays debuggable as intended.
 [profile.dev.package.asteroid_core]
